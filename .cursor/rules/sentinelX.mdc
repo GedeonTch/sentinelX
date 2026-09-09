@@ -1,0 +1,52 @@
+---
+description: SentinelX V1 NetLab — mandatory architecture rules for Cursor
+globs: ["**/*.py"]
+alwaysApply: true
+---
+
+# SentinelX — Cursor Guardrails
+
+Full context: `.kiro/steering/sentinelx.md` (source of truth). This file is a
+condensed operational checklist — if anything here seems to conflict with the
+steering doc, the steering doc wins. When in doubt, STOP and ask, don't guess.
+
+## Rule #0
+Do not try to impress the project owner. Build exactly what the ticket
+specifies. If a task would require changing architecture, the data model,
+the pipeline, or V1 scope — STOP and ask for approval. Never mark a ticket
+DONE yourself; that's the developer's call.
+
+## Scope — V1 NetLab only
+- ZERO AI imports (openai, groq, anthropic, google.generativeai)
+- NO REST API, NO GUI, NO user accounts, NO auto-fix, NO distributed agents
+- If a task pulls in any of the above, it's out of scope — flag it, don't build it
+
+## Layer separation (never cross these)
+- Scanner modules → return `Finding` / `List[Finding]` only. Never touch SQLite,
+  never calculate risk_score, never `print()`.
+- `core/risk_scorer.py` → the ONLY file that calculates `risk_score`.
+- `core/database.py` → the ONLY file allowed to `import sqlite3`.
+- `cli.py` → Typer orchestration/display only. Zero business logic.
+
+## Mandatory code rules
+- Never `print()` directly — use Rich via `core/logger.py`
+- Never `import sqlite3` outside `core/database.py`
+- Never calculate `risk_score` outside `core/risk_scorer.py`
+- Every active network action requires explicit `(y/n)` confirmation
+- `restore.py` never deletes a file without verifying `session_id` ownership
+- All functions fully typed (params + return)
+- Scan functions always return `Finding` or `List[Finding]`
+- Every module ships a pedagogical README.md (French)
+
+## The Finding contract
+Defined once in `core/finding.py` — do not redefine or duplicate it.
+`risk_score` stays `None` until `risk_scorer.py` sets it.
+`explanation` stays `None` until a matching entry exists in
+`knowledge/vulnerabilities.json`.
+
+## Before marking anything done
+- No `print()` anywhere (grep-checkable)
+- No `sqlite3` import outside `core/database.py` (grep-checkable)
+- Unit test (nominal) + edge case + error case
+- README.md present
+- Confirm this doesn't silently expand scope beyond the ticket
