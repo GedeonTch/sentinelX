@@ -1,0 +1,29 @@
+# SentinelX NetLab V1 — Scoring Coefficients
+#
+# Formula: risk_score = min(100, base_severity × confidence_factor × exposure_factor)
+#
+# These values are the single source of truth for risk scoring.
+# Any change here must be validated against the 5 reference cases in tests/test_risk_scorer.py
+# before release (see Section H of the steering document).
+
+scoring:
+
+  # Base severity — used when cvss_score is None
+  # If cvss_score is known: base = cvss_score × 10
+  base_severity:
+    critical: 90
+    high: 70
+    medium: 45
+    low: 20
+    info: 5
+
+  # Confidence multipliers — map Confidence enum values to their factors
+  confidence_factor:
+    confirmed: 1.00   # Confidence.CONFIRMED = 1.00
+    probable:  0.85   # Confidence.PROBABLE  = 0.85
+    possible:  0.60   # Confidence.POSSIBLE  = 0.60
+
+  # Exposure multipliers
+  exposure_factor:
+    internal: 1.00
+    external: 1.15
