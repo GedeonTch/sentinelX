@@ -363,20 +363,20 @@ netlab --version
 | #003 | `core/dependencies.py` + `netlab doctor` | Environment check before first real scan |
 | #004 | `core/risk_scorer.py` | ASSESS — tested on 5+ real cases before use |
 | #005 | `cli.py` | Typer structure — connects all modules |
-| #006 | `01_recon/device_fingerprint.py` | DISCOVER — first pipeline step |
-| #007 | `01_recon/dns_enum.py` | DISCOVER — WHOIS + DNS records |
-| #008 | `01_recon/passive_recon.py` | DISCOVER — no active traffic |
-| #009 | `02_detect/tcp_scan.py` + `udp_scan.py` | DETECT — core value |
-| #010 | `02_detect/service_detection.py` | DETECT — versions for CVE matching |
-| #011 | `02_detect/smb_enum.py` | DETECT — Windows shares (use Grok in Cursor) |
-| #012 | `02_detect/misconfig_detection.py` | DETECT — misconfigured services |
-| #013 | `02_detect/default_creds.py` | DETECT — default credentials |
+| #006 | `recon/device_fingerprint.py` | DISCOVER — first pipeline step |
+| #007 | `recon/dns_enum.py` | DISCOVER — WHOIS + DNS records |
+| #008 | `recon/passive_recon.py` | DISCOVER — no active traffic |
+| #009 | `detect/tcp_scan.py` + `udp_scan.py` | DETECT — core value |
+| #010 | `detect/service_detection.py` | DETECT — versions for CVE matching |
+| #011 | `detect/smb_enum.py` | DETECT — Windows shares (use Grok in Cursor) |
+| #012 | `detect/misconfig_detection.py` | DETECT — misconfigured services |
+| #013 | `detect/default_creds.py` | DETECT — default credentials |
 | #014 | `knowledge/ports.json` | Fingerprinting — identify service/version (Cursor) |
 | #015 | `knowledge/vulnerabilities.json` | Explanation rules — {what, attack, defense} per detection rule |
-| #016 | `04_sentinel/` (5 files) | Sentinel Core — baseline + monitoring |
+| #016 | `sentinel/` (5 files) | Sentinel Core — baseline + monitoring |
 | #017 | `reports/generator.py` | PDF/HTML/JSON export |
-| #018 | `06_cleanup/artifact_detector.py` | Lab hygiene |
-| #019 | `06_cleanup/restore.py` | Unit tests MANDATORY before integration |
+| #018 | `cleanup/artifact_detector.py` | Lab hygiene |
+| #019 | `cleanup/restore.py` | Unit tests MANDATORY before integration |
 | #020 | V1 unit tests (complete) | V1 completion criterion |
 
 > **Responsibility split for #014 vs #015**:
@@ -394,11 +394,11 @@ netlab --version
 | `core/risk_scorer.py` | Most powerful | Only file that calculates risk_score |
 | `core/dependencies.py` | Fast | Simple checks — no business logic |
 | `cli.py` | Most powerful | Typer only — zero business logic |
-| `01_recon/*.py` | Most powerful | Return `List[Finding]` — never `print()` |
+| `recon/*.py` | Most powerful | Return `List[Finding]` — never `print()` |
 | `smb_enum.py` | Grok in Cursor | Test on Windows VM mandatory |
 | `default_creds.py` | Fast | Dictionary lookup — y/n confirmation mandatory |
-| `04_sentinel/*.py` | Most powerful | Never modifies system configuration |
-| `restore.py` | Most powerful | Unit tests MANDATORY — waits for "yes" in full |
+| `sentinel/*.py` | Most powerful | Never modifies system configuration |
+| `cleanup/restore.py` | Most powerful | Unit tests MANDATORY — waits for "yes" in full |
 | `reports/generator.py` | Most powerful | Always includes scoring formula |
 | MITM Lab (V2) | Grok in Cursor | Wireshark capture mandatory for validation |
 
