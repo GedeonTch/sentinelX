@@ -1,0 +1,115 @@
+{
+  "_comment": "Local CVE knowledge base for SentinelX NetLab V1. Each entry maps a service+version pattern to known CVEs. This file is the source of truth for CVE lookup — no internet required. Extended by ticket #014 (ports.json) and #015 (vulnerabilities.json).",
+  "entries": [
+    {
+      "service": "ssh",
+      "product": "OpenSSH",
+      "version_lte": "7.4",
+      "version_gte": "5.0",
+      "cve_refs": ["CVE-2016-6515", "CVE-2016-10009", "CVE-2016-10010"],
+      "cvss_score": 7.8,
+      "severity": "high",
+      "description": "OpenSSH <= 7.4 multiple vulnerabilities including privilege escalation and memory corruption"
+    },
+    {
+      "service": "ssh",
+      "product": "OpenSSH",
+      "version_lte": "6.6",
+      "version_gte": "1.0",
+      "cve_refs": ["CVE-2014-2532", "CVE-2014-1692"],
+      "cvss_score": 6.4,
+      "severity": "medium",
+      "description": "OpenSSH <= 6.6 AcceptEnv wildcard bypass and hash collision"
+    },
+    {
+      "service": "microsoft-ds",
+      "product": "Microsoft Windows",
+      "version_lte": null,
+      "version_gte": null,
+      "cve_refs": ["CVE-2017-0144", "CVE-2017-0145"],
+      "cvss_score": 9.3,
+      "severity": "critical",
+      "description": "SMBv1 EternalBlue — remote code execution via crafted SMB request (WannaCry vector)"
+    },
+    {
+      "service": "http",
+      "product": "Apache httpd",
+      "version_lte": "2.4.49",
+      "version_gte": "2.4.49",
+      "cve_refs": ["CVE-2021-41773"],
+      "cvss_score": 9.8,
+      "severity": "critical",
+      "description": "Apache 2.4.49 path traversal and RCE — allows reading files outside document root"
+    },
+    {
+      "service": "http",
+      "product": "Apache httpd",
+      "version_lte": "2.4.51",
+      "version_gte": "2.4.50",
+      "cve_refs": ["CVE-2021-42013"],
+      "cvss_score": 9.8,
+      "severity": "critical",
+      "description": "Apache 2.4.50 incomplete fix for CVE-2021-41773 — path traversal still exploitable"
+    },
+    {
+      "service": "http",
+      "product": "nginx",
+      "version_lte": "1.14.0",
+      "version_gte": "1.0.0",
+      "cve_refs": ["CVE-2018-16843", "CVE-2018-16844"],
+      "cvss_score": 7.5,
+      "severity": "high",
+      "description": "nginx <= 1.14.0 HTTP/2 implementation memory exhaustion and CPU spike"
+    },
+    {
+      "service": "ftp",
+      "product": "vsftpd",
+      "version_lte": "2.3.4",
+      "version_gte": "2.3.4",
+      "cve_refs": ["CVE-2011-2523"],
+      "cvss_score": 10.0,
+      "severity": "critical",
+      "description": "vsftpd 2.3.4 backdoor — malicious version distributed with a shell backdoor on port 6200"
+    },
+    {
+      "service": "domain",
+      "product": "dnsmasq",
+      "version_lte": "2.78",
+      "version_gte": "2.0",
+      "cve_refs": ["CVE-2017-14491", "CVE-2017-14492"],
+      "cvss_score": 9.8,
+      "severity": "critical",
+      "description": "dnsmasq <= 2.78 heap overflow in DNS response handling — remote code execution"
+    },
+    {
+      "service": "ms-wbt-server",
+      "product": "Microsoft Windows",
+      "version_lte": null,
+      "version_gte": null,
+      "cve_refs": ["CVE-2019-0708"],
+      "cvss_score": 9.8,
+      "severity": "critical",
+      "description": "BlueKeep — RDP pre-authentication RCE in older Windows versions (XP, 7, Server 2008)"
+    },
+    {
+      "service": "mysql",
+      "product": "MySQL",
+      "version_lte": "5.6.35",
+      "version_gte": "5.0.0",
+      "cve_refs": ["CVE-2016-6662", "CVE-2016-6664"],
+      "cvss_score": 9.0,
+      "severity": "critical",
+      "description": "MySQL <= 5.6.35 remote code execution via malicious configuration file"
+    },
+    {
+      "service": "snmp",
+      "product": "",
+      "version_lte": null,
+      "version_gte": null,
+      "cve_refs": [],
+      "cvss_score": 5.0,
+      "severity": "medium",
+      "description": "SNMP service exposed — community string may be default (public/private). Check #013 default_creds."
+    }
+  ]
+}
