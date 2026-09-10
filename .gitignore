@@ -4,5 +4,7 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
+.venv/
+venv/
 *_README.md
 core/README.md
