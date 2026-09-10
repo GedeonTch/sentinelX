@@ -41,6 +41,7 @@ from core.finding import (
     Exposure,
 )
 from core.logger import display
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 
 # ---------------------------------------------------------------------------
@@ -73,8 +74,15 @@ def fingerprint(target: str, session_id: str) -> List[Finding]:
 
     display(f"[cyan]Starting host discovery on {target}...[/cyan]")
 
-    # Pass 1 — find active hosts
-    ping_xml = _run_nmap_ping(target)
+    # Pass 1 — ping scan avec spinner
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]Pass 1/2 — Ping scan sur {task.description}...[/cyan]"),
+        transient=True,
+    ) as progress:
+        progress.add_task(target, total=None)
+        ping_xml = _run_nmap_ping(target)
+
     if not ping_xml:
         display("[yellow]No response from nmap ping scan.[/yellow]")
         return []
@@ -84,19 +92,32 @@ def fingerprint(target: str, session_id: str) -> List[Finding]:
         display(f"[yellow]No active hosts found on {target}.[/yellow]")
         return []
 
-    display(f"[green]{len(active_ips)} active host(s) found.[/green]")
+    display(f"[green]✓ Pass 1 complete — {len(active_ips)} active host(s) found.[/green]")
 
-    # Pass 2 — OS detection per host
+    # Pass 2 — OS detection avec barre de progression
     findings: List[Finding] = []
-    for ip in active_ips:
-        os_xml = _run_nmap_os(ip)
-        host_findings = _parse_host(
-            ip=ip,
-            ping_xml=ping_xml,
-            os_xml=os_xml,
-            session_id=session_id,
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}[/cyan]"),
+        BarColumn(),
+        TaskProgressColumn(),
+        transient=False,
+    ) as progress:
+        task = progress.add_task(
+            f"Pass 2/2 — OS detection ({len(active_ips)} hosts)",
+            total=len(active_ips),
         )
-        findings.extend(host_findings)
+        for ip in active_ips:
+            progress.update(task, description=f"Pass 2/2 — OS detection → {ip}")
+            os_xml = _run_nmap_os(ip)
+            host_findings = _parse_host(
+                ip=ip,
+                ping_xml=ping_xml,
+                os_xml=os_xml,
+                session_id=session_id,
+            )
+            findings.extend(host_findings)
+            progress.advance(task)
 
     display(f"[green]Device fingerprint complete — {len(findings)} finding(s).[/green]")
     return findings
@@ -136,14 +157,15 @@ def _run_nmap_os(ip: str) -> Optional[str]:
         str: Raw XML string from nmap, or None on error.
     """
     cmd = ["nmap", "-O", "--osscan-guess", "-oX", "-", ip]
-    return _run_nmap(cmd)
+    return _run_nmap(cmd, timeout=60)
 
 
-def _run_nmap(cmd: List[str]) -> Optional[str]:
+def _run_nmap(cmd: List[str], timeout: int = 300) -> Optional[str]:
     """Execute an nmap command and return its stdout as a string.
 
     Args:
-        cmd: Full command as a list of strings.
+        cmd:     Full command as a list of strings.
+        timeout: Subprocess timeout in seconds (default 300).
 
     Returns:
         str: stdout of the nmap process, or None if the process failed.
@@ -153,7 +175,7 @@ def _run_nmap(cmd: List[str]) -> Optional[str]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
         if result.returncode != 0:
             display(
@@ -165,7 +187,7 @@ def _run_nmap(cmd: List[str]) -> Optional[str]:
         display("[red]nmap not found. Run 'netlab doctor' to check dependencies.[/red]")
         return None
     except subprocess.TimeoutExpired:
-        display("[red]nmap timed out after 300s.[/red]")
+        display(f"[yellow]nmap timed out after {timeout}s — skipping.[/yellow]")
         return None
     except Exception as exc:
         display(f"[red]nmap error: {exc}[/red]")
