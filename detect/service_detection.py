@@ -100,9 +100,12 @@ def enrich_findings(findings: List[Finding]) -> List[Finding]:
     matched = 0
 
     for finding in findings:
+        # Pass both service_version and target_service as product context
+        # so entries with product="" still match service-level entries (e.g. SMB, RDP)
+        product_context = finding.service_version or finding.target_service
         cve_entry = _lookup_cve(
             service=finding.target_service,
-            product=finding.target_service if not finding.service_version else finding.service_version,
+            product=product_context,
             version=_extract_version(finding.service_version),
         )
 

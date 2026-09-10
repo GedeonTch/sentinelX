@@ -4,8 +4,8 @@
     {
       "service": "ssh",
       "product": "OpenSSH",
-      "version_lte": "7.4",
       "version_gte": "5.0",
+      "version_lte": "7.4",
       "cve_refs": ["CVE-2016-6515", "CVE-2016-10009", "CVE-2016-10010"],
       "cvss_score": 7.8,
       "severity": "high",
@@ -14,8 +14,8 @@
     {
       "service": "ssh",
       "product": "OpenSSH",
-      "version_lte": "6.6",
       "version_gte": "1.0",
+      "version_lte": "6.6",
       "cve_refs": ["CVE-2014-2532", "CVE-2014-1692"],
       "cvss_score": 6.4,
       "severity": "medium",
@@ -23,19 +23,19 @@
     },
     {
       "service": "microsoft-ds",
-      "product": "Microsoft Windows",
-      "version_lte": null,
+      "product": "",
       "version_gte": null,
+      "version_lte": null,
       "cve_refs": ["CVE-2017-0144", "CVE-2017-0145"],
       "cvss_score": 9.3,
       "severity": "critical",
-      "description": "SMBv1 EternalBlue — remote code execution via crafted SMB request (WannaCry vector)"
+      "description": "SMBv1 EternalBlue — remote code execution via crafted SMB request on Microsoft Windows (WannaCry vector)"
     },
     {
       "service": "http",
       "product": "Apache httpd",
-      "version_lte": "2.4.49",
       "version_gte": "2.4.49",
+      "version_lte": "2.4.49",
       "cve_refs": ["CVE-2021-41773"],
       "cvss_score": 9.8,
       "severity": "critical",
@@ -44,8 +44,8 @@
     {
       "service": "http",
       "product": "Apache httpd",
-      "version_lte": "2.4.51",
       "version_gte": "2.4.50",
+      "version_lte": "2.4.51",
       "cve_refs": ["CVE-2021-42013"],
       "cvss_score": 9.8,
       "severity": "critical",
@@ -54,8 +54,8 @@
     {
       "service": "http",
       "product": "nginx",
-      "version_lte": "1.14.0",
       "version_gte": "1.0.0",
+      "version_lte": "1.14.0",
       "cve_refs": ["CVE-2018-16843", "CVE-2018-16844"],
       "cvss_score": 7.5,
       "severity": "high",
@@ -64,8 +64,8 @@
     {
       "service": "ftp",
       "product": "vsftpd",
-      "version_lte": "2.3.4",
       "version_gte": "2.3.4",
+      "version_lte": "2.3.4",
       "cve_refs": ["CVE-2011-2523"],
       "cvss_score": 10.0,
       "severity": "critical",
@@ -74,8 +74,8 @@
     {
       "service": "domain",
       "product": "dnsmasq",
-      "version_lte": "2.78",
       "version_gte": "2.0",
+      "version_lte": "2.78",
       "cve_refs": ["CVE-2017-14491", "CVE-2017-14492"],
       "cvss_score": 9.8,
       "severity": "critical",
@@ -83,19 +83,19 @@
     },
     {
       "service": "ms-wbt-server",
-      "product": "Microsoft Windows",
-      "version_lte": null,
+      "product": "",
       "version_gte": null,
+      "version_lte": null,
       "cve_refs": ["CVE-2019-0708"],
       "cvss_score": 9.8,
       "severity": "critical",
-      "description": "BlueKeep — RDP pre-authentication RCE in older Windows versions (XP, 7, Server 2008)"
+      "description": "BlueKeep — RDP pre-authentication RCE in older Windows versions (XP, 7, Server 2008). Verify Windows version before reporting."
     },
     {
       "service": "mysql",
       "product": "MySQL",
-      "version_lte": "5.6.35",
       "version_gte": "5.0.0",
+      "version_lte": "5.6.35",
       "cve_refs": ["CVE-2016-6662", "CVE-2016-6664"],
       "cvss_score": 9.0,
       "severity": "critical",
@@ -104,8 +104,8 @@
     {
       "service": "snmp",
       "product": "",
-      "version_lte": null,
       "version_gte": null,
+      "version_lte": null,
       "cve_refs": [],
       "cvss_score": 5.0,
       "severity": "medium",
