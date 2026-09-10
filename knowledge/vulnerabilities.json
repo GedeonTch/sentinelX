@@ -1,0 +1,97 @@
+{
+  "_comment": "Local explanation knowledge base for SentinelX NetLab V1. Each entry maps a detection rule_id to a pedagogical triplet {what, attack, defense}. Indexed by rule_id — the same value used in Finding.module or Finding.target_service. No orphan Finding without a matching entry here.",
+  "_format": "rule_id must match exactly the value used in module= or target_service= on the Finding. One entry per detection rule. Extended as new modules are added.",
+
+  "rules": {
+
+    "device_fingerprint": {
+      "what": "Un hôte actif a été détecté sur le réseau. La découverte identifie les machines présentes, leur adresse MAC (permettant l'identification du fabricant) et une estimation de leur système d'exploitation via l'analyse du comportement TCP/IP.",
+      "attack": "La cartographie réseau est la première étape de tout audit ou attaque. Un attaquant utilise ces informations pour identifier les cibles prioritaires, déduire les services probables à partir du type de machine, et planifier les phases suivantes (scan de ports, exploitation).",
+      "defense": "Segmenter le réseau en VLANs pour limiter la visibilité entre zones. Utiliser des IDS/IPS réseau pour détecter les scans nmap. Désactiver les réponses ICMP inutiles sur les équipements sensibles."
+    },
+
+    "dns_enum": {
+      "what": "Des enregistrements DNS ont été collectés pour cette cible : résolution inverse (PTR), enregistrements A/MX/NS/TXT, et données WHOIS. Ces informations révèlent la structure de l'infrastructure réseau sans envoyer de trafic vers la cible elle-même.",
+      "attack": "L'énumération DNS passive permet à un attaquant de cartographier une infrastructure sans être détecté. Les enregistrements MX révèlent le serveur mail, les NS révèlent l'hébergeur DNS, les TXT peuvent contenir des informations SPF/DKIM qui révèlent des tiers de confiance.",
+      "defense": "Limiter les enregistrements DNS publics au strict nécessaire. Désactiver le transfert de zone (AXFR) non autorisé. Surveiller les requêtes DNS anormalement fréquentes sur le réseau interne."
+    },
+
+    "passive_recon": {
+      "what": "Des informations sur cet hôte ont été collectées passivement depuis le cache ARP du système, le fichier /etc/hosts, ou les annonces mDNS — sans envoyer aucun paquet vers la cible.",
+      "attack": "Un attaquant sur le même réseau peut lire le cache ARP pour identifier toutes les machines actives récemment contactées. mDNS permet de découvrir des services (.local) sans requête active. Ces techniques ne déclenchent aucune alerte réseau.",
+      "defense": "Utiliser des VLANs pour isoler les segments réseau. Désactiver mDNS sur les machines sensibles (désactiver avahi-daemon). Surveiller les tables ARP pour détecter des entrées inattendues (ARP spoofing)."
+    },
+
+    "tcp_scan": {
+      "what": "Un port TCP ouvert a été détecté sur cet hôte. Un port ouvert signifie qu'un service est en écoute et prêt à accepter des connexions réseau. La version du service a été identifiée via l'analyse du banner de connexion.",
+      "attack": "Chaque port ouvert est une surface d'attaque potentielle. Un attaquant scanne les ports pour identifier les services disponibles, puis cherche des CVE connues pour la version détectée, des credentials par défaut, ou des misconfigurations exploitables.",
+      "defense": "Fermer tous les ports non nécessaires au niveau firewall et au niveau OS. Appliquer le principe du moindre privilège réseau : un service ne doit être accessible qu'aux clients légitimes. Mettre à jour régulièrement les services exposés."
+    },
+
+    "udp_scan": {
+      "what": "Un port UDP ouvert a été confirmé sur cet hôte. Contrairement à TCP, UDP n'a pas de handshake — un port UDP 'open' signifie que le service a répondu activement à une sonde, ce qui est rare et significatif.",
+      "attack": "Les services UDP (DNS, SNMP, TFTP, NTP) sont souvent oubliés dans les audits. Ils peuvent permettre des attaques d'amplification DDoS (NTP, DNS), de l'exfiltration de données, ou l'accès à des services d'administration non protégés.",
+      "defense": "Filtrer le trafic UDP inutile au niveau firewall. Désactiver les services UDP non utilisés (TFTP, rpcbind). Mettre en place du rate-limiting sur les services UDP exposés pour éviter l'amplification."
+    },
+
+    "smb_enum": {
+      "what": "Un partage SMB a été découvert sur cet hôte Windows. SMB (Server Message Block) est le protocole de partage de fichiers et d'imprimantes Windows. Les partages administratifs (ADMIN$, C$) sont créés automatiquement par Windows et donnent accès au disque système.",
+      "attack": "L'accès aux partages administratifs (ADMIN$, C$) permet à un attaquant authentifié de déposer et exécuter des fichiers à distance — c'est le mécanisme utilisé par PsExec, WMI exec, et de nombreux outils de mouvement latéral. Un partage public mal configuré peut exposer des données sensibles sans authentification.",
+      "defense": "Désactiver les partages administratifs si non nécessaires (reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters /v AutoShareWks /t REG_DWORD /d 0). Activer le pare-feu Windows et restreindre SMB aux IPs de confiance. Activer SMB signing pour prévenir les attaques relay."
+    },
+
+    "telnet_exposed": {
+      "what": "Le service Telnet est actif sur le port 23. Telnet est un protocole de connexion à distance créé en 1969, antérieur à toute notion de sécurité réseau. Il transmet l'intégralité des communications — login, mot de passe, commandes, réponses — en texte clair, sans aucun chiffrement.",
+      "attack": "Un attaquant sur le même réseau (ou en position de man-in-the-middle) peut capturer une session Telnet complète avec un simple outil d'écoute réseau (tcpdump, Wireshark). Les credentials apparaissent en clair dans la capture. Aucune technique d'exploitation n'est nécessaire — la lecture passive suffit.",
+      "defense": "Désactiver Telnet immédiatement : 'systemctl disable telnet.socket && systemctl stop telnet.socket'. Déployer SSH à la place. Si des équipements legacy imposent Telnet, les isoler dans un VLAN dédié avec accès restreint par IP source."
+    },
+
+    "ftp_plaintext": {
+      "what": "Le service FTP est actif sur le port 21. FTP (File Transfer Protocol) transmet les identifiants de connexion et le contenu des fichiers transférés en texte clair sur le réseau. Tout équipement sur le chemin réseau peut intercepter ces données.",
+      "attack": "Un attaquant en écoute passive capture les commandes USER et PASS du protocole FTP — les credentials apparaissent en clair. Les fichiers transférés sont également lisibles. Sur un réseau WiFi, cette attaque ne nécessite même pas d'être sur le même segment filaire.",
+      "defense": "Remplacer FTP par SFTP (SSH File Transfer Protocol, port 22) ou FTPS (FTP over TLS/SSL, port 990). Si FTP est imposé par une contrainte legacy, restreindre les accès par IP source et activer uniquement FTPS. Ne jamais exposer FTP sur internet."
+    },
+
+    "http_no_https": {
+      "what": "Un service web HTTP tourne sur le port 80 sans que le port HTTPS (443) ne soit ouvert. Toutes les communications entre le client et ce serveur circulent en clair sur le réseau : formulaires de connexion, cookies de session, données personnelles.",
+      "attack": "Un attaquant en position man-in-the-middle peut lire et modifier le trafic HTTP à la volée. Injection de contenu malveillant dans les pages servies, vol de cookies de session, capture de credentials soumis via formulaire. Sur un réseau interne, une attaque ARP poisoning suffit pour se placer en man-in-the-middle.",
+      "defense": "Déployer un certificat TLS (Let's Encrypt est gratuit). Configurer le serveur pour rediriger automatiquement HTTP vers HTTPS (301 Permanent Redirect). Ajouter l'en-tête HSTS (Strict-Transport-Security) pour forcer HTTPS même si l'utilisateur tape http://."
+    },
+
+    "snmp_exposed": {
+      "what": "Le service SNMP (Simple Network Management Protocol) est exposé sur le port 161/UDP. SNMP permet de monitorer et configurer des équipements réseau à distance. Les versions SNMPv1 et v2c utilisent des 'community strings' comme mécanisme d'authentification — transmis en clair sur le réseau.",
+      "attack": "Un attaquant qui connaît la community string 'public' (lecture) peut extraire la configuration complète d'un équipement : interfaces réseau, table de routage, processus, utilisateurs connectés. Avec la community string 'private' (écriture), il peut reconfigurer un routeur ou un switch. Ces strings sont souvent laissées aux valeurs par défaut.",
+      "defense": "Passer à SNMPv3 avec authentification (SHA) et chiffrement (AES). Si SNMPv1/v2c est imposé, changer les community strings par défaut et restreindre l'accès SNMP par ACL aux seuls serveurs de monitoring. Désactiver SNMP complètement si non utilisé."
+    },
+
+    "smb_signing_missing": {
+      "what": "Le port SMB 445 est ouvert mais le statut de la signature SMB n'a pas pu être confirmé par le scan de port seul. La signature SMB (SMB Signing) est un mécanisme qui authentifie cryptographiquement chaque message SMB échangé, empêchant leur modification ou leur rejeu.",
+      "attack": "Sans signature SMB, un attaquant peut réaliser une attaque NTLM relay : il intercepte une authentification NTLM légitime sur le réseau (déclenchée par exemple par un accès à un partage) et la rejoue immédiatement vers un autre service SMB. L'attaquant obtient ainsi un accès authentifié sans connaître le mot de passe. C'est le mécanisme de Responder + ntlmrelayx.",
+      "defense": "Activer SMB signing sur tous les systèmes Windows : Group Policy > Microsoft network server: Digitally sign communications (always) = Enabled. Sur les contrôleurs de domaine, SMB signing est activé par défaut. Vérifier avec : 'nmap --script smb-security-mode -p 445 <ip>'."
+    },
+
+    "ssh_weak_version": {
+      "what": "La version OpenSSH détectée est antérieure à 7.0. Ces versions supportent des algorithmes cryptographiques dépréciés : DES, 3DES, RC4, MD5 HMAC, diffie-hellman-group1-sha1. Ces algorithmes présentent des faiblesses connues qui peuvent compromettre la confidentialité de la session.",
+      "attack": "Un attaquant qui capture le trafic SSH peut tenter des attaques sur les algorithmes faibles négociés lors du handshake. DH group1 (512-bit) est vulnérable à Logjam. RC4 est cassé. En forçant la négociation vers ces algorithmes (downgrade attack), la session peut être compromise.",
+      "defense": "Mettre à jour OpenSSH vers la version 8.x ou supérieure. Dans /etc/ssh/sshd_config, expliciter les algorithmes acceptés : 'Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com' et 'MACs hmac-sha2-512-etm@openssh.com'. Redémarrer sshd après modification."
+    },
+
+    "rdp_exposed": {
+      "what": "Le service RDP (Remote Desktop Protocol) est exposé sur le port 3389. RDP permet l'accès au bureau Windows à distance. Exposé directement sur le réseau, il représente une cible privilégiée pour les attaquants en raison de sa prévalence et de l'historique de vulnérabilités critiques qui lui sont associées.",
+      "attack": "RDP exposé est l'un des vecteurs d'intrusion les plus utilisés dans les ransomwares. Les attaques courantes : brute-force de credentials (outils comme Hydra, RDPcrack), exploitation de CVE-2019-0708 BlueKeep (RCE pré-auth sur Windows 7/Server 2008), credential stuffing depuis des bases de données de mots de passe leakés.",
+      "defense": "Ne jamais exposer RDP directement sur internet ou sur un réseau non sécurisé. Mettre RDP derrière un VPN. Restreindre l'accès par IP source via firewall. Activer l'authentification au niveau réseau (NLA). Changer le port par défaut (sécurité par l'obscurité, complément non remplacement). Activer l'authentification multi-facteurs si possible."
+    },
+
+    "smb_v1_active": {
+      "what": "Le protocole SMBv1 (Server Message Block version 1) est actif sur cet hôte. SMBv1 est un protocole obsolète datant de 1983, retiré par Microsoft en 2014. Il présente des failles de conception fondamentales qui ne peuvent pas être corrigées par des patches.",
+      "attack": "EternalBlue (CVE-2017-0144) exploite une faille dans SMBv1 pour réaliser une exécution de code à distance sans authentification. C'est le vecteur utilisé par WannaCry (2017) et NotPetya pour se propager sur des millions de machines en quelques heures. La faille est publiquement documentée et l'exploit est disponible dans Metasploit.",
+      "defense": "Désactiver SMBv1 immédiatement via PowerShell : 'Set-SmbServerConfiguration -EnableSMB1Protocol $false'. Vérifier : 'Get-SmbServerConfiguration | Select EnableSMB1Protocol'. Appliquer les patches MS17-010. Bloquer le port 445 sur le périmètre réseau."
+    },
+
+    "default_creds_found": {
+      "what": "Des credentials par défaut ont été acceptés par ce service. Les équipements et logiciels sont souvent livrés avec des comptes administrateurs préconfigurés (admin/admin, admin/password, root/root...) que les administrateurs oublient de changer lors de l'installation.",
+      "attack": "Un attaquant qui réussit à s'authentifier avec des credentials par défaut obtient un accès complet au service. Pour les équipements réseau (routeurs, switches), cela signifie le contrôle total du réseau. Pour les services applicatifs (bases de données, interfaces web), cela expose toutes les données.",
+      "defense": "Changer tous les mots de passe par défaut immédiatement lors de l'installation. Utiliser un gestionnaire de mots de passe ou un coffre-fort d'entreprise (Vault, CyberArk). Auditer régulièrement les comptes et désactiver ceux inutilisés. Activer l'authentification multi-facteurs partout où c'est possible."
+    }
+  }
+}
