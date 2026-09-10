@@ -153,7 +153,7 @@ def _run_nmap(cmd: List[str]) -> Optional[str]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
         if result.returncode != 0:
             display(
@@ -165,7 +165,7 @@ def _run_nmap(cmd: List[str]) -> Optional[str]:
         display("[red]nmap not found. Run 'netlab doctor' to check dependencies.[/red]")
         return None
     except subprocess.TimeoutExpired:
-        display("[red]nmap timed out after 120s.[/red]")
+        display("[red]nmap timed out after 300s.[/red]")
         return None
     except Exception as exc:
         display(f"[red]nmap error: {exc}[/red]")
