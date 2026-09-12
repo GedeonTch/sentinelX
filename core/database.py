@@ -158,14 +158,15 @@ def init_db(session_id: str) -> None:
         # ports and services stored as JSON arrays/objects
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS baseline (
-                id          TEXT PRIMARY KEY,
-                asset_id    TEXT NOT NULL,
-                ports       TEXT NOT NULL DEFAULT '[]',
-                services    TEXT NOT NULL DEFAULT '{}',
-                mac         TEXT,
-                gateway     TEXT,
-                dns         TEXT,
-                last_scan   TEXT NOT NULL,
+                id              TEXT PRIMARY KEY,
+                asset_id        TEXT NOT NULL,
+                target_network  TEXT NOT NULL DEFAULT '',
+                ports           TEXT NOT NULL DEFAULT '[]',
+                services        TEXT NOT NULL DEFAULT '{}',
+                mac             TEXT,
+                gateway         TEXT,
+                dns             TEXT,
+                last_scan       TEXT NOT NULL,
                 FOREIGN KEY (asset_id) REFERENCES assets(id)
             )
         """)

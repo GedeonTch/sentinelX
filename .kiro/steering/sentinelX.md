@@ -274,7 +274,7 @@ Only `core/database.py` is authorized to import `sqlite3`.
 | `assets` | id, ip, mac, hostname, os, first_seen, active | Network device inventory |
 | `sessions` | id, start_time, end_time, target, profile, status, notes | One session = one full audit |
 | `findings` | id, session_id, asset_id, module, category, severity, cvss, confidence, exposure, score, status, evidence, explanation, remediation_cmd, cve_refs | Core of the system |
-| `baseline` | id, asset_id, ports, services, mac, gateway, dns, last_scan | Sentinel normal state |
+| `baseline` | id, asset_id, target_network, ports, services, mac, gateway, dns, last_scan | Sentinel normal state — target_network guarantees no cross-contamination between networks |
 | `events` | id, timestamp, type, asset_id, details, resolved | Sentinel detected events |
 
 ---
