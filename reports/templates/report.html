@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SentinelX — Rapport d'audit {{ session.id }}</title>
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 15px; }
+    body {
+      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      background: #0d0d0d;
+      color: #e0e0e0;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    a { color: #e63939; text-decoration: none; }
+
+    /* ── Layout ── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px 60px; }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #111 0%, #1a1a1a 60%, #1e0000 100%);
+      border-bottom: 2px solid #e63939;
+      padding: 20px 28px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    header .logo-block {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header .logo-block img {
+      height: 44px;
+      width: auto;
+      filter: drop-shadow(0 0 6px rgba(230,57,57,0.5));
+    }
+    header .brand {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: #f0f0f0;
+      text-transform: uppercase;
+    }
+    header .brand span { color: #e63939; }
+    header .report-meta {
+      text-align: right;
+      font-size: 0.78rem;
+      color: #888;
+      line-height: 1.5;
+    }
+    header .report-meta strong { color: #ccc; }
+
+    /* ── Section titles ── */
+    .section-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #e63939;
+      border-bottom: 1px solid #2a2a2a;
+      padding-bottom: 8px;
+      margin: 40px 0 20px;
+    }
+
+    /* ── Summary cards ── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 14px;
+      margin-bottom: 32px;
+    }
+    .card {
+      background: #161616;
+      border: 1px solid #252525;
+      border-radius: 8px;
+      padding: 18px 16px;
+      text-align: center;
+      transition: border-color 0.2s;
+    }
+    .card:hover { border-color: #e63939; }
+    .card .card-value {
+      font-size: 2rem;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+    .card .card-label {
+      font-size: 0.68rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #666;
+      margin-top: 4px;
+    }
+    .card.critical .card-value { color: #ff3b3b; }
+    .card.high     .card-value { color: #ff6b35; }
+    .card.medium   .card-value { color: #f5c518; }
+    .card.low      .card-value { color: #4fc3f7; }
+    .card.info     .card-value { color: #78909c; }
+    .card.score    .card-value { color: #e63939; font-size: 2.4rem; }
+
+    /* ── Global score bar ── */
+    .score-bar-wrap { margin-bottom: 32px; }
+    .score-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: #777;
+      margin-bottom: 6px;
+    }
+    .score-bar-track {
+      background: #1e1e1e;
+      border-radius: 4px;
+      height: 10px;
+      overflow: hidden;
+    }
+    .score-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.6s ease;
+    }
+
+    /* ── Findings table ── */
+    .findings-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
+    .findings-table thead tr {
+      background: #1a1a1a;
+      border-bottom: 2px solid #e63939;
+    }
+    .findings-table th {
+      padding: 11px 14px;
+      text-align: left;
+      font-size: 0.68rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #999;
+      font-weight: 600;
+    }
+    .findings-table tbody tr {
+      border-bottom: 1px solid #1e1e1e;
+      transition: background 0.15s;
+    }
+    .findings-table tbody tr:hover { background: #161616; }
+    .findings-table td { padding: 10px 14px; vertical-align: top; }
+    .findings-table .col-id { font-family: monospace; font-size: 0.75rem; color: #666; }
+    .findings-table .col-ip { font-family: monospace; }
+    .findings-table .col-port { font-family: monospace; color: #aaa; }
+    .findings-table .col-score { font-weight: 700; text-align: right; }
+
+    /* ── Severity badges ── */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .badge-critical { background: rgba(255,59,59,0.15); color: #ff3b3b; border: 1px solid #ff3b3b44; }
+    .badge-high     { background: rgba(255,107,53,0.15); color: #ff6b35; border: 1px solid #ff6b3544; }
+    .badge-medium   { background: rgba(245,197,24,0.12); color: #f5c518; border: 1px solid #f5c51844; }
+    .badge-low      { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid #4fc3f744; }
+    .badge-info     { background: rgba(120,144,156,0.12); color: #90a4ae; border: 1px solid #78909c44; }
+
+    /* ── Status badges ── */
+    .status-open       { color: #ff5252; }
+    .status-verified   { color: #69f0ae; }
+    .status-remediated { color: #40c4ff; }
+    .status-accepted   { color: #ffab40; }
+
+    /* ── Finding detail cards ── */
+    .finding-detail {
+      background: #111;
+      border: 1px solid #222;
+      border-left: 3px solid #e63939;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .finding-detail.sev-critical { border-left-color: #ff3b3b; }
+    .finding-detail.sev-high     { border-left-color: #ff6b35; }
+    .finding-detail.sev-medium   { border-left-color: #f5c518; }
+    .finding-detail.sev-low      { border-left-color: #4fc3f7; }
+    .finding-detail.sev-info     { border-left-color: #546e7a; }
+
+    .finding-detail-header {
+      background: #161616;
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      cursor: pointer;
+    }
+    .finding-detail-header .fid {
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: #555;
+    }
+    .finding-detail-header .ftarget {
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: #ccc;
+    }
+    .finding-detail-header .fmodule {
+      font-size: 0.72rem;
+      color: #888;
+      margin-left: auto;
+    }
+
+    .finding-detail-body { padding: 16px 18px; }
+    .detail-row { display: flex; gap: 12px; margin-bottom: 8px; font-size: 0.82rem; }
+    .detail-key { color: #666; min-width: 100px; flex-shrink: 0; }
+    .detail-val { color: #ccc; word-break: break-word; }
+    .detail-val code {
+      background: #0d0d0d;
+      border: 1px solid #222;
+      border-radius: 3px;
+      padding: 1px 6px;
+      font-size: 0.78rem;
+      color: #90caf9;
+    }
+
+    .explain-block {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 700px) { .explain-block { grid-template-columns: 1fr; } }
+    .explain-card {
+      background: #0d0d0d;
+      border: 1px solid #1e1e1e;
+      border-radius: 5px;
+      padding: 12px 14px;
+    }
+    .explain-card .explain-title {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .explain-card.what   .explain-title { color: #90caf9; }
+    .explain-card.attack .explain-title { color: #ef9a9a; }
+    .explain-card.defend .explain-title { color: #a5d6a7; }
+    .explain-card p { font-size: 0.78rem; color: #aaa; line-height: 1.55; }
+
+    /* ── Evidence block ── */
+    .evidence-block {
+      margin-top: 12px;
+      background: #0a0a0a;
+      border: 1px solid #1e1e1e;
+      border-radius: 4px;
+      padding: 12px 14px;
+    }
+    .evidence-block .ev-cmd {
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 6px;
+    }
+    .evidence-block .ev-cmd span { color: #4fc3f7; }
+    .evidence-block pre {
+      font-family: monospace;
+      font-size: 0.73rem;
+      color: #777;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+
+    /* ── CVE refs ── */
+    .cve-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .cve-tag {
+      background: rgba(230,57,57,0.1);
+      border: 1px solid #e6393940;
+      border-radius: 3px;
+      padding: 2px 7px;
+      font-size: 0.7rem;
+      font-family: monospace;
+      color: #ef9a9a;
+    }
+
+    /* ── Scoring formula ── */
+    .formula-box {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-left: 3px solid #e63939;
+      border-radius: 6px;
+      padding: 18px 22px;
+      margin-bottom: 32px;
+    }
+    .formula-box pre {
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #aaa;
+      white-space: pre-wrap;
+      line-height: 1.7;
+    }
+    .formula-box pre strong { color: #e63939; }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid #1e1e1e;
+      margin-top: 60px;
+      padding-top: 20px;
+      font-size: 0.72rem;
+      color: #444;
+      text-align: center;
+      line-height: 1.8;
+    }
+    footer span { color: #666; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #111; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+    /* ── Print ── */
+    @media print {
+      body { background: #fff; color: #111; }
+      header { position: static; background: #111; }
+      .finding-detail { break-inside: avoid; }
+      .findings-table tbody tr { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════════ -->
+<header>
+  <div class="logo-block">
+    <img src="{{ logo_filename }}" alt="SentinelX" />
+    <div>
+      <div class="brand">Sentinel<span>X</span></div>
+      <div style="font-size:0.65rem;color:#555;letter-spacing:0.1em">NETLAB V1 — AUDIT REPORT</div>
+    </div>
+  </div>
+  <div class="report-meta">
+    <div><strong>Session</strong> {{ session.id }}</div>
+    <div><strong>Target</strong> {{ session.target }}</div>
+    <div><strong>Generated</strong> {{ generated_at }}</div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- ── EXECUTIVE SUMMARY ── -->
+  <div class="section-title">Executive Summary</div>
+
+  <div class="summary-grid">
+    {% if global_score is not none %}
+    <div class="card score">
+      <div class="card-value">{{ "%.0f"|format(global_score) }}</div>
+      <div class="card-label">Global Risk Score</div>
+    </div>
+    {% endif %}
+    <div class="card critical">
+      <div class="card-value">{{ severity_counts.critical }}</div>
+      <div class="card-label">Critical</div>
+    </div>
+    <div class="card high">
+      <div class="card-value">{{ severity_counts.high }}</div>
+      <div class="card-label">High</div>
+    </div>
+    <div class="card medium">
+      <div class="card-value">{{ severity_counts.medium }}</div>
+      <div class="card-label">Medium</div>
+    </div>
+    <div class="card low">
+      <div class="card-value">{{ severity_counts.low }}</div>
+      <div class="card-label">Low</div>
+    </div>
+    <div class="card info">
+      <div class="card-value">{{ severity_counts.info }}</div>
+      <div class="card-label">Info</div>
+    </div>
+    <div class="card" style="border-color:#333">
+      <div class="card-value" style="color:#e0e0e0">{{ findings|length }}</div>
+      <div class="card-label">Total Findings</div>
+    </div>
+  </div>
+
+  {% if global_score is not none %}
+  <div class="score-bar-wrap">
+    <div class="score-bar-label">
+      <span>Global network risk score</span>
+      <span style="color:#e63939;font-weight:700">{{ "%.1f"|format(global_score) }} / 100</span>
+    </div>
+    <div class="score-bar-track">
+      <div class="score-bar-fill" style="
+        width: {{ global_score }}%;
+        background: {% if global_score >= 70 %}#ff3b3b{% elif global_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %};
+      "></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ── SESSION INFO ── -->
+  <div class="section-title">Session Information</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:32px">
+    {% for key, val in [
+      ('Session ID', session.id),
+      ('Target', session.target),
+      ('Profile', session.profile),
+      ('Status', session.status),
+      ('Started', session.start_time),
+      ('Ended', session.end_time or '—'),
+    ] %}
+    <div style="background:#111;border:1px solid #1e1e1e;border-radius:5px;padding:12px 16px">
+      <div style="font-size:0.65rem;color:#555;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px">{{ key }}</div>
+      <div style="font-family:monospace;font-size:0.82rem;color:#ccc">{{ val }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ── FINDINGS SUMMARY TABLE ── -->
+  {% if findings %}
+  <div class="section-title">Findings Overview</div>
+  <div style="overflow-x:auto;margin-bottom:40px">
+    <table class="findings-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Severity</th>
+          <th>Target</th>
+          <th>Port</th>
+          <th>Service</th>
+          <th>Module</th>
+          <th>Score</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings|sort(attribute='severity.value') %}
+        <tr>
+          <td class="col-id">{{ f.id[:8] }}</td>
+          <td><span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span></td>
+          <td class="col-ip">{{ f.target_ip }}</td>
+          <td class="col-port">{{ f.target_port if f.target_port else '—' }}</td>
+          <td>{{ f.target_service or '—' }}</td>
+          <td style="font-size:0.75rem;color:#777">{{ f.module }}</td>
+          <td class="col-score">
+            {% if f.risk_score is not none %}
+              <span style="color:{% if f.risk_score >= 70 %}#ff3b3b{% elif f.risk_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %}">
+                {{ "%.1f"|format(f.risk_score) }}
+              </span>
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            <span class="status-{{ f.status.value }}">{{ f.status.value }}</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── FINDING DETAILS ── -->
+  <div class="section-title">Finding Details</div>
+  {% for f in findings|sort(attribute='severity.value') %}
+  <div class="finding-detail sev-{{ f.severity.value }}">
+    <div class="finding-detail-header">
+      <span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span>
+      <span class="ftarget">{{ f.target_ip }}{% if f.target_port %}:{{ f.target_port }}{% endif %}</span>
+      {% if f.target_service %}<span style="color:#888;font-size:0.8rem">{{ f.target_service }}</span>{% endif %}
+      {% if f.service_version %}<span style="color:#666;font-size:0.75rem">{{ f.service_version }}</span>{% endif %}
+      <span class="fid">{{ f.id[:8] }}</span>
+      <span class="fmodule">{{ f.module }}</span>
+    </div>
+    <div class="finding-detail-body">
+
+      <div class="detail-row">
+        <span class="detail-key">Confidence</span>
+        <span class="detail-val">{{ f.confidence.name }} ({{ f.confidence.value }})</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-key">Exposure</span>
+        <span class="detail-val">{{ f.exposure.value }}</span>
+      </div>
+      {% if f.risk_score is not none %}
+      <div class="detail-row">
+        <span class="detail-key">Risk Score</span>
+        <span class="detail-val" style="font-weight:700;color:{% if f.risk_score >= 70 %}#ff3b3b{% elif f.risk_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %}">
+          {{ "%.1f"|format(f.risk_score) }} / 100
+        </span>
+      </div>
+      {% endif %}
+      {% if f.cvss_score is not none %}
+      <div class="detail-row">
+        <span class="detail-key">CVSS</span>
+        <span class="detail-val">{{ f.cvss_score }}</span>
+      </div>
+      {% endif %}
+      {% if f.cve_refs %}
+      <div class="detail-row">
+        <span class="detail-key">CVE Refs</span>
+        <span class="detail-val">
+          <div class="cve-list">
+            {% for cve in f.cve_refs %}
+            <span class="cve-tag">{{ cve }}</span>
+            {% endfor %}
+          </div>
+        </span>
+      </div>
+      {% endif %}
+      <div class="detail-row">
+        <span class="detail-key">Status</span>
+        <span class="detail-val status-{{ f.status.value }}">{{ f.status.value }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-key">Detected</span>
+        <span class="detail-val" style="color:#666;font-size:0.78rem">{{ f.created_at }}</span>
+      </div>
+
+      <!-- Evidence -->
+      {% if f.evidence.raw %}
+      <div class="evidence-block">
+        <div class="ev-cmd">$ <span>{{ f.evidence.command }}</span></div>
+        <pre>{{ f.evidence.raw[:600] }}{% if f.evidence.raw|length > 600 %}…{% endif %}</pre>
+      </div>
+      {% endif %}
+
+      <!-- Explanation -->
+      {% if f.explanation %}
+      <div class="explain-block">
+        <div class="explain-card what">
+          <div class="explain-title">▸ What</div>
+          <p>{{ f.explanation.what }}</p>
+        </div>
+        <div class="explain-card attack">
+          <div class="explain-title">▸ Attack</div>
+          <p>{{ f.explanation.attack }}</p>
+        </div>
+        <div class="explain-card defend">
+          <div class="explain-title">▸ Defense</div>
+          <p>{{ f.explanation.defense }}</p>
+        </div>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+  {% endfor %}
+
+  {% else %}
+  <div style="text-align:center;padding:60px;color:#444">
+    <div style="font-size:2rem;margin-bottom:12px">○</div>
+    <div>No findings for this session.</div>
+  </div>
+  {% endif %}
+
+  <!-- ── SCORING FORMULA ── -->
+  <div class="section-title">Scoring Formula</div>
+  <div class="formula-box">
+    <pre>{{ formula }}</pre>
+  </div>
+
+</div><!-- /container -->
+
+<!-- ═══════════════════════════════════════════════════
+     FOOTER
+═══════════════════════════════════════════════════ -->
+<footer>
+  <div>SentinelX NetLab V1 — Educational Cybersecurity Platform</div>
+  <div><span>LEGAL NOTICE:</span> This tool is designed exclusively for networks and systems you own or have explicit written authorization to test.</div>
+  <div style="margin-top:8px;color:#333">Generated {{ generated_at }} — Session {{ session.id }}</div>
+</footer>
+
+</body>
+</html>
