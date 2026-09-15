@@ -1,0 +1,180 @@
+{
+  "_comment": "Local port→service identification table for SentinelX NetLab V1 (ticket #014). Purpose: fingerprinting — which service is expected on which port. This is identification only, not CVE interpretation (cve_db.json) and not pedagogical explanation (vulnerabilities.json). Used as a static lookup for human-readable service names when a scanner sees an open port without a banner.",
+  "_format": "Key = port number as string. Fields: protocol (tcp|udp|both), service (nmap-style name), common_products (optional list), description (short EN identification note).",
+  "ports": {
+    "21": {
+      "protocol": "tcp",
+      "service": "ftp",
+      "common_products": ["vsftpd", "ProFTPD", "FileZilla Server"],
+      "description": "File Transfer Protocol — cleartext file transfer"
+    },
+    "22": {
+      "protocol": "tcp",
+      "service": "ssh",
+      "common_products": ["OpenSSH", "Dropbear"],
+      "description": "Secure Shell — encrypted remote shell"
+    },
+    "23": {
+      "protocol": "tcp",
+      "service": "telnet",
+      "common_products": [],
+      "description": "Telnet — cleartext remote shell (legacy)"
+    },
+    "25": {
+      "protocol": "tcp",
+      "service": "smtp",
+      "common_products": ["Postfix", "Exim", "Sendmail"],
+      "description": "Simple Mail Transfer Protocol"
+    },
+    "53": {
+      "protocol": "both",
+      "service": "domain",
+      "common_products": ["BIND", "dnsmasq", "Unbound"],
+      "description": "DNS — domain name resolution"
+    },
+    "80": {
+      "protocol": "tcp",
+      "service": "http",
+      "common_products": ["Apache httpd", "nginx", "IIS"],
+      "description": "HTTP — unencrypted web"
+    },
+    "110": {
+      "protocol": "tcp",
+      "service": "pop3",
+      "common_products": ["Dovecot"],
+      "description": "POP3 — mailbox retrieval"
+    },
+    "111": {
+      "protocol": "both",
+      "service": "rpcbind",
+      "common_products": [],
+      "description": "RPC portmapper"
+    },
+    "135": {
+      "protocol": "tcp",
+      "service": "msrpc",
+      "common_products": [],
+      "description": "Microsoft RPC endpoint mapper"
+    },
+    "139": {
+      "protocol": "tcp",
+      "service": "netbios-ssn",
+      "common_products": [],
+      "description": "NetBIOS session service (SMB over NetBIOS)"
+    },
+    "143": {
+      "protocol": "tcp",
+      "service": "imap",
+      "common_products": ["Dovecot"],
+      "description": "IMAP — mailbox access"
+    },
+    "161": {
+      "protocol": "udp",
+      "service": "snmp",
+      "common_products": ["net-snmp"],
+      "description": "SNMP — network management (community strings)"
+    },
+    "389": {
+      "protocol": "tcp",
+      "service": "ldap",
+      "common_products": ["OpenLDAP", "Active Directory"],
+      "description": "LDAP — directory service"
+    },
+    "443": {
+      "protocol": "tcp",
+      "service": "https",
+      "common_products": ["Apache httpd", "nginx", "IIS"],
+      "description": "HTTPS — TLS-encrypted web"
+    },
+    "445": {
+      "protocol": "tcp",
+      "service": "microsoft-ds",
+      "common_products": ["Windows SMB", "Samba"],
+      "description": "SMB/CIFS — Windows file sharing"
+    },
+    "993": {
+      "protocol": "tcp",
+      "service": "imaps",
+      "common_products": ["Dovecot"],
+      "description": "IMAP over TLS"
+    },
+    "995": {
+      "protocol": "tcp",
+      "service": "pop3s",
+      "common_products": ["Dovecot"],
+      "description": "POP3 over TLS"
+    },
+    "1433": {
+      "protocol": "tcp",
+      "service": "ms-sql-s",
+      "common_products": ["Microsoft SQL Server"],
+      "description": "Microsoft SQL Server"
+    },
+    "1521": {
+      "protocol": "tcp",
+      "service": "oracle",
+      "common_products": ["Oracle Database"],
+      "description": "Oracle DB listener"
+    },
+    "3306": {
+      "protocol": "tcp",
+      "service": "mysql",
+      "common_products": ["MySQL", "MariaDB"],
+      "description": "MySQL / MariaDB"
+    },
+    "3389": {
+      "protocol": "tcp",
+      "service": "ms-wbt-server",
+      "common_products": ["Remote Desktop Services"],
+      "description": "RDP — Windows remote desktop"
+    },
+    "5432": {
+      "protocol": "tcp",
+      "service": "postgresql",
+      "common_products": ["PostgreSQL"],
+      "description": "PostgreSQL database"
+    },
+    "5900": {
+      "protocol": "tcp",
+      "service": "vnc",
+      "common_products": ["RealVNC", "TigerVNC"],
+      "description": "VNC remote display"
+    },
+    "6379": {
+      "protocol": "tcp",
+      "service": "redis",
+      "common_products": ["Redis"],
+      "description": "Redis key-value store"
+    },
+    "8080": {
+      "protocol": "tcp",
+      "service": "http-proxy",
+      "common_products": ["Apache Tomcat", "nginx"],
+      "description": "Alternate HTTP / app server"
+    },
+    "8443": {
+      "protocol": "tcp",
+      "service": "https-alt",
+      "common_products": [],
+      "description": "Alternate HTTPS"
+    },
+    "8888": {
+      "protocol": "tcp",
+      "service": "http-alt",
+      "common_products": [],
+      "description": "Alternate HTTP"
+    },
+    "9200": {
+      "protocol": "tcp",
+      "service": "elasticsearch",
+      "common_products": ["Elasticsearch"],
+      "description": "Elasticsearch HTTP API"
+    },
+    "27017": {
+      "protocol": "tcp",
+      "service": "mongodb",
+      "common_products": ["MongoDB"],
+      "description": "MongoDB database"
+    }
+  }
+}
