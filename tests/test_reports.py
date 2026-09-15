@@ -225,15 +225,17 @@ class TestHtmlReport:
         f = make_finding(explanation=Explanation(
             what="SMBv1 is enabled.",
             attack="EternalBlue exploitation.",
-            defense="Disable SMBv1.",
+            defense="Disable SMBv1 via PowerShell: Set-SmbServerConfiguration.",
         ))
         db.save_finding(f)
         output = tmp_path / "report.html"
         generate_report(SESSION, "html", str(output))
         content = output.read_text()
-        assert "SMBv1" in content
-        assert "EternalBlue" in content
-        assert "Disable SMBv1" in content
+        # Only defense (recommendation) should appear — not pedagogy
+        assert "Set-SmbServerConfiguration" in content
+        # Pedagogical what/attack must NOT appear in the professional report
+        assert "SMBv1 is enabled." not in content
+        assert "EternalBlue exploitation." not in content
 
     def test_html_shows_risk_score_when_set(self, tmp_path):
         f = make_finding(risk_score=87.5)

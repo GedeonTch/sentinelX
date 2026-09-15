@@ -1,585 +1,1018 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en" data-theme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SentinelX — Rapport d'audit {{ session.id }}</title>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>SentinelX — Audit Report {{ session.id }}</title>
   <style>
-    /* ── Reset & Base ── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html { font-size: 15px; }
-    body {
-      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-      background: #0d0d0d;
-      color: #e0e0e0;
-      line-height: 1.6;
-      min-height: 100vh;
-    }
-    a { color: #e63939; text-decoration: none; }
+/* ═══════════════════════════════════════════════════════
+   VARIABLES — DARK / LIGHT THEMES
+═══════════════════════════════════════════════════════ */
+:root {
+  --accent:       #00d4aa;
+  --accent2:      #0088ff;
+  --danger:       #ff3b3b;
+  --warning:      #ff8c00;
+  --caution:      #f5c518;
+  --safe:         #4fc3f7;
+  --muted:        #546e7a;
+  --radius:       8px;
+  --radius-sm:    4px;
+  --transition:   0.22s ease;
+}
+[data-theme="dark"] {
+  --bg:           #0a0c0f;
+  --bg2:          #0f1217;
+  --bg3:          #141820;
+  --bg4:          #1a2030;
+  --border:       #1e2535;
+  --border2:      #263040;
+  --text:         #d8e0ea;
+  --text2:        #8a97a8;
+  --text3:        #556070;
+  --shadow:       0 4px 24px rgba(0,0,0,0.55);
+}
+[data-theme="light"] {
+  --bg:           #f2f4f7;
+  --bg2:          #ffffff;
+  --bg3:          #e8ecf2;
+  --bg4:          #dde3ed;
+  --border:       #c8d0dc;
+  --border2:      #b0bbc8;
+  --text:         #1a2030;
+  --text2:        #4a5568;
+  --text3:        #8a97a8;
+  --shadow:       0 4px 24px rgba(0,0,0,0.10);
+}
 
-    /* ── Layout ── */
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px 60px; }
+/* ═══════════════════════════════════════════════════════
+   RESET & BASE
+═══════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin:0; padding:0; }
+html { font-size:15px; scroll-behavior:smooth; }
+body {
+  font-family: 'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.65;
+  min-height: 100vh;
+  transition: background var(--transition), color var(--transition);
+}
 
-    /* ── Header ── */
-    header {
-      background: linear-gradient(135deg, #111 0%, #1a1a1a 60%, #1e0000 100%);
-      border-bottom: 2px solid #e63939;
-      padding: 20px 28px 18px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-    header .logo-block {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-    header .logo-block img {
-      height: 44px;
-      width: auto;
-      filter: drop-shadow(0 0 6px rgba(230,57,57,0.5));
-    }
-    header .brand {
-      font-size: 1.05rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      color: #f0f0f0;
-      text-transform: uppercase;
-    }
-    header .brand span { color: #e63939; }
-    header .report-meta {
-      text-align: right;
-      font-size: 0.78rem;
-      color: #888;
-      line-height: 1.5;
-    }
-    header .report-meta strong { color: #ccc; }
+/* Subtle cyber grid background */
+[data-theme="dark"] body::before {
+  content:'';
+  position:fixed; inset:0; pointer-events:none; z-index:0;
+  background-image:
+    linear-gradient(rgba(0,212,170,0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,170,0.018) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+[data-theme="light"] body::before { display:none; }
+.container { max-width:1140px; margin:0 auto; padding:0 24px 80px; position:relative; z-index:1; }
 
-    /* ── Section titles ── */
-    .section-title {
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      color: #e63939;
-      border-bottom: 1px solid #2a2a2a;
-      padding-bottom: 8px;
-      margin: 40px 0 20px;
-    }
+/* ═══════════════════════════════════════════════════════
+   THEME TOGGLE
+═══════════════════════════════════════════════════════ */
+.theme-toggle {
+  position:fixed; top:18px; right:20px; z-index:200;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 24px;
+  padding: 6px 14px;
+  cursor:pointer;
+  font-size:0.78rem;
+  color: var(--text2);
+  display:flex; align-items:center; gap:7px;
+  transition: all var(--transition);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  user-select:none;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.theme-toggle .icon { font-size:1rem; transition: transform 0.4s ease; }
+.theme-toggle:hover .icon { transform: rotate(20deg); }
 
-    /* ── Summary cards ── */
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 14px;
-      margin-bottom: 32px;
-    }
-    .card {
-      background: #161616;
-      border: 1px solid #252525;
-      border-radius: 8px;
-      padding: 18px 16px;
-      text-align: center;
-      transition: border-color 0.2s;
-    }
-    .card:hover { border-color: #e63939; }
-    .card .card-value {
-      font-size: 2rem;
-      font-weight: 800;
-      line-height: 1.1;
-    }
-    .card .card-label {
-      font-size: 0.68rem;
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-      color: #666;
-      margin-top: 4px;
-    }
-    .card.critical .card-value { color: #ff3b3b; }
-    .card.high     .card-value { color: #ff6b35; }
-    .card.medium   .card-value { color: #f5c518; }
-    .card.low      .card-value { color: #4fc3f7; }
-    .card.info     .card-value { color: #78909c; }
-    .card.score    .card-value { color: #e63939; font-size: 2.4rem; }
+/* ═══════════════════════════════════════════════════════
+   HEADER
+═══════════════════════════════════════════════════════ */
+header {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 28px;
+  position: sticky; top:0; z-index:100;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.3);
+}
+.header-inner {
+  max-width:1140px; margin:0 auto;
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 14px 0;
+  gap:20px;
+}
+.header-left { display:flex; align-items:center; gap:16px; }
+.header-logo img {
+  height:40px; width:auto;
+  filter: drop-shadow(0 0 8px rgba(0,212,170,0.3));
+  transition: filter var(--transition);
+}
+.header-logo img:hover { filter: drop-shadow(0 0 12px rgba(0,212,170,0.6)); }
+.header-brand { line-height:1.2; }
+.header-brand .name {
+  font-size:1rem; font-weight:800;
+  letter-spacing:0.14em; text-transform:uppercase;
+  color: var(--text);
+}
+.header-brand .name span { color: var(--accent); }
+.header-brand .sub {
+  font-size:0.62rem; letter-spacing:0.18em;
+  text-transform:uppercase; color: var(--text3);
+}
+.header-right { text-align:right; }
+.header-right .label {
+  font-size:0.62rem; letter-spacing:0.15em;
+  text-transform:uppercase; color: var(--text3); margin-bottom:2px;
+}
+.header-right .value {
+  font-size:0.82rem; font-family:monospace; color: var(--text2);
+}
+.header-right .generated {
+  font-size:0.7rem; color: var(--text3); margin-top:3px;
+}
 
-    /* ── Global score bar ── */
-    .score-bar-wrap { margin-bottom: 32px; }
-    .score-bar-label {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.75rem;
-      color: #777;
-      margin-bottom: 6px;
-    }
-    .score-bar-track {
-      background: #1e1e1e;
-      border-radius: 4px;
-      height: 10px;
-      overflow: hidden;
-    }
-    .score-bar-fill {
-      height: 100%;
-      border-radius: 4px;
-      transition: width 0.6s ease;
-    }
+/* ═══════════════════════════════════════════════════════
+   NAV BAR (section anchors)
+═══════════════════════════════════════════════════════ */
+.nav-bar {
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  position:sticky; top:69px; z-index:99;
+  display:flex; gap:0; overflow-x:auto;
+}
+.nav-bar a {
+  display:inline-block; padding:10px 20px;
+  font-size:0.72rem; font-weight:600; letter-spacing:0.12em;
+  text-transform:uppercase; color: var(--text3);
+  text-decoration:none; white-space:nowrap;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+}
+.nav-bar a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
-    /* ── Findings table ── */
-    .findings-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.84rem;
-    }
-    .findings-table thead tr {
-      background: #1a1a1a;
-      border-bottom: 2px solid #e63939;
-    }
-    .findings-table th {
-      padding: 11px 14px;
-      text-align: left;
-      font-size: 0.68rem;
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-      color: #999;
-      font-weight: 600;
-    }
-    .findings-table tbody tr {
-      border-bottom: 1px solid #1e1e1e;
-      transition: background 0.15s;
-    }
-    .findings-table tbody tr:hover { background: #161616; }
-    .findings-table td { padding: 10px 14px; vertical-align: top; }
-    .findings-table .col-id { font-family: monospace; font-size: 0.75rem; color: #666; }
-    .findings-table .col-ip { font-family: monospace; }
-    .findings-table .col-port { font-family: monospace; color: #aaa; }
-    .findings-table .col-score { font-weight: 700; text-align: right; }
+/* ═══════════════════════════════════════════════════════
+   SECTION TITLES
+═══════════════════════════════════════════════════════ */
+.section-header {
+  display:flex; align-items:center; gap:12px;
+  margin: 48px 0 22px;
+}
+.section-header .section-icon {
+  width:32px; height:32px; border-radius:var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display:flex; align-items:center; justify-content:center;
+  font-size:0.9rem; flex-shrink:0;
+  box-shadow: 0 2px 8px rgba(0,212,170,0.3);
+}
+.section-header .section-label {
+  font-size:0.68rem; font-weight:700; letter-spacing:0.2em;
+  text-transform:uppercase; color: var(--accent);
+  display:block; margin-bottom:1px;
+}
+.section-header .section-title {
+  font-size:1.15rem; font-weight:700; color: var(--text);
+}
 
-    /* ── Severity badges ── */
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 3px;
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-    }
-    .badge-critical { background: rgba(255,59,59,0.15); color: #ff3b3b; border: 1px solid #ff3b3b44; }
-    .badge-high     { background: rgba(255,107,53,0.15); color: #ff6b35; border: 1px solid #ff6b3544; }
-    .badge-medium   { background: rgba(245,197,24,0.12); color: #f5c518; border: 1px solid #f5c51844; }
-    .badge-low      { background: rgba(79,195,247,0.12); color: #4fc3f7; border: 1px solid #4fc3f744; }
-    .badge-info     { background: rgba(120,144,156,0.12); color: #90a4ae; border: 1px solid #78909c44; }
+/* ═══════════════════════════════════════════════════════
+   RISK GAUGE
+═══════════════════════════════════════════════════════ */
+.risk-gauge-wrap {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 32px;
+  display:flex; align-items:center; gap:32px;
+  margin-bottom:24px;
+  box-shadow: var(--shadow);
+  flex-wrap:wrap;
+}
+.risk-circle {
+  position:relative; flex-shrink:0;
+  width:110px; height:110px;
+}
+.risk-circle svg { width:110px; height:110px; transform:rotate(-90deg); }
+.risk-circle .track { fill:none; stroke: var(--bg4); stroke-width:10; }
+.risk-circle .fill  { fill:none; stroke-width:10; stroke-linecap:round;
+                       transition: stroke-dashoffset 1s ease; }
+.risk-circle .center-text {
+  position:absolute; inset:0;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+}
+.risk-circle .score-num {
+  font-size:1.7rem; font-weight:900; line-height:1;
+}
+.risk-circle .score-sub {
+  font-size:0.6rem; letter-spacing:0.1em; text-transform:uppercase;
+  color: var(--text3); margin-top:2px;
+}
+.risk-info { flex:1; min-width:180px; }
+.risk-info .risk-label {
+  font-size:0.68rem; letter-spacing:0.15em; text-transform:uppercase;
+  color: var(--text3); margin-bottom:6px;
+}
+.risk-info .risk-title {
+  font-size:1.6rem; font-weight:800; line-height:1.1; margin-bottom:4px;
+}
+.risk-info .risk-desc { font-size:0.82rem; color: var(--text2); }
 
-    /* ── Status badges ── */
-    .status-open       { color: #ff5252; }
-    .status-verified   { color: #69f0ae; }
-    .status-remediated { color: #40c4ff; }
-    .status-accepted   { color: #ffab40; }
+/* ═══════════════════════════════════════════════════════
+   SUMMARY CARDS
+═══════════════════════════════════════════════════════ */
+.summary-grid {
+  display:grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap:12px; margin-bottom:32px;
+}
+.scard {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 16px 16px;
+  text-align:center;
+  cursor:default;
+  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+  position:relative; overflow:hidden;
+}
+.scard::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:3px;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.scard:hover { transform:translateY(-3px); box-shadow: var(--shadow); }
+.scard .val { font-size:2.2rem; font-weight:900; line-height:1; }
+.scard .lbl {
+  font-size:0.62rem; font-weight:700; letter-spacing:0.16em;
+  text-transform:uppercase; color: var(--text3); margin-top:5px;
+}
+.scard.critical::before { background: #ff3b3b; }
+.scard.critical:hover   { border-color: #ff3b3b55; }
+.scard.critical .val    { color: #ff3b3b; }
+.scard.high::before     { background: #ff8c00; }
+.scard.high:hover       { border-color: #ff8c0055; }
+.scard.high .val        { color: #ff8c00; }
+.scard.medium::before   { background: #f5c518; }
+.scard.medium:hover     { border-color: #f5c51855; }
+.scard.medium .val      { color: #f5c518; }
+.scard.low::before      { background: #4fc3f7; }
+.scard.low:hover        { border-color: #4fc3f755; }
+.scard.low .val         { color: #4fc3f7; }
+.scard.info::before     { background: #546e7a; }
+.scard.info .val        { color: #78909c; }
+.scard.total::before    { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+.scard.total:hover      { border-color: var(--accent); }
+.scard.total .val       { color: var(--accent); }
 
-    /* ── Finding detail cards ── */
-    .finding-detail {
-      background: #111;
-      border: 1px solid #222;
-      border-left: 3px solid #e63939;
-      border-radius: 6px;
-      margin-bottom: 20px;
-      overflow: hidden;
-    }
-    .finding-detail.sev-critical { border-left-color: #ff3b3b; }
-    .finding-detail.sev-high     { border-left-color: #ff6b35; }
-    .finding-detail.sev-medium   { border-left-color: #f5c518; }
-    .finding-detail.sev-low      { border-left-color: #4fc3f7; }
-    .finding-detail.sev-info     { border-left-color: #546e7a; }
+/* ═══════════════════════════════════════════════════════
+   INFO GRID (session / network)
+═══════════════════════════════════════════════════════ */
+.info-grid {
+  display:grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap:10px; margin-bottom:32px;
+}
+.info-cell {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  transition: border-color var(--transition);
+}
+.info-cell:hover { border-color: var(--border2); }
+.info-cell .ik {
+  font-size:0.6rem; letter-spacing:0.15em; text-transform:uppercase;
+  color: var(--text3); margin-bottom:3px;
+}
+.info-cell .iv {
+  font-family:monospace; font-size:0.84rem; color: var(--text);
+  word-break:break-all;
+}
 
-    .finding-detail-header {
-      background: #161616;
-      padding: 12px 18px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      cursor: pointer;
-    }
-    .finding-detail-header .fid {
-      font-family: monospace;
-      font-size: 0.72rem;
-      color: #555;
-    }
-    .finding-detail-header .ftarget {
-      font-family: monospace;
-      font-size: 0.85rem;
-      color: #ccc;
-    }
-    .finding-detail-header .fmodule {
-      font-size: 0.72rem;
-      color: #888;
-      margin-left: auto;
-    }
+/* ═══════════════════════════════════════════════════════
+   NETWORK OVERVIEW
+═══════════════════════════════════════════════════════ */
+.network-overview {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom:32px;
+  box-shadow: var(--shadow);
+  overflow-x:auto;
+}
+.host-list { display:flex; flex-wrap:wrap; gap:10px; }
+.host-card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  min-width:160px;
+  transition: border-color var(--transition), transform var(--transition);
+  cursor:default;
+}
+.host-card:hover { border-color: var(--accent); transform:translateY(-2px); }
+.host-card .h-ip {
+  font-family:monospace; font-size:0.85rem; font-weight:700;
+  color: var(--text); margin-bottom:4px;
+}
+.host-card .h-os {
+  font-size:0.68rem; color: var(--text3);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  max-width:160px;
+}
+.host-card .h-ports {
+  margin-top:6px; display:flex; flex-wrap:wrap; gap:3px;
+}
+.port-pip {
+  display:inline-block; padding:1px 5px;
+  background: var(--bg4); border-radius:2px;
+  font-family:monospace; font-size:0.65rem; color: var(--accent);
+}
+.port-pip.risk-hi { background:rgba(255,59,59,0.12); color:#ff6b6b; }
 
-    .finding-detail-body { padding: 16px 18px; }
-    .detail-row { display: flex; gap: 12px; margin-bottom: 8px; font-size: 0.82rem; }
-    .detail-key { color: #666; min-width: 100px; flex-shrink: 0; }
-    .detail-val { color: #ccc; word-break: break-word; }
-    .detail-val code {
-      background: #0d0d0d;
-      border: 1px solid #222;
-      border-radius: 3px;
-      padding: 1px 6px;
-      font-size: 0.78rem;
-      color: #90caf9;
-    }
+/* ═══════════════════════════════════════════════════════
+   FINDINGS TABLE
+═══════════════════════════════════════════════════════ */
+.table-wrap { overflow-x:auto; margin-bottom:40px; }
+.findings-table {
+  width:100%; border-collapse:collapse; font-size:0.83rem;
+}
+.findings-table thead tr {
+  background: var(--bg3);
+  border-bottom: 2px solid var(--accent);
+}
+.findings-table th {
+  padding:10px 14px; text-align:left;
+  font-size:0.62rem; letter-spacing:0.15em; text-transform:uppercase;
+  color: var(--text3); font-weight:700; white-space:nowrap;
+}
+.findings-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+  cursor:default;
+}
+.findings-table tbody tr:hover { background: var(--bg3); }
+.findings-table td {
+  padding:9px 14px; vertical-align:middle;
+}
+.findings-table .mono { font-family:monospace; }
+.findings-table .dim  { color: var(--text3); font-size:0.78rem; }
+.findings-table .score-col { font-weight:700; text-align:right; white-space:nowrap; }
 
-    .explain-block {
-      margin-top: 14px;
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 12px;
-    }
-    @media (max-width: 700px) { .explain-block { grid-template-columns: 1fr; } }
-    .explain-card {
-      background: #0d0d0d;
-      border: 1px solid #1e1e1e;
-      border-radius: 5px;
-      padding: 12px 14px;
-    }
-    .explain-card .explain-title {
-      font-size: 0.65rem;
-      font-weight: 700;
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-      margin-bottom: 6px;
-    }
-    .explain-card.what   .explain-title { color: #90caf9; }
-    .explain-card.attack .explain-title { color: #ef9a9a; }
-    .explain-card.defend .explain-title { color: #a5d6a7; }
-    .explain-card p { font-size: 0.78rem; color: #aaa; line-height: 1.55; }
+/* ═══════════════════════════════════════════════════════
+   BADGES
+═══════════════════════════════════════════════════════ */
+.badge {
+  display:inline-block; padding:2px 8px; border-radius:3px;
+  font-size:0.62rem; font-weight:700; letter-spacing:0.1em;
+  text-transform:uppercase; white-space:nowrap;
+}
+.badge-critical { background:rgba(255,59,59,0.14); color:#ff4f4f; border:1px solid #ff3b3b40; }
+.badge-high     { background:rgba(255,140,0,0.14);  color:#ff9020; border:1px solid #ff8c0040; }
+.badge-medium   { background:rgba(245,197,24,0.12); color:#f5c518; border:1px solid #f5c51840; }
+.badge-low      { background:rgba(79,195,247,0.12); color:#4fc3f7; border:1px solid #4fc3f740; }
+.badge-info     { background:rgba(84,110,122,0.14); color:#90a4ae; border:1px solid #546e7a40; }
+.badge-config   { background:rgba(0,212,170,0.10);  color:#00d4aa; border:1px solid #00d4aa30; }
+.badge-service  { background:rgba(0,136,255,0.10);  color:#4da6ff; border:1px solid #0088ff30; }
+.badge-network  { background:rgba(120,144,156,0.12);color:#90a4ae; border:1px solid #78909c30; }
+.badge-credential { background:rgba(255,64,129,0.12);color:#ff6090; border:1px solid #ff406040; }
+.status-open       { color:#ff5252; font-weight:600; }
+.status-verified   { color:#69f0ae; font-weight:600; }
+.status-remediated { color:#40c4ff; font-weight:600; }
+.status-accepted   { color:#ffab40; font-weight:600; }
 
-    /* ── Evidence block ── */
-    .evidence-block {
-      margin-top: 12px;
-      background: #0a0a0a;
-      border: 1px solid #1e1e1e;
-      border-radius: 4px;
-      padding: 12px 14px;
-    }
-    .evidence-block .ev-cmd {
-      font-family: monospace;
-      font-size: 0.75rem;
-      color: #888;
-      margin-bottom: 6px;
-    }
-    .evidence-block .ev-cmd span { color: #4fc3f7; }
-    .evidence-block pre {
-      font-family: monospace;
-      font-size: 0.73rem;
-      color: #777;
-      white-space: pre-wrap;
-      word-break: break-all;
-      max-height: 160px;
-      overflow-y: auto;
-    }
+/* ═══════════════════════════════════════════════════════
+   FINDING DETAIL CARDS
+═══════════════════════════════════════════════════════ */
+.finding-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom:16px;
+  overflow:hidden;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.finding-card:hover { box-shadow: var(--shadow); }
+.finding-card.sev-critical { border-left:3px solid #ff3b3b; }
+.finding-card.sev-high     { border-left:3px solid #ff8c00; }
+.finding-card.sev-medium   { border-left:3px solid #f5c518; }
+.finding-card.sev-low      { border-left:3px solid #4fc3f7; }
+.finding-card.sev-info     { border-left:3px solid #546e7a; }
 
-    /* ── CVE refs ── */
-    .cve-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-    .cve-tag {
-      background: rgba(230,57,57,0.1);
-      border: 1px solid #e6393940;
-      border-radius: 3px;
-      padding: 2px 7px;
-      font-size: 0.7rem;
-      font-family: monospace;
-      color: #ef9a9a;
-    }
+.fc-header {
+  background: var(--bg3);
+  padding:12px 18px;
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  cursor:pointer;
+  transition: background var(--transition);
+}
+.fc-header:hover { background: var(--bg4); }
+.fc-target { font-family:monospace; font-size:0.88rem; font-weight:700; color: var(--text); }
+.fc-service { font-size:0.78rem; color: var(--text2); }
+.fc-version { font-size:0.72rem; color: var(--text3); }
+.fc-id { font-family:monospace; font-size:0.68rem; color: var(--text3); margin-left:auto; }
+.fc-module { font-size:0.7rem; color: var(--text3); }
 
-    /* ── Scoring formula ── */
-    .formula-box {
-      background: #111;
-      border: 1px solid #2a2a2a;
-      border-left: 3px solid #e63939;
-      border-radius: 6px;
-      padding: 18px 22px;
-      margin-bottom: 32px;
-    }
-    .formula-box pre {
-      font-family: monospace;
-      font-size: 0.8rem;
-      color: #aaa;
-      white-space: pre-wrap;
-      line-height: 1.7;
-    }
-    .formula-box pre strong { color: #e63939; }
+.fc-body { padding:18px; }
+.fc-grid {
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+  gap:10px; margin-bottom:16px;
+}
+.fc-field {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding:10px 14px;
+}
+.fc-field .fk {
+  font-size:0.58rem; letter-spacing:0.15em; text-transform:uppercase;
+  color: var(--text3); margin-bottom:4px;
+}
+.fc-field .fv { font-size:0.84rem; color: var(--text); word-break:break-word; }
+.fc-field .fv.mono { font-family:monospace; }
 
-    /* ── Footer ── */
-    footer {
-      border-top: 1px solid #1e1e1e;
-      margin-top: 60px;
-      padding-top: 20px;
-      font-size: 0.72rem;
-      color: #444;
-      text-align: center;
-      line-height: 1.8;
-    }
-    footer span { color: #666; }
+/* CVE tags */
+.cve-row { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
+.cve-tag {
+  background:rgba(255,59,59,0.08); border:1px solid #ff3b3b30;
+  border-radius:3px; padding:2px 7px;
+  font-size:0.68rem; font-family:monospace; color:#ef9a9a;
+}
 
-    /* ── Scrollbar ── */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #111; }
-    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+/* Evidence */
+.evidence-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding:12px 16px; margin-top:12px;
+}
+.ev-cmd {
+  font-family:monospace; font-size:0.72rem; color: var(--text3); margin-bottom:6px;
+}
+.ev-cmd span { color: var(--accent2); }
+.ev-raw {
+  font-family:monospace; font-size:0.72rem; color: var(--text3);
+  white-space:pre-wrap; word-break:break-all;
+  max-height:140px; overflow-y:auto; line-height:1.5;
+}
 
-    /* ── Print ── */
-    @media print {
-      body { background: #fff; color: #111; }
-      header { position: static; background: #111; }
-      .finding-detail { break-inside: avoid; }
-      .findings-table tbody tr { break-inside: avoid; }
-    }
+/* ═══════════════════════════════════════════════════════
+   RECOMMENDATIONS
+═══════════════════════════════════════════════════════ */
+.rec-list { display:flex; flex-direction:column; gap:12px; margin-bottom:40px; }
+.rec-item {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  display:flex; gap:16px; align-items:flex-start;
+  transition: border-color var(--transition), transform var(--transition);
+}
+.rec-item:hover { border-left-color: var(--accent2); transform:translateX(3px); }
+.rec-item.rec-critical { border-left-color: #ff3b3b; }
+.rec-item.rec-high     { border-left-color: #ff8c00; }
+.rec-item.rec-medium   { border-left-color: #f5c518; }
+.rec-badge { flex-shrink:0; margin-top:2px; }
+.rec-content { flex:1; }
+.rec-target {
+  font-family:monospace; font-size:0.82rem; font-weight:700;
+  color: var(--text); margin-bottom:4px;
+}
+.rec-action {
+  font-size:0.83rem; color: var(--text2); line-height:1.6;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCORING FORMULA BOX
+═══════════════════════════════════════════════════════ */
+.formula-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 20px 24px; margin-bottom:40px;
+}
+.formula-box pre {
+  font-family:monospace; font-size:0.8rem; color: var(--text2);
+  white-space:pre-wrap; line-height:1.8;
+}
+
+/* ═══════════════════════════════════════════════════════
+   FOOTER
+═══════════════════════════════════════════════════════ */
+footer {
+  border-top: 1px solid var(--border);
+  margin-top:60px; padding:24px 0;
+  font-size:0.72rem; color: var(--text3);
+  text-align:center; line-height:2;
+}
+footer .highlight { color: var(--text2); }
+
+/* ═══════════════════════════════════════════════════════
+   SCROLLBAR
+═══════════════════════════════════════════════════════ */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius:3px; }
+
+/* ═══════════════════════════════════════════════════════
+   ANIMATIONS
+═══════════════════════════════════════════════════════ */
+@keyframes fadeUp {
+  from { opacity:0; transform:translateY(12px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+.scard    { animation: fadeUp 0.4s ease both; }
+.scard:nth-child(1) { animation-delay:0.05s; }
+.scard:nth-child(2) { animation-delay:0.10s; }
+.scard:nth-child(3) { animation-delay:0.15s; }
+.scard:nth-child(4) { animation-delay:0.20s; }
+.scard:nth-child(5) { animation-delay:0.25s; }
+.scard:nth-child(6) { animation-delay:0.30s; }
+.scard:nth-child(7) { animation-delay:0.35s; }
+
+/* ═══════════════════════════════════════════════════════
+   PRINT
+═══════════════════════════════════════════════════════ */
+@media print {
+  [data-theme="dark"] { --bg:#fff; --bg2:#fff; --bg3:#f5f5f5; --bg4:#eee;
+    --text:#111; --text2:#333; --text3:#666; --border:#ddd; --border2:#ccc; }
+  body::before { display:none; }
+  .theme-toggle, .nav-bar { display:none; }
+  header { position:static; }
+  .finding-card, .rec-item { break-inside:avoid; }
+  .findings-table tbody tr { break-inside:avoid; }
+}
+
+/* ═══════════════════════════════════════════════════════
+   RESPONSIVE
+═══════════════════════════════════════════════════════ */
+@media (max-width:640px) {
+  .header-right { display:none; }
+  .risk-gauge-wrap { flex-direction:column; align-items:flex-start; }
+  .fc-header { flex-wrap:wrap; }
+  .fc-id { margin-left:0; }
+}
   </style>
 </head>
 <body>
 
-<!-- ═══════════════════════════════════════════════════
+<!-- ── THEME TOGGLE ── -->
+<button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+  <span class="icon" id="theme-icon">🌙</span>
+  <span id="theme-label">Light mode</span>
+</button>
+
+<!-- ═══════════════════════════════════════════════════════
      HEADER
-═══════════════════════════════════════════════════ -->
+═══════════════════════════════════════════════════════ -->
 <header>
-  <div class="logo-block">
-    <img src="{{ logo_filename }}" alt="SentinelX" />
-    <div>
-      <div class="brand">Sentinel<span>X</span></div>
-      <div style="font-size:0.65rem;color:#555;letter-spacing:0.1em">NETLAB V1 — AUDIT REPORT</div>
+  <div class="header-inner">
+    <div class="header-left">
+      <div class="header-logo">
+        <img src="{{ logo_filename }}" alt="SentinelX"/>
+      </div>
+      <div class="header-brand">
+        <div class="name">Sentinel<span>X</span></div>
+        <div class="sub">NetLab V1 &nbsp;·&nbsp; Audit Report</div>
+      </div>
     </div>
-  </div>
-  <div class="report-meta">
-    <div><strong>Session</strong> {{ session.id }}</div>
-    <div><strong>Target</strong> {{ session.target }}</div>
-    <div><strong>Generated</strong> {{ generated_at }}</div>
+    <div class="header-right">
+      <div class="label">Target</div>
+      <div class="value">{{ session.target }}</div>
+      <div class="generated">Generated {{ generated_at }}</div>
+    </div>
   </div>
 </header>
 
+<!-- ── NAV ── -->
+<nav class="nav-bar">
+  <a href="#summary">Summary</a>
+  <a href="#session">Session</a>
+  <a href="#network">Network</a>
+  <a href="#findings">Findings</a>
+  <a href="#details">Details</a>
+  {% if has_recommendations %}<a href="#recommendations">Recommendations</a>{% endif %}
+  <a href="#formula">Scoring</a>
+</nav>
+
 <div class="container">
 
-  <!-- ── EXECUTIVE SUMMARY ── -->
-  <div class="section-title">Executive Summary</div>
+  <!-- ═══════════════════════════════════════════════════════
+       EXECUTIVE SUMMARY
+  ═══════════════════════════════════════════════════════ -->
+  <div id="summary">
+    <div class="section-header">
+      <div class="section-icon">⚡</div>
+      <div>
+        <span class="section-label">Section 01</span>
+        <div class="section-title">Executive Summary</div>
+      </div>
+    </div>
 
-  <div class="summary-grid">
+    <!-- Risk gauge + overall -->
     {% if global_score is not none %}
-    <div class="card score">
-      <div class="card-value">{{ "%.0f"|format(global_score) }}</div>
-      <div class="card-label">Global Risk Score</div>
+    {% set score_int = global_score|int %}
+    {% set circumference = 283 %}
+    {% set fill_offset = circumference * (1 - global_score / 100) %}
+    {% if global_score >= 70 %}
+      {% set score_color = '#ff3b3b' %}{% set risk_level = 'CRITICAL RISK' %}
+    {% elif global_score >= 45 %}
+      {% set score_color = '#f5c518' %}{% set risk_level = 'HIGH RISK' %}
+    {% elif global_score >= 20 %}
+      {% set score_color = '#ff8c00' %}{% set risk_level = 'MEDIUM RISK' %}
+    {% else %}
+      {% set score_color = '#4fc3f7' %}{% set risk_level = 'LOW RISK' %}
+    {% endif %}
+    <div class="risk-gauge-wrap">
+      <div class="risk-circle">
+        <svg viewBox="0 0 100 100">
+          <circle class="track" cx="50" cy="50" r="45"/>
+          <circle class="fill" cx="50" cy="50" r="45"
+            stroke="{{ score_color }}"
+            stroke-dasharray="{{ circumference }}"
+            stroke-dashoffset="{{ fill_offset }}"/>
+        </svg>
+        <div class="center-text">
+          <span class="score-num" style="color:{{ score_color }}">{{ score_int }}</span>
+          <span class="score-sub">/100</span>
+        </div>
+      </div>
+      <div class="risk-info">
+        <div class="risk-label">Global Network Risk Score</div>
+        <div class="risk-title" style="color:{{ score_color }}">{{ risk_level }}</div>
+        <div class="risk-desc">
+          Score based on highest-severity open finding.
+          Worst-case metric — not an average.
+        </div>
+      </div>
     </div>
     {% endif %}
-    <div class="card critical">
-      <div class="card-value">{{ severity_counts.critical }}</div>
-      <div class="card-label">Critical</div>
-    </div>
-    <div class="card high">
-      <div class="card-value">{{ severity_counts.high }}</div>
-      <div class="card-label">High</div>
-    </div>
-    <div class="card medium">
-      <div class="card-value">{{ severity_counts.medium }}</div>
-      <div class="card-label">Medium</div>
-    </div>
-    <div class="card low">
-      <div class="card-value">{{ severity_counts.low }}</div>
-      <div class="card-label">Low</div>
-    </div>
-    <div class="card info">
-      <div class="card-value">{{ severity_counts.info }}</div>
-      <div class="card-label">Info</div>
-    </div>
-    <div class="card" style="border-color:#333">
-      <div class="card-value" style="color:#e0e0e0">{{ findings|length }}</div>
-      <div class="card-label">Total Findings</div>
+
+    <div class="summary-grid">
+      <div class="scard critical"><div class="val">{{ severity_counts.critical }}</div><div class="lbl">Critical</div></div>
+      <div class="scard high">   <div class="val">{{ severity_counts.high }}</div>   <div class="lbl">High</div></div>
+      <div class="scard medium"> <div class="val">{{ severity_counts.medium }}</div> <div class="lbl">Medium</div></div>
+      <div class="scard low">    <div class="val">{{ severity_counts.low }}</div>    <div class="lbl">Low</div></div>
+      <div class="scard info">   <div class="val">{{ severity_counts.info }}</div>   <div class="lbl">Info</div></div>
+      <div class="scard total">  <div class="val">{{ findings|length }}</div>        <div class="lbl">Total</div></div>
     </div>
   </div>
 
-  {% if global_score is not none %}
-  <div class="score-bar-wrap">
-    <div class="score-bar-label">
-      <span>Global network risk score</span>
-      <span style="color:#e63939;font-weight:700">{{ "%.1f"|format(global_score) }} / 100</span>
+  <!-- ═══════════════════════════════════════════════════════
+       SESSION INFORMATION
+  ═══════════════════════════════════════════════════════ -->
+  <div id="session">
+    <div class="section-header">
+      <div class="section-icon">🗂</div>
+      <div>
+        <span class="section-label">Section 02</span>
+        <div class="section-title">Session Information</div>
+      </div>
     </div>
-    <div class="score-bar-track">
-      <div class="score-bar-fill" style="
-        width: {{ global_score }}%;
-        background: {% if global_score >= 70 %}#ff3b3b{% elif global_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %};
-      "></div>
+    <div class="info-grid">
+      {% for label, val in [
+        ('Session ID',  session.id),
+        ('Target',      session.target),
+        ('Profile',     session.profile),
+        ('Status',      session.status),
+        ('Started',     session.start_time or '—'),
+        ('Ended',       session.end_time or '—'),
+      ] %}
+      <div class="info-cell">
+        <div class="ik">{{ label }}</div>
+        <div class="iv">{{ val }}</div>
+      </div>
+      {% endfor %}
+      {% if session.sentinel_target_network %}
+      <div class="info-cell">
+        <div class="ik">Sentinel Network</div>
+        <div class="iv">{{ session.sentinel_target_network }}</div>
+      </div>
+      {% endif %}
+      {% if session.sentinel_gateway_ip %}
+      <div class="info-cell">
+        <div class="ik">Gateway IP</div>
+        <div class="iv">{{ session.sentinel_gateway_ip }}</div>
+      </div>
+      {% endif %}
+      {% if session.sentinel_gateway_mac %}
+      <div class="info-cell">
+        <div class="ik">Gateway MAC</div>
+        <div class="iv">{{ session.sentinel_gateway_mac }}</div>
+      </div>
+      {% endif %}
     </div>
   </div>
-  {% endif %}
 
-  <!-- ── SESSION INFO ── -->
-  <div class="section-title">Session Information</div>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:32px">
-    {% for key, val in [
-      ('Session ID', session.id),
-      ('Target', session.target),
-      ('Profile', session.profile),
-      ('Status', session.status),
-      ('Started', session.start_time),
-      ('Ended', session.end_time or '—'),
-    ] %}
-    <div style="background:#111;border:1px solid #1e1e1e;border-radius:5px;padding:12px 16px">
-      <div style="font-size:0.65rem;color:#555;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px">{{ key }}</div>
-      <div style="font-family:monospace;font-size:0.82rem;color:#ccc">{{ val }}</div>
+  <!-- ═══════════════════════════════════════════════════════
+       NETWORK OVERVIEW
+  ═══════════════════════════════════════════════════════ -->
+  <div id="network">
+    <div class="section-header">
+      <div class="section-icon">🌐</div>
+      <div>
+        <span class="section-label">Section 03</span>
+        <div class="section-title">Network Overview</div>
+      </div>
+    </div>
+    <div class="network-overview">
+      {% if host_map %}
+      <div class="host-list">
+        {% for ip, data in host_map.items()|sort %}
+        <div class="host-card">
+          <div class="h-ip">{{ ip }}</div>
+          {% if data.os %}<div class="h-os">{{ data.os }}</div>{% endif %}
+          {% if data.ports %}
+          <div class="h-ports">
+            {% for p in data.ports[:8] %}
+            <span class="port-pip {% if p in [22,23,80,443,445,3389,21,8080] %}risk-hi{% endif %}">{{ p }}</span>
+            {% endfor %}
+            {% if data.ports|length > 8 %}<span class="port-pip">+{{ data.ports|length - 8 }}</span>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div style="color:var(--text3);font-size:0.84rem;padding:8px 0">
+        No host discovery data available for this session.
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════
+       FINDINGS OVERVIEW
+  ═══════════════════════════════════════════════════════ -->
+  {% if findings %}
+  <div id="findings">
+    <div class="section-header">
+      <div class="section-icon">🔍</div>
+      <div>
+        <span class="section-label">Section 04</span>
+        <div class="section-title">Findings Overview</div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="findings-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Target</th>
+            <th>Port / Service</th>
+            <th>Finding</th>
+            <th>Score</th>
+            <th>Confidence</th>
+            <th>Exposure</th>
+            <th>CVE</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in findings %}
+          <tr>
+            <td><span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span></td>
+            <td class="mono">{{ f.target_ip }}</td>
+            <td class="mono">
+              {% if f.target_port %}{{ f.target_port }}/tcp{% else %}—{% endif %}
+              {% if f.target_service %}<br/><span class="dim">{{ f.target_service }}</span>{% endif %}
+            </td>
+            <td>
+              <span class="badge badge-{{ f.category.value }}">{{ f.category.value }}</span>
+              {% if f.service_version %}<br/><span class="dim">{{ f.service_version[:40] }}</span>{% endif %}
+            </td>
+            <td class="score-col">
+              {% if f.risk_score is not none %}
+              <span style="color:{% if f.risk_score>=70 %}#ff4f4f{% elif f.risk_score>=45 %}#f5c518{% else %}#4fc3f7{% endif %};font-weight:700">
+                {{ "%.1f"|format(f.risk_score) }}
+              </span>
+              {% else %}<span class="dim">—</span>{% endif %}
+            </td>
+            <td><span class="dim">{{ f.confidence.name }}</span></td>
+            <td><span class="dim">{{ f.exposure.value }}</span></td>
+            <td>
+              {% if f.cve_refs %}
+              <span class="cve-tag">{{ f.cve_refs[0] }}</span>
+              {% if f.cve_refs|length > 1 %}<span class="dim">+{{ f.cve_refs|length - 1 }}</span>{% endif %}
+              {% else %}<span class="dim">—</span>{% endif %}
+            </td>
+            <td><span class="status-{{ f.status.value }}">{{ f.status.value }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════
+       FINDING DETAILS
+  ═══════════════════════════════════════════════════════ -->
+  <div id="details">
+    <div class="section-header">
+      <div class="section-icon">📋</div>
+      <div>
+        <span class="section-label">Section 05</span>
+        <div class="section-title">Finding Details</div>
+      </div>
+    </div>
+
+    {% for f in findings %}
+    <div class="finding-card sev-{{ f.severity.value }}">
+      <div class="fc-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+        <span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span>
+        <span class="fc-target">{{ f.target_ip }}{% if f.target_port %}:{{ f.target_port }}{% endif %}</span>
+        {% if f.target_service %}<span class="fc-service">{{ f.target_service }}</span>{% endif %}
+        {% if f.service_version %}<span class="fc-version">{{ f.service_version[:50] }}</span>{% endif %}
+        <span class="fc-module">{{ f.module }}</span>
+        <span class="fc-id">{{ f.id[:8] }}</span>
+      </div>
+      <div class="fc-body">
+        <div class="fc-grid">
+          <!-- Severity -->
+          <div class="fc-field">
+            <div class="fk">Severity</div>
+            <div class="fv"><span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span></div>
+          </div>
+          <!-- Risk Score -->
+          <div class="fc-field">
+            <div class="fk">Risk Score</div>
+            <div class="fv" style="font-weight:700;{% if f.risk_score is not none %}color:{% if f.risk_score>=70 %}#ff4f4f{% elif f.risk_score>=45 %}#f5c518{% else %}#4fc3f7{% endif %}{% endif %}">
+              {% if f.risk_score is not none %}{{ "%.1f"|format(f.risk_score) }} / 100{% else %}Not scored{% endif %}
+            </div>
+          </div>
+          <!-- CVSS -->
+          {% if f.cvss_score is not none %}
+          <div class="fc-field">
+            <div class="fk">CVSS Score</div>
+            <div class="fv mono">{{ f.cvss_score }}</div>
+          </div>
+          {% endif %}
+          <!-- Confidence -->
+          <div class="fc-field">
+            <div class="fk">Confidence</div>
+            <div class="fv">{{ f.confidence.name }} <span style="color:var(--text3)">({{ f.confidence.value }})</span></div>
+          </div>
+          <!-- Exposure -->
+          <div class="fc-field">
+            <div class="fk">Exposure</div>
+            <div class="fv">{{ f.exposure.value }}</div>
+          </div>
+          <!-- Status -->
+          <div class="fc-field">
+            <div class="fk">Status</div>
+            <div class="fv"><span class="status-{{ f.status.value }}">{{ f.status.value }}</span></div>
+          </div>
+          <!-- Detection time -->
+          <div class="fc-field">
+            <div class="fk">Detected</div>
+            <div class="fv mono" style="font-size:0.75rem;color:var(--text3)">{{ f.created_at[:19].replace('T',' ') }}</div>
+          </div>
+          <!-- Category -->
+          <div class="fc-field">
+            <div class="fk">Category</div>
+            <div class="fv"><span class="badge badge-{{ f.category.value }}">{{ f.category.value }}</span></div>
+          </div>
+        </div>
+
+        <!-- CVE refs -->
+        {% if f.cve_refs %}
+        <div class="fc-field" style="margin-bottom:12px">
+          <div class="fk">CVE References</div>
+          <div class="fv">
+            <div class="cve-row">
+              {% for cve in f.cve_refs %}
+              <span class="cve-tag">{{ cve }}</span>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Evidence -->
+        {% if f.evidence.raw %}
+        <div class="evidence-block">
+          <div class="ev-cmd">$ <span>{{ f.evidence.command }}</span></div>
+          <div class="ev-raw">{{ f.evidence.raw[:500] }}{% if f.evidence.raw|length > 500 %}…{% endif %}</div>
+        </div>
+        {% endif %}
+
+      </div>
     </div>
     {% endfor %}
   </div>
 
-  <!-- ── FINDINGS SUMMARY TABLE ── -->
-  {% if findings %}
-  <div class="section-title">Findings Overview</div>
-  <div style="overflow-x:auto;margin-bottom:40px">
-    <table class="findings-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Severity</th>
-          <th>Target</th>
-          <th>Port</th>
-          <th>Service</th>
-          <th>Module</th>
-          <th>Score</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for f in findings|sort(attribute='severity.value') %}
-        <tr>
-          <td class="col-id">{{ f.id[:8] }}</td>
-          <td><span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span></td>
-          <td class="col-ip">{{ f.target_ip }}</td>
-          <td class="col-port">{{ f.target_port if f.target_port else '—' }}</td>
-          <td>{{ f.target_service or '—' }}</td>
-          <td style="font-size:0.75rem;color:#777">{{ f.module }}</td>
-          <td class="col-score">
-            {% if f.risk_score is not none %}
-              <span style="color:{% if f.risk_score >= 70 %}#ff3b3b{% elif f.risk_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %}">
-                {{ "%.1f"|format(f.risk_score) }}
-              </span>
-            {% else %}—{% endif %}
-          </td>
-          <td>
-            <span class="status-{{ f.status.value }}">{{ f.status.value }}</span>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-
-  <!-- ── FINDING DETAILS ── -->
-  <div class="section-title">Finding Details</div>
-  {% for f in findings|sort(attribute='severity.value') %}
-  <div class="finding-detail sev-{{ f.severity.value }}">
-    <div class="finding-detail-header">
-      <span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span>
-      <span class="ftarget">{{ f.target_ip }}{% if f.target_port %}:{{ f.target_port }}{% endif %}</span>
-      {% if f.target_service %}<span style="color:#888;font-size:0.8rem">{{ f.target_service }}</span>{% endif %}
-      {% if f.service_version %}<span style="color:#666;font-size:0.75rem">{{ f.service_version }}</span>{% endif %}
-      <span class="fid">{{ f.id[:8] }}</span>
-      <span class="fmodule">{{ f.module }}</span>
-    </div>
-    <div class="finding-detail-body">
-
-      <div class="detail-row">
-        <span class="detail-key">Confidence</span>
-        <span class="detail-val">{{ f.confidence.name }} ({{ f.confidence.value }})</span>
-      </div>
-      <div class="detail-row">
-        <span class="detail-key">Exposure</span>
-        <span class="detail-val">{{ f.exposure.value }}</span>
-      </div>
-      {% if f.risk_score is not none %}
-      <div class="detail-row">
-        <span class="detail-key">Risk Score</span>
-        <span class="detail-val" style="font-weight:700;color:{% if f.risk_score >= 70 %}#ff3b3b{% elif f.risk_score >= 45 %}#f5c518{% else %}#4fc3f7{% endif %}">
-          {{ "%.1f"|format(f.risk_score) }} / 100
-        </span>
-      </div>
-      {% endif %}
-      {% if f.cvss_score is not none %}
-      <div class="detail-row">
-        <span class="detail-key">CVSS</span>
-        <span class="detail-val">{{ f.cvss_score }}</span>
-      </div>
-      {% endif %}
-      {% if f.cve_refs %}
-      <div class="detail-row">
-        <span class="detail-key">CVE Refs</span>
-        <span class="detail-val">
-          <div class="cve-list">
-            {% for cve in f.cve_refs %}
-            <span class="cve-tag">{{ cve }}</span>
-            {% endfor %}
-          </div>
-        </span>
-      </div>
-      {% endif %}
-      <div class="detail-row">
-        <span class="detail-key">Status</span>
-        <span class="detail-val status-{{ f.status.value }}">{{ f.status.value }}</span>
-      </div>
-      <div class="detail-row">
-        <span class="detail-key">Detected</span>
-        <span class="detail-val" style="color:#666;font-size:0.78rem">{{ f.created_at }}</span>
-      </div>
-
-      <!-- Evidence -->
-      {% if f.evidence.raw %}
-      <div class="evidence-block">
-        <div class="ev-cmd">$ <span>{{ f.evidence.command }}</span></div>
-        <pre>{{ f.evidence.raw[:600] }}{% if f.evidence.raw|length > 600 %}…{% endif %}</pre>
-      </div>
-      {% endif %}
-
-      <!-- Explanation -->
-      {% if f.explanation %}
-      <div class="explain-block">
-        <div class="explain-card what">
-          <div class="explain-title">▸ What</div>
-          <p>{{ f.explanation.what }}</p>
-        </div>
-        <div class="explain-card attack">
-          <div class="explain-title">▸ Attack</div>
-          <p>{{ f.explanation.attack }}</p>
-        </div>
-        <div class="explain-card defend">
-          <div class="explain-title">▸ Defense</div>
-          <p>{{ f.explanation.defense }}</p>
-        </div>
-      </div>
-      {% endif %}
-
-    </div>
-  </div>
-  {% endfor %}
-
   {% else %}
-  <div style="text-align:center;padding:60px;color:#444">
-    <div style="font-size:2rem;margin-bottom:12px">○</div>
+  <div style="text-align:center;padding:80px;color:var(--text3)">
+    <div style="font-size:2.5rem;margin-bottom:14px;opacity:0.3">○</div>
     <div>No findings for this session.</div>
   </div>
   {% endif %}
 
-  <!-- ── SCORING FORMULA ── -->
-  <div class="section-title">Scoring Formula</div>
-  <div class="formula-box">
-    <pre>{{ formula }}</pre>
+  <!-- ═══════════════════════════════════════════════════════
+       RECOMMENDATIONS (defense field only — no pedagogy)
+  ═══════════════════════════════════════════════════════ -->
+  {% if has_recommendations %}
+  <div id="recommendations">
+    <div class="section-header">
+      <div class="section-icon">🛡</div>
+      <div>
+        <span class="section-label">Section 06</span>
+        <div class="section-title">Recommendations</div>
+      </div>
+    </div>
+    <div class="rec-list">
+      {% for f in findings %}
+      {% if f.explanation and f.explanation.defense %}
+      <div class="rec-item rec-{{ f.severity.value }}">
+        <div class="rec-badge">
+          <span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span>
+        </div>
+        <div class="rec-content">
+          <div class="rec-target">
+            {{ f.target_ip }}{% if f.target_port %}:{{ f.target_port }}{% endif %}
+            {% if f.target_service %} — {{ f.target_service }}{% endif %}
+          </div>
+          <div class="rec-action">{{ f.explanation.defense }}</div>
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════════════════════════════════════════════
+       SCORING FORMULA
+  ═══════════════════════════════════════════════════════ -->
+  <div id="formula">
+    <div class="section-header">
+      <div class="section-icon">📐</div>
+      <div>
+        <span class="section-label">Methodology</span>
+        <div class="section-title">Risk Scoring Formula</div>
+      </div>
+    </div>
+    <div class="formula-box">
+      <pre>{{ formula }}</pre>
+    </div>
   </div>
 
 </div><!-- /container -->
 
-<!-- ═══════════════════════════════════════════════════
+<!-- ═══════════════════════════════════════════════════════
      FOOTER
-═══════════════════════════════════════════════════ -->
+═══════════════════════════════════════════════════════ -->
 <footer>
-  <div>SentinelX NetLab V1 — Educational Cybersecurity Platform</div>
-  <div><span>LEGAL NOTICE:</span> This tool is designed exclusively for networks and systems you own or have explicit written authorization to test.</div>
-  <div style="margin-top:8px;color:#333">Generated {{ generated_at }} — Session {{ session.id }}</div>
+  <div><span class="highlight">SentinelX NetLab V1</span> — Network Audit Platform</div>
+  <div>Session <span class="highlight">{{ session.id }}</span> &nbsp;·&nbsp; {{ generated_at }}</div>
+  <div style="margin-top:6px;font-size:0.65rem;opacity:0.6">
+    LEGAL NOTICE: This report was generated for networks and systems you own or have explicit written authorization to test.
+  </div>
 </footer>
+
+<script>
+/* ── Theme toggle ── */
+function toggleTheme() {
+  const html = document.documentElement;
+  const isDark = html.getAttribute('data-theme') === 'dark';
+  html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  document.getElementById('theme-icon').textContent  = isDark ? '🌙' : '☀️';
+  document.getElementById('theme-label').textContent = isDark ? 'Light mode' : 'Dark mode';
+  localStorage.setItem('sentinelx-theme', isDark ? 'light' : 'dark');
+}
+
+/* ── Restore saved theme ── */
+(function() {
+  const saved = localStorage.getItem('sentinelx-theme');
+  if (saved) {
+    document.documentElement.setAttribute('data-theme', saved);
+    if (saved === 'light') {
+      document.getElementById('theme-icon').textContent  = '☀️';
+      document.getElementById('theme-label').textContent = 'Dark mode';
+    }
+  }
+})();
+
+/* ── Animate score ring on load ── */
+window.addEventListener('load', function() {
+  const fill = document.querySelector('.risk-circle .fill');
+  if (fill) {
+    const target = parseFloat(fill.getAttribute('stroke-dashoffset'));
+    fill.style.strokeDashoffset = '283';
+    setTimeout(function() {
+      fill.style.transition = 'stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1)';
+      fill.style.strokeDashoffset = target;
+    }, 200);
+  }
+});
+</script>
 
 </body>
 </html>

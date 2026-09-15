@@ -165,6 +165,11 @@ def _generate_html(
             f for f in findings
             if f.severity.value in ("critical", "high") and f.status.value == "open"
         ]
+        host_map = _build_host_map(findings)
+        has_recommendations = any(
+            f.explanation and f.explanation.defense
+            for f in findings
+        )
 
         rendered = template.render(
             session=session,
@@ -176,6 +181,8 @@ def _generate_html(
             formula=FORMULA_DESCRIPTION,
             generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             logo_filename=_LOGO_FILENAME,
+            host_map=host_map,
+            has_recommendations=has_recommendations,
         )
 
         output.write_text(rendered, encoding="utf-8")
@@ -216,3 +223,33 @@ def _compute_global_score(findings: List[Finding]) -> Optional[float]:
         and float(f.confidence) >= 0.7
     ]
     return max(scores) if scores else None
+
+
+def _build_host_map(findings: List[Finding]) -> dict:
+    """Build a {ip: {os, ports}} map from Findings for the Network Overview.
+
+    Only uses data actually present in Findings — never invents hosts or ports.
+
+    Args:
+        findings: List of Finding objects.
+
+    Returns:
+        dict: {ip: {"os": str, "ports": List[int]}}
+    """
+    hosts: dict = {}
+    for f in findings:
+        ip = f.target_ip
+        if not ip:
+            continue
+        if ip not in hosts:
+            hosts[ip] = {"os": "", "ports": []}
+        # OS from device_fingerprint findings
+        if f.module == "device_fingerprint" and f.service_version:
+            hosts[ip]["os"] = f.service_version
+        # Ports from tcp_scan findings
+        if f.target_port is not None and f.target_port not in hosts[ip]["ports"]:
+            hosts[ip]["ports"].append(f.target_port)
+    # Sort ports per host
+    for ip in hosts:
+        hosts[ip]["ports"].sort()
+    return hosts
