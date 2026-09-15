@@ -1,360 +1,508 @@
-# Ticket #016 — Sentinel : spec complète
+# Sentinel V1 — Document de conception (révision 3)
 
-## C'est quoi le Sentinel ?
-
-Le Sentinel est la fonctionnalité de surveillance continue de NetLab. Là où les modules DISCOVER et DETECT font un audit ponctuel (tu lances un scan, tu obtiens un résultat), le Sentinel tourne en arrière-plan et surveille les changements sur le réseau.
-
-**Principe** : il apprend d'abord l'état "normal" du réseau (la baseline), puis il compare régulièrement l'état actuel à cette baseline. Si quelque chose change, il crée un événement.
-
-Ce n'est **pas** un EDR, pas un SIEM, pas CrowdStrike. C'est simple, déterministe, et local.
+> Révision 2 → Révision 3 : intégration de la revue finale produit/architecture.
+> **Aucun code, aucune migration DB, aucune modification de structure avant validation finale.**
+> Points d'approbation A, B, C mis à jour ci-dessous.
 
 ---
 
-## Ce que le Sentinel détecte (V1)
+## 1. Ce qui reste inchangé (validé en révision 2)
 
-Trois types de changements uniquement :
+- 5 fichiers : baseline.py, whitelist.py, monitor.py, alerting.py, sentinel_manager.py
+- 3 types de changements : new_host, new_port, mac_change
+- Intervalle : 60s par défaut, configurable dans config.yaml
+- Baseline persistée à l'arrêt (Ctrl+C et stop propre)
+- ZERO print(), ZERO import sqlite3, ZERO risk_score dans sentinel/
+- Pas de capture de paquets, pas de ML, pas de daemon système
+- removed_host hors scope V1
+- Séparation Event / Alerte / Finding (matrice inchangée)
+- Whitelist visible en INFO (whitelisté ≠ invisible)
+- Mode silencieux non permanent
+- Status compact deux lignes
+- Format `37/42 machines`
+- États ACTIF / DÉGRADÉ / INACTIF
+- Host disparu : pas d'alerte V1, baseline conservée
+- Arrêt propre : baseline et événements conservés
+- Scheduler V3 hors scope
 
-| Changement | Exemple | Pourquoi c'est important |
+---
+
+## 2. Identité réseau — triplet NetworkIdentity
+
+### Définition
+
+Un réseau Sentinel est identifié par un triplet exact :
+
+```python
+@dataclass
+class NetworkIdentity:
+    target_network: str   # CIDR — "192.168.76.0/24"
+    gateway_ip:     str   # IP de la gateway du réseau cible
+    gateway_mac:    str   # MAC de la gateway (minuscules, format aa:bb:cc:dd:ee:ff)
+                          # "" si la gateway ne répond pas à l'ARP
+```
+
+### Règle MAC vide — définitive et verrouillée
+
+> `gateway_mac = ""` n'est jamais un wildcard.
+
+Comportement exact selon les cas :
+
+| MAC stockée en baseline | MAC détectée actuellement | Résultat |
 |---|---|---|
-| **Nouveau host** | Une machine inconnue apparaît sur le réseau | Intrusion, appareil non autorisé |
-| **Nouveau port ouvert** | Le port 4444 s'ouvre sur une machine connue | Backdoor, malware, service non autorisé |
-| **Changement de MAC** | L'IP 192.168.1.1 répond avec un MAC différent | ARP spoofing, remplacement d'équipement |
+| `aa:aa:aa:aa:aa:aa` | `aa:aa:aa:aa:aa:aa` | Match exact → baseline chargée |
+| `aa:aa:aa:aa:aa:aa` | `bb:bb:bb:bb:bb:bb` | Identité non correspondante → confirmation requise |
+| `aa:aa:aa:aa:aa:aa` | `""` (ARP sans réponse) | Identité incomplète → **jamais chargée automatiquement** |
+| `""` | `""` | Match exact (deux identités partielles) → baseline chargée |
+| `""` | `bb:bb:bb:bb:bb:bb` | Identité non correspondante → confirmation requise |
 
-Rien d'autre en V1. Pas d'analyse comportementale, pas de détection d'anomalies, pas de machine learning.
+**Règle absolue :** une identité avec `gateway_mac=""` ne peut jamais réutiliser automatiquement une baseline dont `gateway_mac` est renseignée. L'identité partielle est non confirmée et suit le flux de confirmation/apprentissage.
 
----
-
-## Décisions architecturales validées
-
-### 1. Intervalle de surveillance
-60 secondes par défaut, configurable dans `config.yaml` :
-```yaml
-sentinel:
-  interval_seconds: 60
-```
-
-### 2. Restart — réutiliser la baseline existante par défaut
-
-Si une baseline existe déjà **pour le même réseau cible**, elle est réutilisée. Le Sentinel ne réapprend pas à chaque démarrage — ce serait inutile et coûteux en trafic réseau.
-
-La baseline n'est réapprise que dans deux cas :
-- Aucune baseline n'existe encore pour ce réseau
-- L'utilisateur lance explicitement `netlab sentinel start --relearn`
-
-### 3. Ctrl+C — la baseline est persistée
-
-L'arrêt du Sentinel (Ctrl+C ou `netlab sentinel stop`) ne supprime **pas** la baseline. Elle reste en DB pour la prochaine session. Seule une action explicite `--relearn` ou une suppression manuelle efface la baseline.
-
-### 4. La baseline est liée au réseau cible — pas à une session générique
-
-**Règle critique** : une baseline appartient à un `(target_network, session_id)` précis.
-
-Sans cette contrainte, le scénario suivant serait possible :
-```
-Sentinel hier → réseau 192.168.1.0/24  → baseline apprise
-Aujourd'hui  → réseau 10.0.0.0/24     → même baseline réutilisée  💀
-```
-
-La baseline doit donc être cherchée par `target_network`. Si le réseau cible est différent, aucune baseline existante ne correspond → on apprend une nouvelle baseline.
-
-En pratique dans la DB (table `baseline`) : chaque entrée est liée à un `asset_id`, et chaque asset a une IP. La baseline est récupérée en filtrant les assets dont l'IP commence par le préfixe du `target_network` passé à `sentinel start`.
-
----
-
-## Les 5 fichiers
+### Détection de l'identité courante au démarrage
 
 ```
-sentinel/
-├── __init__.py
-├── baseline.py          — apprend et stocke l'état normal
-├── monitor.py           — compare état actuel vs baseline
-├── alerting.py          — crée les événements (events table + Findings)
-├── whitelist.py         — charge ~/.netlab/baseline_whitelist.yaml
-└── sentinel_manager.py  — orchestre start/status/stop
+1. Lire la table de routage OS → gateway_ip du réseau cible
+2. Lire le cache ARP → gateway_mac correspondant à gateway_ip
+   Si pas de réponse ARP → gateway_mac = ""
+3. Construire NetworkIdentity(target_network, gateway_ip, gateway_mac)
 ```
 
----
-
-## sentinel/baseline.py
-
-**Responsabilité** : capturer l'état normal du réseau et le stocker dans la table `baseline`.
-
-```python
-def learn_baseline(target_network: str, session_id: str) -> None
-def get_baseline(target_network: str, session_id: str) -> Dict[str, BaselineEntry]
-def baseline_exists(target_network: str, session_id: str) -> bool
-```
-
-`BaselineEntry` est un dataclass interne :
-```python
-@dataclass
-class BaselineEntry:
-    asset_id: str
-    ip: str
-    mac: str
-    ports: List[int]        # liste des ports TCP ouverts normaux
-    last_scan: str          # ISO 8601
-```
-
-**Garantie DB — Option A approuvée :**
-
-La table `baseline` contient un champ `target_network TEXT NOT NULL` qui stocke
-la valeur exacte passée à `learn_baseline` (ex. `"192.168.1.0/24"`).
-
-`baseline_exists` et `get_baseline` filtrent **uniquement** sur ce champ —
-jamais par inférence de préfixe IP. La relation est explicite, stockée,
-et testable par une requête SQL simple :
+### Lookup baseline
 
 ```sql
-SELECT * FROM baseline WHERE target_network = '192.168.1.0/24'
+SELECT * FROM baseline
+WHERE target_network = :cidr
+  AND gateway_ip     = :gw_ip
+  AND gateway_mac    = :gw_mac
 ```
 
-Cela garantit qu'une baseline apprise sur `192.168.1.0/24` ne sera
-jamais retournée pour `10.0.0.0/24`, même si des assets des deux réseaux
-coexistent dans la même DB de session.
+La comparaison est toujours exacte sur les 3 colonnes, incluant `""`.
 
-**Ce que `learn_baseline` fait :**
-1. Lance `device_fingerprint(target_network, session_id)` → liste des hosts actifs
-2. Pour chaque host → `tcp_scan(ip, session_id)` → liste des ports ouverts
-3. Lit le cache ARP → MACs
-4. Sauvegarde dans la table `baseline` avec `target_network` renseigné
+### Identité non correspondante (CIDR connu, MAC différente ou incomplète)
 
-**Ce que `get_baseline` fait :**
-```sql
-SELECT b.* FROM baseline b
-JOIN assets a ON b.asset_id = a.id
-WHERE b.target_network = :target_network
+Sentinel affiche :
+
 ```
-Retourne uniquement les entrées du bon réseau. Jamais de cross-contamination.
-
-**Ce que `baseline_exists` fait :**
-```sql
-SELECT COUNT(*) FROM baseline WHERE target_network = :target_network
+[!] Identité réseau non reconnue pour 192.168.76.0/24.
+    Gateway connue  : aa:aa:aa:aa:aa:aa
+    Gateway actuelle: bb:bb:bb:bb:bb:bb  (ou: inconnue)
+    Une baseline existe pour ce CIDR mais avec une identité différente.
+    Aucune baseline ne sera chargée automatiquement.
+    Voulez-vous apprendre une nouvelle baseline pour ce réseau ? [y/N]
 ```
-Retourne `True` si au moins une entrée existe pour ce réseau exact.
+
+- Le système ne dit pas "nouveau réseau" ni "ARP spoofing"
+- Il signale une **identité non correspondante**
+- L'historique de l'ancienne identité est conservé intact
+- Si l'utilisateur répond N → Sentinel ne démarre pas
 
 ---
 
-## sentinel/monitor.py
+## 3. Session Sentinel — identité complète
 
-**Responsabilité** : comparer l'état actuel du réseau à la baseline stockée.
+### Règle
 
-```python
-def check_network(
-    target_network: str,
-    session_id: str,
-    baseline: Dict[str, BaselineEntry],
-) -> List[NetworkChange]
-```
+Une session Sentinel active est associée à l'identité réseau **complète**, pas seulement au CIDR.
 
-`NetworkChange` est un dataclass interne :
-```python
-@dataclass
-class NetworkChange:
-    change_type: str    # "new_host" | "new_port" | "mac_change"
-    asset_ip: str
-    detail: str         # description lisible du changement
-    evidence: str       # preuve brute (sortie nmap ou ARP)
-```
+La table `sessions` stockera :
 
-**Logique de comparaison :**
-
-```
-État actuel :
-  - hosts actifs (via ping scan)
-  - ports ouverts par host (via tcp_scan léger)
-  - MACs (via ARP cache)
-
-Pour chaque host actif :
-  → Si IP inconnue de la baseline → NetworkChange("new_host", ...)
-  → Pour chaque port ouvert :
-      Si port non dans baseline.ports → NetworkChange("new_port", ...)
-  → Si MAC différent de baseline.mac → NetworkChange("mac_change", ...)
-```
-
-`monitor.py` ne crée pas de Finding. Il retourne des changements bruts.
-
----
-
-## sentinel/alerting.py
-
-**Responsabilité** : transformer les `NetworkChange` en événements DB et en Findings.
-
-```python
-def process_changes(
-    changes: List[NetworkChange],
-    session_id: str,
-    whitelist: Whitelist,
-    max_alerts_per_hour: int,
-) -> List[Finding]
-```
-
-**Règles :**
-- Chaque changement → INSERT dans la table `events` (qu'il soit whitelisté ou non)
-- Changement whitelisté → `events.resolved = 1`, pas de Finding
-- Changement non whitelisté → Finding de catégorie `NETWORK`
-- Si le nombre d'alertes dans la dernière heure dépasse `max_alerts_per_hour` → mode silencieux (enregistrement DB uniquement, pas de Finding retourné, pas d'affichage)
-
-**Sévérité des Findings Sentinel :**
-
-| Changement | Sévérité | Raison |
+| Colonne | Type | Description |
 |---|---|---|
-| `new_host` | `MEDIUM` | Appareil non autorisé — risque réel mais non confirmé dangereux |
-| `new_port` | `HIGH` | Port inattendu — vecteur de compromission probable |
-| `mac_change` | `HIGH` | ARP spoofing possible — attaque active probable |
+| `sentinel_state` | TEXT | `"active"` / `"degraded"` / `"inactive"` |
+| `last_check_time` | TEXT | ISO 8601 du **dernier check réussi uniquement** |
+| `sentinel_target_network` | TEXT | CIDR surveillé |
+| `sentinel_gateway_ip` | TEXT | IP de la gateway au moment du démarrage |
+| `sentinel_gateway_mac` | TEXT | MAC de la gateway au moment du démarrage |
+
+### Règle last_check_time — précision
+
+`last_check_time` est mis à jour **uniquement** si le check se termine avec succès.
+Un timeout ou une erreur ne modifie jamais `last_check_time`.
+
+```
+10:00 → check réussi   → last_check_time = "10:00:00"
+10:01 → check réussi   → last_check_time = "10:01:00"
+10:02 → timeout        → last_check_time reste "10:01:00"
+10:03 → timeout        → last_check_time reste "10:01:00"
+  → 2 × 60s dépassés depuis 10:01 → sentinel_state = "degraded"
+10:04 → check réussi   → last_check_time = "10:04:00", sentinel_state = "active"
+```
+
+### États et transitions
+
+```
+INACTIF
+  ↓  sentinel start
+ACTIF
+  ↓  2 × interval_seconds sans check réussi
+DÉGRADÉ
+  ↓  check réussi
+ACTIF
+  ↓  sentinel stop / Ctrl+C / fermeture NetLab
+INACTIF
+```
+
+Retour DÉGRADÉ → ACTIF : immédiat dès qu'un check réussit, sans délai.
+
+### [APPROBATION REQUISE — Point A]
+
+Table `baseline` : ajouter `gateway_ip TEXT NOT NULL DEFAULT ''` et `gateway_mac TEXT NOT NULL DEFAULT ''`.
+
+### [APPROBATION REQUISE — Point C — mis à jour]
+
+Table `sessions` : ajouter les 5 colonnes :
+- `sentinel_state TEXT DEFAULT 'inactive'`
+- `last_check_time TEXT`
+- `sentinel_target_network TEXT`
+- `sentinel_gateway_ip TEXT`
+- `sentinel_gateway_mac TEXT`
+
+Option retenue : **C1** — colonnes dans `sessions`. La session représente l'identité réseau complète, cohérent avec le reste du schéma.
+
+**Ni A ni C ne sont implémentés avant le GO final.**
 
 ---
 
-## sentinel/whitelist.py
+## 4. Cycle de vie du compteur d'alertes et du mode silencieux
 
-**Responsabilité** : charger `~/.netlab/baseline_whitelist.yaml` et tester si un changement est autorisé.
+### Règle fondamentale
+
+> Le compteur d'alertes et le mode silencieux sont liés à l'exécution courante de Sentinel.
+
+Un arrêt de Sentinel réinitialise le compteur. Le prochain démarrage constitue une nouvelle période de surveillance. Les événements/Findings/historiques précédents restent en DB.
+
+**Exemple :**
+```
+14:05 → Sentinel passe en mode silencieux (3 alertes en 1h)
+14:30 → Sentinel est arrêté
+15:00 → Sentinel redémarre → compteur = 0, pas de silence hérité
+        Les 35 minutes restantes de l'ancien silence ne sont PAS reprises
+```
+
+### Déclenchement du mode silencieux
 
 ```python
-def load_whitelist() -> Whitelist
-def is_whitelisted(change: NetworkChange, whitelist: Whitelist) -> bool
+if alert_count >= sentinel_max_alerts_per_hour:
+    enter_silent_mode()
 ```
 
-`Whitelist` est un dataclass :
-```python
-@dataclass
-class Whitelist:
-    allowed_new_macs: List[str]
-    allowed_port_changes: List[Dict]   # [{host: ip, ports: [n, n]}]
-    allowed_new_hosts: List[str]
-    sentinel_max_alerts_per_hour: int
-```
+- Seuil : `sentinel_max_alerts_per_hour` (config.yaml, défaut : `3`)
+- Condition : `>=` (atteint ou dépasse)
+- Fenêtre : 1 heure glissante depuis le démarrage de la session courante
+- Durée du silence : 1 heure à partir du déclenchement
+- **Ce qui compte** : alertes de sécurité non whitelistées uniquement
+- **Ce qui ne compte pas** : changements whitelistés (INFO)
 
-Format du fichier :
-```yaml
-allowed_new_macs: []
-allowed_port_changes:
-  - host: 192.168.1.10
-    ports: [8080]
-allowed_new_hosts: []
-sentinel_max_alerts_per_hour: 3
-```
+### Pendant le mode silencieux
 
-Si le fichier n'existe pas → whitelist vide avec `max_alerts_per_hour: 3`.
-
----
-
-## sentinel/sentinel_manager.py
-
-**Responsabilité** : orchestrer start / status / stop. Appelé par `cli.py`.
-
-```python
-def start(
-    target_network: str,
-    session_id: str,
-    force_relearn: bool = False,
-) -> None
-
-def status(session_id: str) -> dict
-
-def stop(session_id: str) -> None
-```
-
-**Flux de `start()` :**
-
-```python
-# 1. Charger la whitelist
-whitelist = load_whitelist()
-
-# 2. Vérifier si une baseline existe pour CE réseau
-if not baseline_exists(target_network, session_id) or force_relearn:
-    display("Aucune baseline pour ce réseau — apprentissage en cours...")
-    learn_baseline(target_network, session_id)
-else:
-    display("Baseline existante trouvée — surveillance démarrée.")
-
-# 3. Boucle de surveillance
-while True:
-    sleep(interval_seconds)
-    current_baseline = get_baseline(target_network, session_id)
-    changes = check_network(target_network, session_id, current_baseline)
-    if changes:
-        findings = process_changes(changes, session_id, whitelist, max_alerts)
-        for f in findings:
-            display(f)    # affiche l'alerte
-    # Mise à jour du statut en DB
-    update_session_status(session_id, "sentinel_running")
-```
-
-**`--relearn` :** flag optionnel qui force la réapprentissage même si une baseline existe, quel que soit le réseau.
-
-**`status()` :** lit la table `sessions` et retourne le statut actuel (running / stopped / last_check timestamp).
-
-**`stop()` :** met à jour le statut en DB. La baseline n'est PAS effacée.
-
----
-
-## Le flux complet
-
-```
-netlab sentinel start --target 192.168.1.0/24
-        ↓
-[Confirmation y/n] — trafic réseau actif
-        ↓
-sentinel_manager.start(target_network="192.168.1.0/24", ...)
-        ↓
-baseline_exists("192.168.1.0/24") ?
-    NON → learn_baseline() → scan + stockage DB
-    OUI → réutiliser baseline existante
-        ↓
-Boucle toutes les 60s :
-    check_network() → List[NetworkChange]
-        ↓
-    [si changements]
-        ↓
-    is_whitelisted() → filtrage
-        ↓
-    process_changes() → events DB + Findings
-        ↓
-    display() alertes
-        ↓
-[Ctrl+C]
-        ↓
-sentinel_manager.stop() → statut DB mis à jour, baseline CONSERVÉE
-```
-
----
-
-## Ce qui NE fait PAS partie du Sentinel V1
-
-- Pas de capture de paquets (pas de Scapy, pas de tcpdump)
-- Pas d'analyse comportementale
-- Pas de corrélation d'événements
-- Pas d'alertes email/webhook
-- Pas de démon système (systemd)
-- Pas d'interface graphique
-
----
-
-## Règles absolues
-
-- **Jamais modifier la configuration système** — observe uniquement
-- **Confirmation y/n avant le scan initial** — trafic réseau actif
-- **Pas de Finding sans preuve** — `evidence.raw` documente le changement observé
-- **ZERO print()** — `display()` de `core/logger.py`
-- **ZERO import sqlite3** hors `core/database.py`
-- **ZERO risk_score** calculé ici
-- **La baseline ne disparaît jamais à l'arrêt**
-
----
-
-## Dépendances
-
-Le Sentinel réutilise ce qui existe :
-
-| Module | Usage |
+| Action | Comportement |
 |---|---|
-| `recon/device_fingerprint.py` | Découverte des hosts pour la baseline et la surveillance |
-| `detect/tcp_scan.py` | Scan des ports pour la baseline et la surveillance |
-| `core/database.py` | Lecture/écriture tables `baseline` et `events` |
-| `core/finding.py` | Création des Findings d'alerte |
-| `core/logger.py` | Affichage Rich |
-| `knowledge/knowledge_base.py` | Enrichissement des Findings avec `explanation` |
+| Surveillance | Continue normalement |
+| Événements en DB | Écrits |
+| Findings en DB | Créés et écrits |
+| Compteur | Continue d'incrémenter |
+| Affichage terminal alertes | Suspendu |
+| Changements INFO (whitelistés) | Toujours affichés discrètement |
+
+Message au déclenchement :
+```
+[!] Sentinel passe en mode silencieux (3 alertes atteintes en 1h).
+    La surveillance continue. Les événements sont enregistrés.
+    Les nouvelles alertes ne seront plus affichées pendant 1h.
+    › netlab sentinel history  pour consulter l'historique
+```
+
+### Sortie du mode silencieux (après 1h)
+
+```
+[●] Sentinel reprend les alertes normales.
+    Période silencieuse : 14:05 → 15:05
+    Événements enregistrés pendant le silence : 7
+    › netlab sentinel history  pour consulter
+```
+
+### Si le seuil est à nouveau atteint après la reprise
+
+Nouveau cycle de silence. Le mode silencieux n'est jamais permanent :
+chaque heure, la fenêtre glisse et le compteur repart.
 
 ---
 
-*Spec validée — prête à coder.*
+## 5. `--relearn` — remplacement atomique
+
+### Règle
+
+`--relearn` remplace la baseline de l'identité réseau **courante** uniquement.
+Toutes les autres identités réseau, même avec le même CIDR, sont intouchables.
+
+### Comportement — remplacement, pas DELETE simple
+
+Pour éviter de laisser la baseline absente si l'apprentissage échoue en cours :
+
+```
+1. Apprendre la nouvelle baseline en mémoire
+2. Vérifier qu'elle est complète (au moins 1 host détecté)
+3. Seulement alors → DELETE de l'ancienne baseline pour cette identité exacte
+4. INSERT de la nouvelle baseline
+```
+
+Si l'apprentissage échoue à l'étape 1 ou 2 :
+→ pas de DELETE, ancienne baseline conservée, message d'erreur affiché.
+
+Si l'apprentissage réussit et que la baseline est vide (0 host) :
+→ avertissement affiché, pas de remplacement automatique, confirmation requise.
+
+---
+
+## 6. Whitelist — interface CLI
+
+### [APPROBATION REQUISE — Point B]
+
+Nouvelles commandes dans `cli.py` :
+
+```bash
+netlab sentinel allow port <ip> <port>        # autoriser un port sur un host
+netlab sentinel allow host <ip>               # autoriser un nouveau host
+netlab sentinel allow mac <ip> <mac>          # autoriser un changement de MAC
+
+netlab sentinel unallow port <ip> <port>      # retirer l'autorisation
+netlab sentinel unallow host <ip>
+netlab sentinel unallow mac <ip>
+
+netlab sentinel whitelist                     # afficher la whitelist courante
+netlab sentinel history                       # afficher l'historique des événements
+netlab sentinel help                          # aide complète
+```
+
+- `allow` et `unallow` écrivent dans `~/.netlab/baseline_whitelist.yaml`
+- Le YAML reste la source de vérité — les commandes CLI l'éditent proprement
+- L'utilisateur peut toujours éditer le YAML manuellement
+- Pas d'impact sur le schéma DB
+
+**Non implémenté avant le GO final.**
+
+---
+
+## 7. Séparation Event / Alerte / Finding
+
+### Définitions formelles
+
+```
+Événement  = quelque chose s'est produit
+             Toujours en DB (table events), toujours dans l'historique
+             Qu'il soit autorisé ou non
+
+Alerte     = événement qui mérite l'attention de l'utilisateur
+             Affiché dans le terminal
+             Comptabilisé dans le compteur anti-spam
+             Uniquement pour les changements non whitelistés
+
+Finding    = objet de sécurité structuré (catégorie, sévérité, evidence, explanation)
+             Stocké dans la table findings
+             Uniquement pour les changements non whitelistés
+             Utilisé par risk_scorer et reports
+```
+
+### Matrice de décision
+
+| Changement | Event DB | Historique | Alerte terminal | Finding DB | Compteur |
+|---|---|---|---|---|---|
+| Non whitelisté | ✅ | ✅ | ✅ | ✅ | +1 |
+| Whitelisté | ✅ `resolved=1` | ✅ | ❌ | ❌ | 0 |
+| Mode silencieux | ✅ | ✅ | ❌ | ✅ | +1 |
+
+Affichage d'un changement whitelisté :
+```
+[INFO] 192.168.1.10:8080 ouvert — changement autorisé (whitelisté)
+```
+
+---
+
+## 8. Status compact — format définitif
+
+```
+[●] SENTINELX: ACTIF | 192.168.76.0/24 | 37/42 machines | 12 changements
+    dernière vérif. 12s | prochaine 48s | 3 alertes
+```
+
+### Compteurs — définitions précises
+
+**machines** : `actives/connues`
+- actives = répondent lors du dernier scan
+- connues = enregistrées dans la baseline de cette identité réseau
+
+**changements** : tous les changements (whitelistés ou non) depuis le démarrage de la session Sentinel courante
+
+**alertes** : alertes de sécurité non résolues (`resolved=0`, non whitelistées) de la session courante. Les alertes de sessions précédentes ne sont pas mélangées.
+
+### Ne s'affiche PAS dans le status
+
+IP spécifiques, ports, MACs, détails événements, preuves, explications, timestamps détaillés, descriptions Finding.
+
+### Règle UX
+
+```
+STATUS    → résumé (savoir s'il se passe quelque chose)
+HISTORIQUE → détails (comprendre ce qui s'est passé)
+EXPLAIN   → compréhension (savoir pourquoi c'est un risque)
+```
+
+---
+
+## 9. Aide contextuelle discrète
+
+Suggestions affichées sur une ligne, rotation lente, en bas du status :
+
+```
+Sentinel actif, pas d'alerte     →  › status  › history  › allow  › stop
+Sentinel actif, nouvelle alerte  →  › history  › findings  › allow  › explain
+Sentinel inactif                 →  › sentinel start  › sentinel status
+Mode silencieux actif            →  › history  (surveillance active, affichage suspendu)
+```
+
+Aide complète à la demande :
+```bash
+netlab sentinel help
+```
+Affiche une table Rich statique, une ligne par commande. Pas de pagination.
+
+---
+
+## 10. Arrêt propre
+
+### Fermeture NetLab ou Ctrl+C
+
+```
+signal SIGINT / fermeture normale
+    ↓
+sentinel_manager : fin de boucle propre (pas en plein milieu d'un check)
+    ↓
+sentinel_state = "inactive" en DB
+    ↓
+[○] Sentinel arrêté proprement. Baseline conservée.
+    ↓
+baseline → conservée
+events   → conservés
+findings → conservés
+compteur anti-spam → réinitialisé au prochain démarrage
+```
+
+---
+
+## 11. Host déconnecté — V1
+
+Si un host de la baseline ne répond plus :
+- Pas d'alerte (removed_host hors scope V1)
+- Baseline de ce host conservée intacte
+- Entrée assets conservée en DB
+- Compteur actives descend : `37/42` au lieu de `38/42`
+- Si le host revient sans changement de MAC ni nouveau port → reconnu normalement
+
+---
+
+## 12. Impact architecture — résumé
+
+### Modifications schéma DB requises
+
+| Table | Colonnes à ajouter | Point |
+|---|---|---|
+| `baseline` | `gateway_ip TEXT NOT NULL DEFAULT ''`, `gateway_mac TEXT NOT NULL DEFAULT ''` | **[A]** |
+| `sessions` | `sentinel_state TEXT DEFAULT 'inactive'`, `last_check_time TEXT`, `sentinel_target_network TEXT`, `sentinel_gateway_ip TEXT`, `sentinel_gateway_mac TEXT` | **[C]** |
+
+### Modifications CLI requises
+
+| Commandes | Fichier | Point |
+|---|---|---|
+| `sentinel allow/unallow/whitelist/history/help` | `cli.py` | **[B]** |
+
+### Non impacté
+
+`core/finding.py`, `core/risk_scorer.py`, `knowledge/`, `detect/`, `recon/`, `reports/`, structure générale de `core/database.py`.
+
+---
+
+## 13. Cas limites
+
+| Situation | Comportement |
+|---|---|
+| `gateway_mac=""`, baseline avec MAC connue | Jamais chargée automatiquement — confirmation requise |
+| `gateway_mac=""`, baseline avec `mac=""` | Match exact — baseline chargée |
+| Identité non correspondante | Avertissement + confirmation + ancienne baseline intacte |
+| `--relearn`, apprentissage échoue | Pas de DELETE — ancienne baseline conservée |
+| `--relearn`, 0 host détecté | Avertissement + confirmation avant remplacement |
+| `--relearn` autre réseau | Intouchable |
+| Mode silencieux, Sentinel redémarre | Compteur réinitialisé — pas de silence hérité |
+| Seuil atteint à nouveau après reprise | Nouveau cycle silencieux — jamais permanent |
+| Check timeout | `last_check_time` inchangé — DÉGRADÉ si > 2×interval |
+| Check réussit après dégradé | Retour ACTIF immédiat |
+| Whitelist YAML absent | Whitelist vide, `max_alerts_per_hour=3` par défaut |
+| Host disparu | Pas d'alerte V1, compteur actives mis à jour |
+
+---
+
+## 14. Tests nécessaires (liste non exhaustive)
+
+### baseline.py
+- `baseline_exists` : retourne False si triplet inconnu
+- `baseline_exists` : retourne False si CIDR connu mais MAC différente
+- `baseline_exists` : MAC `""` actuelle ≠ match sur baseline avec MAC connue
+- `get_baseline` : ne retourne jamais de baseline d'un autre triplet
+- `--relearn` : DELETE uniquement pour l'identité courante
+- `--relearn` : si apprentissage échoue → ancienne baseline conservée
+
+### monitor.py
+- new_host détecté correctement
+- new_port détecté correctement
+- mac_change détecté correctement
+- host disparu → pas de NetworkChange
+
+### alerting.py
+- Non whitelisté → Event + Finding + alerte terminal + compteur +1
+- Whitelisté → Event resolved=1, pas de Finding, pas d'alerte, compteur 0
+- Mode silencieux → Event + Finding en DB, pas d'affichage terminal
+- `count >= seuil` → déclenchement silence (pas `>`)
+- Arrêt + redémarrage → compteur = 0
+
+### whitelist.py
+- `allow port` écrit dans le YAML
+- `unallow port` retire du YAML
+- `is_whitelisted` retourne True pour entrée présente
+- Fichier absent → whitelist vide sans crash
+
+### sentinel_manager.py
+- `last_check_time` mis à jour uniquement sur check réussi
+- Timeout → `last_check_time` inchangé
+- `2 × interval` dépassé → DÉGRADÉ
+- Check réussi → retour ACTIF immédiat
+- Ctrl+C → state=inactive, baseline conservée, compteur non hérité
+
+---
+
+## 15. Points d'approbation
+
+```
+[A] Modifier table baseline :
+    + gateway_ip  TEXT NOT NULL DEFAULT ''
+    + gateway_mac TEXT NOT NULL DEFAULT ''
+
+[B] Ajouter dans cli.py :
+    netlab sentinel allow port/host/mac
+    netlab sentinel unallow port/host/mac
+    netlab sentinel whitelist
+    netlab sentinel history
+    netlab sentinel help
+
+[C] Modifier table sessions (Option C1 retenue) :
+    + sentinel_state          TEXT DEFAULT 'inactive'
+    + last_check_time         TEXT
+    + sentinel_target_network TEXT
+    + sentinel_gateway_ip     TEXT
+    + sentinel_gateway_mac    TEXT
+```
+
+**Aucun fichier sentinel/*.py créé, aucune migration DB exécutée avant validation finale.**
+
+---
+
+*Révision 3 — Septembre 2026*
+*Spec Sentinel V1 — SentinelX NetLab*

@@ -115,13 +115,18 @@ def init_db(session_id: str) -> None:
         # sessions — one record per audit session
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
-                id          TEXT PRIMARY KEY,
-                start_time  TEXT NOT NULL,
-                end_time    TEXT,
-                target      TEXT NOT NULL,
-                profile     TEXT NOT NULL DEFAULT 'normal',
-                status      TEXT NOT NULL DEFAULT 'running',
-                notes       TEXT
+                id                       TEXT PRIMARY KEY,
+                start_time               TEXT NOT NULL,
+                end_time                 TEXT,
+                target                   TEXT NOT NULL,
+                profile                  TEXT NOT NULL DEFAULT 'normal',
+                status                   TEXT NOT NULL DEFAULT 'running',
+                notes                    TEXT,
+                sentinel_state           TEXT DEFAULT 'inactive',
+                last_check_time          TEXT,
+                sentinel_target_network  TEXT,
+                sentinel_gateway_ip      TEXT,
+                sentinel_gateway_mac     TEXT
             )
         """)
 
@@ -161,6 +166,8 @@ def init_db(session_id: str) -> None:
                 id              TEXT PRIMARY KEY,
                 asset_id        TEXT NOT NULL,
                 target_network  TEXT NOT NULL DEFAULT '',
+                gateway_ip      TEXT NOT NULL DEFAULT '',
+                gateway_mac     TEXT NOT NULL DEFAULT '',
                 ports           TEXT NOT NULL DEFAULT '[]',
                 services        TEXT NOT NULL DEFAULT '{}',
                 mac             TEXT,
@@ -613,5 +620,362 @@ def get_assets(session_id: str) -> List[dict]:
             "SELECT * FROM assets ORDER BY ip"
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sentinel — baseline CRUD
+# ---------------------------------------------------------------------------
+
+def save_baseline_entry(
+    session_id: str,
+    entry_id: str,
+    asset_id: str,
+    target_network: str,
+    gateway_ip: str,
+    gateway_mac: str,
+    ports: List[int],
+    mac: Optional[str],
+    last_scan: str,
+) -> None:
+    """Insert or replace a baseline entry for one asset.
+
+    Args:
+        session_id:     Session the baseline belongs to.
+        entry_id:       Unique ID for this baseline entry (UUID).
+        asset_id:       Asset this entry describes.
+        target_network: CIDR of the network (e.g. "192.168.1.0/24").
+        gateway_ip:     Gateway IP detected at baseline time.
+        gateway_mac:    Gateway MAC detected at baseline time ("" if unknown).
+        ports:          List of open TCP port numbers.
+        mac:            MAC address of the asset (optional).
+        last_scan:      ISO 8601 timestamp of the scan.
+    """
+    conn = get_connection(session_id)
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO baseline
+                (id, asset_id, target_network, gateway_ip, gateway_mac,
+                 ports, services, mac, last_scan)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                asset_id,
+                target_network,
+                gateway_ip,
+                gateway_mac,
+                json.dumps(ports),
+                "{}",
+                mac,
+                last_scan,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_baseline_entries(
+    session_id: str,
+    target_network: str,
+    gateway_ip: str,
+    gateway_mac: str,
+) -> List[dict]:
+    """Return all baseline entries for an exact NetworkIdentity triplet.
+
+    Filters on (target_network, gateway_ip, gateway_mac) exactly.
+    gateway_mac="" matches only entries where gateway_mac="" — never a wildcard.
+
+    Args:
+        session_id:     Session identifier.
+        target_network: CIDR string.
+        gateway_ip:     Gateway IP string.
+        gateway_mac:    Gateway MAC string ("" if unknown).
+
+    Returns:
+        List[dict]: One dict per baseline row, ports decoded from JSON.
+    """
+    conn = get_connection(session_id)
+    try:
+        rows = conn.execute(
+            """
+            SELECT b.*, a.ip, a.mac as asset_mac
+            FROM baseline b
+            JOIN assets a ON b.asset_id = a.id
+            WHERE b.target_network = ?
+              AND b.gateway_ip     = ?
+              AND b.gateway_mac    = ?
+            ORDER BY a.ip
+            """,
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["ports"] = json.loads(d.get("ports", "[]"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def baseline_exists(
+    session_id: str,
+    target_network: str,
+    gateway_ip: str,
+    gateway_mac: str,
+) -> bool:
+    """Return True if at least one baseline entry exists for this NetworkIdentity.
+
+    Args:
+        session_id:     Session identifier.
+        target_network: CIDR string.
+        gateway_ip:     Gateway IP string.
+        gateway_mac:    Gateway MAC string ("" if unknown).
+
+    Returns:
+        bool
+    """
+    conn = get_connection(session_id)
+    try:
+        count = conn.execute(
+            """
+            SELECT COUNT(*) FROM baseline
+            WHERE target_network = ?
+              AND gateway_ip     = ?
+              AND gateway_mac    = ?
+            """,
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchone()[0]
+        return count > 0
+    finally:
+        conn.close()
+
+
+def delete_baseline_for_identity(
+    session_id: str,
+    target_network: str,
+    gateway_ip: str,
+    gateway_mac: str,
+) -> int:
+    """Delete all baseline entries for an exact NetworkIdentity.
+
+    Used by --relearn. Never touches other network identities.
+
+    Args:
+        session_id:     Session identifier.
+        target_network: CIDR string.
+        gateway_ip:     Gateway IP string.
+        gateway_mac:    Gateway MAC string.
+
+    Returns:
+        int: Number of rows deleted.
+    """
+    conn = get_connection(session_id)
+    try:
+        cursor = conn.execute(
+            """
+            DELETE FROM baseline
+            WHERE target_network = ?
+              AND gateway_ip     = ?
+              AND gateway_mac    = ?
+            """,
+            (target_network, gateway_ip, gateway_mac),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sentinel — events CRUD
+# ---------------------------------------------------------------------------
+
+def save_event(
+    session_id: str,
+    event_id: str,
+    event_type: str,
+    timestamp: str,
+    asset_id: Optional[str],
+    details: dict,
+    resolved: bool = False,
+) -> None:
+    """Insert a Sentinel event into the events table.
+
+    Args:
+        session_id: Session identifier.
+        event_id:   Unique event ID (UUID).
+        event_type: Type string (e.g. "new_host", "new_port", "mac_change",
+                    "whitelisted_change").
+        timestamp:  ISO 8601 timestamp.
+        asset_id:   Asset concerned (optional).
+        details:    Dict with change details — stored as JSON.
+        resolved:   True if the change was whitelisted (no alert raised).
+    """
+    conn = get_connection(session_id)
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO events
+                (id, timestamp, type, asset_id, details, resolved)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                timestamp,
+                event_type,
+                asset_id,
+                json.dumps(details),
+                int(resolved),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_events(
+    session_id: str,
+    resolved: Optional[bool] = None,
+    limit: int = 100,
+) -> List[dict]:
+    """Return events for a session, optionally filtered by resolved status.
+
+    Args:
+        session_id: Session identifier.
+        resolved:   None = all, True = resolved only, False = unresolved only.
+        limit:      Maximum number of events to return (most recent first).
+
+    Returns:
+        List[dict]: Event rows with details decoded from JSON.
+    """
+    conn = get_connection(session_id)
+    try:
+        if resolved is None:
+            rows = conn.execute(
+                "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE resolved = ? ORDER BY timestamp DESC LIMIT ?",
+                (int(resolved), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["details"] = json.loads(d.get("details", "{}"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def count_unresolved_events(session_id: str) -> int:
+    """Return the count of unresolved (non-whitelisted) events in a session.
+
+    Used for the 'alertes' counter in sentinel status.
+
+    Args:
+        session_id: Session identifier.
+
+    Returns:
+        int: Count of events with resolved=0.
+    """
+    conn = get_connection(session_id)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM events WHERE resolved = 0",
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sentinel — session state CRUD
+# ---------------------------------------------------------------------------
+
+def update_sentinel_state(
+    session_id: str,
+    sentinel_state: str,
+    last_check_time: Optional[str] = None,
+    target_network: Optional[str] = None,
+    gateway_ip: Optional[str] = None,
+    gateway_mac: Optional[str] = None,
+) -> None:
+    """Update Sentinel-specific columns on a session record.
+
+    last_check_time is only updated when provided (successful check only).
+    A failed check must NOT pass last_check_time — pass None instead.
+
+    Args:
+        session_id:     Session identifier.
+        sentinel_state: "active" | "degraded" | "inactive".
+        last_check_time: ISO 8601 of last SUCCESSFUL check. None = don't update.
+        target_network: CIDR being monitored (set at start, not updated after).
+        gateway_ip:     Gateway IP (set at start).
+        gateway_mac:    Gateway MAC (set at start).
+    """
+    conn = get_connection(session_id)
+    try:
+        if last_check_time is not None:
+            conn.execute(
+                """
+                UPDATE sessions
+                SET sentinel_state          = ?,
+                    last_check_time         = ?,
+                    sentinel_target_network = COALESCE(?, sentinel_target_network),
+                    sentinel_gateway_ip     = COALESCE(?, sentinel_gateway_ip),
+                    sentinel_gateway_mac    = COALESCE(?, sentinel_gateway_mac)
+                WHERE id = ?
+                """,
+                (sentinel_state, last_check_time,
+                 target_network, gateway_ip, gateway_mac,
+                 session_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE sessions
+                SET sentinel_state          = ?,
+                    sentinel_target_network = COALESCE(?, sentinel_target_network),
+                    sentinel_gateway_ip     = COALESCE(?, sentinel_gateway_ip),
+                    sentinel_gateway_mac    = COALESCE(?, sentinel_gateway_mac)
+                WHERE id = ?
+                """,
+                (sentinel_state,
+                 target_network, gateway_ip, gateway_mac,
+                 session_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_sentinel_state(session_id: str) -> dict:
+    """Return Sentinel state columns for a session.
+
+    Args:
+        session_id: Session identifier.
+
+    Returns:
+        dict with sentinel_state, last_check_time, sentinel_target_network,
+        sentinel_gateway_ip, sentinel_gateway_mac. Empty dict if not found.
+    """
+    conn = get_connection(session_id)
+    try:
+        row = conn.execute(
+            """
+            SELECT sentinel_state, last_check_time,
+                   sentinel_target_network, sentinel_gateway_ip, sentinel_gateway_mac
+            FROM sessions WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else {}
     finally:
         conn.close()
