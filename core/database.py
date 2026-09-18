@@ -44,17 +44,46 @@ from core.finding import (
 # Path resolution
 # ---------------------------------------------------------------------------
 
+def _validate_session_id(session_id: str) -> str:
+    """Validate that session_id is safe to use as a filesystem path component.
+
+    Only allows alphanumeric characters, hyphens, and underscores, up to 64
+    characters. Raises ValueError if the input is invalid.
+
+    Args:
+        session_id: Raw session identifier from caller.
+
+    Returns:
+        str: The validated session_id (unchanged).
+
+    Raises:
+        ValueError: If session_id contains path traversal or invalid characters.
+    """
+    import re
+    if not session_id or not re.match(r'^[a-zA-Z0-9_-]{1,64}$', session_id):
+        raise ValueError(
+            f"Invalid session_id '{session_id}'. "
+            "Must be 1-64 characters: letters, digits, hyphens, underscores only."
+        )
+    return session_id
+
+
 def get_db_path(session_id: str) -> Path:
     """Return the absolute path to the SQLite file for a given session.
 
     Creates the parent directory if it does not exist.
+    Validates session_id to prevent path traversal attacks.
 
     Args:
         session_id: Unique session identifier (e.g. "session-abc123").
 
     Returns:
         Path: ~/.netlab/sessions/<session_id>.db
+
+    Raises:
+        ValueError: If session_id contains unsafe characters.
     """
+    _validate_session_id(session_id)
     db_dir = Path.home() / ".netlab" / "sessions"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / f"{session_id}.db"

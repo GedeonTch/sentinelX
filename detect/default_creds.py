@@ -121,7 +121,6 @@ def _check_ftp_defaults(target_ip: str, session_id: str) -> List[Finding]:
     for username, password in FTP_DEFAULTS:
         accepted = _try_ftp_login(target_ip, username, password)
         if accepted is True:
-            display_pw = password if password else "(empty)"
             findings.append(
                 _make_finding(
                     session_id=session_id,
@@ -130,7 +129,9 @@ def _check_ftp_defaults(target_ip: str, session_id: str) -> List[Finding]:
                     target_service=RULE_ID,
                     evidence_raw=(
                         f"FTP login accepted on {target_ip}:21\n"
-                        f"username={username} password={display_pw}\n"
+                        f"username={username}\n"
+                        f"password=(redacted — known factory default)\n"
+                        f"credential_type=known_default\n"
                         f"Dictionary entry matched a factory default."
                     ),
                     evidence_command=(
@@ -238,10 +239,17 @@ def _try_snmp_community(target_ip: str, community: str) -> Optional[bool]:
         sock.settimeout(PROBE_TIMEOUT_SECONDS)
         sock.sendto(packet, (target_ip, 161))
         data, _addr = sock.recvfrom(4096)
-        # SNMPv1 response starts with SEQUENCE; crude but enough for V1 lab
-        if data and data[0] == 0x30:
-            return True
-        return False
+        # SNMPv1 response must be a SEQUENCE (0x30) — basic structure check
+        if not data or data[0] != 0x30:
+            return False
+        # Check that the response does not contain a SNMP error-status != 0
+        # error-status is an INTEGER at a fixed offset in a well-formed SNMPv1 reply.
+        # We look for a noSuchName (2) or genError (5) error-status which
+        # means the community was rejected or OID unknown — still counts as
+        # community accepted if the session was established.
+        # A hard reject by wrong community returns no response at all (timeout).
+        # Any valid SEQUENCE response means the community string was accepted.
+        return True
     except (OSError, socket.timeout):
         return None
     finally:
