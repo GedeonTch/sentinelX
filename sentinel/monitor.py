@@ -15,12 +15,20 @@ Changes detected (V1):
 NOT detected in V1:
     removed_host — a baseline host that no longer responds (out of scope)
 
+Return contract (A3 fix):
+    check_network() raises ScanFailedError if the ping scan itself fails.
+    Callers (_do_check in sentinel_manager) must catch ScanFailedError and
+    NOT update last_check_time — a failed scan is not a successful check.
+
+    _get_open_ports() returns:
+        None      → port scan failed for this host (skip, do not report)
+        []        → scan succeeded, no open ports found
+        [n, ...]  → scan succeeded, ports found
+
 Rules enforced here:
 - ZERO import sqlite3
 - ZERO print() — display via core/logger.py
 - ZERO risk_score calculation
-- No (y/n) confirmation — no new active traffic beyond a lightweight ping scan
-  (monitor reuses device_fingerprint ping scan, considered acceptable overhead)
 """
 
 from __future__ import annotations
@@ -32,6 +40,19 @@ from typing import Dict, List, Optional
 
 from core.logger import display
 from sentinel.baseline import BaselineEntry, NetworkIdentity
+
+
+# ---------------------------------------------------------------------------
+# ScanFailedError — raised when the ping scan itself fails
+# ---------------------------------------------------------------------------
+
+class ScanFailedError(Exception):
+    """Raised by check_network() when the ping scan could not be completed.
+
+    Callers must catch this and NOT update last_check_time.
+    A failed scan is not a successful check — the network state is unknown.
+    """
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +114,10 @@ def check_network(
     # Step 1 — discover currently active hosts
     current_hosts = _get_active_hosts(target_network)
     if current_hosts is None:
-        display("[yellow]Monitor: ping scan failed — skipping this check.[/yellow]")
-        return []
+        # Ping scan failed entirely — raise so caller knows not to update last_check_time
+        raise ScanFailedError(
+            f"Ping scan failed for {target_network} — network state unknown."
+        )
 
     # Step 2 — detect new hosts
     for ip in current_hosts:
@@ -175,19 +198,23 @@ def _get_active_hosts(target_network: str) -> Optional[List[str]]:
 def _get_open_ports(ip: str) -> Optional[List[int]]:
     """Run a TCP port scan on a single host and return open port numbers.
 
-    Uses a fast scan of the most common ports — same range as baseline.
+    Return contract (A3):
+        None      → scan failed (nmap error, timeout) — caller must skip this host
+        []        → scan succeeded, no open ports found
+        [n, ...]  → scan succeeded, these ports are open
 
     Args:
         ip: Single IP address.
 
     Returns:
-        List[int]: Open port numbers, or None if scan failed.
+        Optional[List[int]]: Open ports, or None if scan failed.
     """
     try:
         from detect.tcp_scan import _run_nmap_tcp, _parse_tcp_xml
         xml = _run_nmap_tcp(ip, "normal", "1-1024,3389,5432,3306,1433,8080,8443")
         if xml is None:
-            return []
+            # nmap returned nothing — scan failed, state unknown
+            return None
         findings = _parse_tcp_xml(xml, ip, "sentinel-monitor")
         return [f.target_port for f in findings if f.target_port is not None]
     except Exception:

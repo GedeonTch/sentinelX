@@ -59,7 +59,7 @@ from sentinel.baseline import (
     get_baseline,
     learn_baseline,
 )
-from sentinel.monitor import check_network
+from sentinel.monitor import check_network, ScanFailedError
 from sentinel.whitelist import load_whitelist
 
 
@@ -264,8 +264,10 @@ def _do_check(
                 whitelist=whitelist,
                 counter=counter,
             )
-    except Exception as exc:
-        display(f"[yellow]Monitor check failed: {exc}[/yellow]")
+    except ScanFailedError as exc:
+        # Ping scan failed — do NOT update last_check_time
+        # Network state is unknown — this is not a successful check
+        display(f"[yellow]Monitor: {exc}[/yellow]")
         state = sentinel_get_state(network_id)
         last_ok = state.get("last_check_time")
         if last_ok:
@@ -276,6 +278,9 @@ def _do_check(
             if elapsed > 2 * interval:
                 sentinel_update_state(network_id=network_id, sentinel_status="degraded")
                 display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
+    except Exception as exc:
+        # Unexpected error — same behaviour: no last_check_time update
+        display(f"[yellow]Monitor check error: {exc}[/yellow]")
 
 
 # ---------------------------------------------------------------------------
