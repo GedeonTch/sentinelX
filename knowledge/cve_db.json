@@ -26,10 +26,11 @@
       "product": "",
       "version_gte": null,
       "version_lte": null,
+      "requires_version_confirmation": true,
       "cve_refs": ["CVE-2017-0144", "CVE-2017-0145"],
       "cvss_score": 9.3,
       "severity": "critical",
-      "description": "SMBv1 EternalBlue — remote code execution via crafted SMB request on Microsoft Windows (WannaCry vector)"
+      "description": "SMBv1 EternalBlue — remote code execution via crafted SMB request (WannaCry vector). Applies to Windows XP/7/Server 2003/2008 only. Version confirmation required before concluding exploitability."
     },
     {
       "service": "http",
@@ -86,10 +87,11 @@
       "product": "",
       "version_gte": null,
       "version_lte": null,
+      "requires_version_confirmation": true,
       "cve_refs": ["CVE-2019-0708"],
       "cvss_score": 9.8,
       "severity": "critical",
-      "description": "BlueKeep — RDP pre-authentication RCE in older Windows versions (XP, 7, Server 2008). Verify Windows version before reporting."
+      "description": "BlueKeep — RDP pre-authentication RCE in older Windows versions (XP, 7, Server 2008). Version confirmation required before concluding exploitability. Windows 10 and Server 2016/2019 are not affected."
     },
     {
       "service": "mysql",
@@ -106,10 +108,11 @@
       "product": "",
       "version_gte": null,
       "version_lte": null,
+      "requires_version_confirmation": true,
       "cve_refs": [],
       "cvss_score": 5.0,
       "severity": "medium",
-      "description": "SNMP service exposed — community string may be default (public/private). Check #013 default_creds."
+      "description": "SNMP service exposed — community string may be default (public/private). Version confirmation required to assess SNMPv1/v2c vs v3. Check #013 default_creds."
     }
   ]
 }

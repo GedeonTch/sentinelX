@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from packaging.version import Version, InvalidVersion
 
-from core.finding import Finding, Severity, Confidence
+from core.finding import Finding, Severity, Confidence, Evidence
 from core.logger import display
 
 
@@ -278,9 +278,17 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
     Never mutates the original Finding.
     Never sets risk_score — that is risk_scorer.py's responsibility.
 
-    Confidence upgrade rule:
-        POSSIBLE → PROBABLE if a CVE was matched
-        (finding a CVE entry means the service identification was meaningful)
+    Confidence rules:
+        1. If entry has requires_version_confirmation=True AND service_version
+           is empty → confidence forced to POSSIBLE (0.60).
+           The CVE severity is preserved — the uncertainty is in the
+           applicability, not the potential impact.
+           A warning note is appended to evidence.raw.
+           risk_scorer will automatically exclude this Finding from the
+           global score because confidence < 0.7.
+
+        2. Otherwise (version confirmed, or no confirmation required):
+           POSSIBLE → PROBABLE upgrade if CVE was matched (existing rule).
 
     Args:
         finding:   Original Finding from tcp_scan/udp_scan.
@@ -292,11 +300,30 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
     new_severity = Severity(cve_entry.get("severity", "info"))
     new_cvss = cve_entry.get("cvss_score")
     new_cve_refs = cve_entry.get("cve_refs", [])
+    requires_version = cve_entry.get("requires_version_confirmation", False)
 
-    # Upgrade confidence if currently POSSIBLE
-    new_confidence = finding.confidence
-    if finding.confidence == Confidence.POSSIBLE:
-        new_confidence = Confidence.PROBABLE
+    if requires_version and not finding.service_version:
+        # Version required but not detected — preserve severity, lower confidence
+        new_confidence = Confidence.POSSIBLE
+        version_note = (
+            "\n[service_detection] Version not confirmed. "
+            "CVE refs are potentially applicable but exploitability cannot "
+            "be assessed without version confirmation. "
+            "Confidence set to POSSIBLE — excluded from global risk score."
+        )
+        enriched_evidence = Evidence(
+            raw=finding.evidence.raw + version_note,
+            command=finding.evidence.command,
+        )
+    else:
+        # Version confirmed or no confirmation required
+        # Existing rule: POSSIBLE → PROBABLE when CVE matched
+        new_confidence = (
+            Confidence.PROBABLE
+            if finding.confidence == Confidence.POSSIBLE
+            else finding.confidence
+        )
+        enriched_evidence = finding.evidence
 
     return dataclasses.replace(
         finding,
@@ -304,5 +331,6 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
         cvss_score=new_cvss,
         cve_refs=new_cve_refs,
         confidence=new_confidence,
+        evidence=enriched_evidence,
         # risk_score stays None — set by risk_scorer only
     )

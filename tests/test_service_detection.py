@@ -52,6 +52,7 @@ KB_SMB = {
     "product": "Microsoft Windows",
     "version_gte": None,
     "version_lte": None,
+    "requires_version_confirmation": True,
     "cve_refs": ["CVE-2017-0144", "CVE-2017-0145"],
     "cvss_score": 9.3,
     "severity": "critical",
@@ -85,6 +86,7 @@ KB_SNMP_NO_VERSION = {
     "product": "",
     "version_gte": None,
     "version_lte": None,
+    "requires_version_confirmation": True,
     "cve_refs": [],
     "cvss_score": 5.0,
     "severity": "medium",
@@ -322,10 +324,13 @@ class TestApplyCve:
         assert result.confidence == Confidence.PROBABLE
 
     def test_critical_severity_from_smb(self):
+        """SMB with version detected → CRITICAL severity, confidence unchanged."""
         f = make_finding(service="microsoft-ds", service_version="Microsoft Windows Server 2019")
         result = _apply_cve(f, KB_SMB)
         assert result.severity == Severity.CRITICAL
         assert "CVE-2017-0144" in result.cve_refs
+        # Version present → confidence NOT forced to POSSIBLE
+        assert result.confidence != Confidence.POSSIBLE
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +371,7 @@ class TestEnrichFindings:
         assert enrich_findings([]) == []
 
     def test_smb_finding_becomes_critical(self):
+        """SMB with version → CRITICAL severity, confidence not forced to POSSIBLE."""
         f = make_finding(
             service="microsoft-ds",
             service_version="Microsoft Windows Server 2019",
@@ -376,6 +382,7 @@ class TestEnrichFindings:
             results = enrich_findings([f])
         assert results[0].severity == Severity.CRITICAL
         assert results[0].cvss_score == 9.3
+        assert results[0].confidence != Confidence.POSSIBLE
 
     def test_all_results_risk_score_none(self):
         """Invariant: enrich_findings never sets risk_score."""
@@ -396,3 +403,88 @@ class TestEnrichFindings:
         with patch.object(sd, "_KB_ENTRIES", FULL_KB):
             enrich_findings([f])
         assert f.severity == Severity.INFO  # original untouched
+
+
+# ---------------------------------------------------------------------------
+# A1 — requires_version_confirmation tests
+# ---------------------------------------------------------------------------
+
+KB_SMB_NO_VERSION_REQUIRED = {
+    "service": "microsoft-ds",
+    "product": "",
+    "version_gte": None,
+    "version_lte": None,
+    "requires_version_confirmation": True,
+    "cve_refs": ["CVE-2017-0144"],
+    "cvss_score": 9.3,
+    "severity": "critical",
+    "description": "EternalBlue — requires version confirmation",
+}
+
+KB_RDP_NO_VERSION_REQUIRED = {
+    "service": "ms-wbt-server",
+    "product": "",
+    "version_gte": None,
+    "version_lte": None,
+    "requires_version_confirmation": True,
+    "cve_refs": ["CVE-2019-0708"],
+    "cvss_score": 9.8,
+    "severity": "critical",
+    "description": "BlueKeep — requires version confirmation",
+}
+
+
+def make_finding_no_version(service: str, port: int) -> Finding:
+    """Make a Finding with empty service_version (simulates undetected version)."""
+    return Finding(
+        session_id="session-test",
+        module="tcp_scan",
+        target_ip="192.168.1.26",
+        target_port=port,
+        target_service=service,
+        service_version="",          # ← version inconnue
+        category=Category.SERVICE,
+        severity=Severity.INFO,
+        confidence=Confidence.CONFIRMED,
+        exposure=Exposure.INTERNAL,
+        evidence=Evidence(raw=f"PORT {port}/tcp open", command=f"nmap 192.168.1.26"),
+    )
+
+
+class TestRequiresVersionConfirmation:
+
+    def test_smb_no_version_confidence_is_possible(self):
+        """Port 445, version inconnue → confidence forcée à POSSIBLE."""
+        f = make_finding_no_version("microsoft-ds", 445)
+        result = _apply_cve(f, KB_SMB_NO_VERSION_REQUIRED)
+        assert result.confidence == Confidence.POSSIBLE
+
+    def test_rdp_no_version_confidence_is_possible(self):
+        """Port 3389, version inconnue → confidence forcée à POSSIBLE."""
+        f = make_finding_no_version("ms-wbt-server", 3389)
+        result = _apply_cve(f, KB_RDP_NO_VERSION_REQUIRED)
+        assert result.confidence == Confidence.POSSIBLE
+
+    def test_smb_no_version_severity_stays_critical(self):
+        """Severity CRITICAL conservée — pas abaissée à MEDIUM sans version."""
+        f = make_finding_no_version("microsoft-ds", 445)
+        result = _apply_cve(f, KB_SMB_NO_VERSION_REQUIRED)
+        assert result.severity == Severity.CRITICAL
+
+    def test_evidence_contains_version_warning_when_unconfirmed(self):
+        """La note d'avertissement doit être dans evidence.raw."""
+        f = make_finding_no_version("microsoft-ds", 445)
+        result = _apply_cve(f, KB_SMB_NO_VERSION_REQUIRED)
+        assert "Version not confirmed" in result.evidence.raw
+        assert "POSSIBLE" in result.evidence.raw
+
+    def test_smb_with_version_keeps_original_confidence(self):
+        """Avec version détectée → confidence NON forcée à POSSIBLE."""
+        f = make_finding(
+            service="microsoft-ds",
+            service_version="Windows XP SP3",
+            confidence=Confidence.CONFIRMED,
+        )
+        result = _apply_cve(f, KB_SMB_NO_VERSION_REQUIRED)
+        assert result.confidence != Confidence.POSSIBLE
+        assert result.confidence == Confidence.CONFIRMED
