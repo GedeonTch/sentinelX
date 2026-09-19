@@ -1008,3 +1008,339 @@ def get_sentinel_state(session_id: str) -> dict:
         return dict(row) if row else {}
     finally:
         conn.close()
+
+
+# ===========================================================================
+# SENTINEL — Dedicated persistent DB (~/.netlab/sentinel/<network_id>.db)
+#
+# Baseline belongs to the network identity, not to a run session.
+# These sentinel_ functions use a separate DB path that persists across
+# Sentinel restarts, unlike ~/.netlab/sessions/<session_id>.db.
+# ===========================================================================
+
+def get_sentinel_db_path(network_id: str) -> Path:
+    """Return path to the persistent Sentinel DB for a network identity.
+
+    ~/.netlab/sentinel/<network_id>.db — distinct from audit session DBs.
+
+    Args:
+        network_id: Stable 12-char hex identifier from compute_network_id().
+
+    Returns:
+        Path: ~/.netlab/sentinel/<network_id>.db
+
+    Raises:
+        ValueError: If network_id is unsafe (path traversal check).
+    """
+    _validate_session_id(network_id)
+    db_dir = Path.home() / ".netlab" / "sentinel"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return db_dir / f"{network_id}.db"
+
+
+def get_sentinel_connection(network_id: str) -> sqlite3.Connection:
+    """Open a sqlite3 connection for the sentinel DB of a network."""
+    db_path = get_sentinel_db_path(network_id)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_sentinel_db(network_id: str) -> None:
+    """Create sentinel DB tables if they do not exist. Safe to call multiple times."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY, ip TEXT NOT NULL, mac TEXT,
+                hostname TEXT, os TEXT, first_seen TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS baseline (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                target_network TEXT NOT NULL DEFAULT '',
+                gateway_ip TEXT NOT NULL DEFAULT '',
+                gateway_mac TEXT NOT NULL DEFAULT '',
+                ports TEXT NOT NULL DEFAULT '[]',
+                services TEXT NOT NULL DEFAULT '{}',
+                mac TEXT, gateway TEXT, dns TEXT,
+                last_scan TEXT NOT NULL,
+                FOREIGN KEY (asset_id) REFERENCES assets(id)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL, type TEXT NOT NULL,
+                asset_id TEXT,
+                details TEXT NOT NULL DEFAULT '{}',
+                resolved INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (asset_id) REFERENCES assets(id)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sentinel_state (
+                network_id TEXT PRIMARY KEY,
+                sentinel_status TEXT NOT NULL DEFAULT 'inactive',
+                last_check_time TEXT,
+                target_network TEXT, gateway_ip TEXT, gateway_mac TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# Sentinel — assets
+
+def sentinel_save_asset(
+    network_id: str, asset_id: str, ip: str, first_seen: str,
+    mac: Optional[str] = None, hostname: Optional[str] = None,
+    os: Optional[str] = None, active: bool = True,
+) -> None:
+    """Insert or replace an asset in the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO assets (id,ip,mac,hostname,os,first_seen,active) VALUES (?,?,?,?,?,?,?)",
+            (asset_id, ip, mac, hostname, os, first_seen, int(active)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# Sentinel — baseline
+
+def sentinel_save_baseline_entry(
+    network_id: str, entry_id: str, asset_id: str,
+    target_network: str, gateway_ip: str, gateway_mac: str,
+    ports: List[int], mac: Optional[str], last_scan: str,
+) -> None:
+    """Insert or replace a baseline entry in the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO baseline
+               (id,asset_id,target_network,gateway_ip,gateway_mac,ports,services,mac,last_scan)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (entry_id, asset_id, target_network, gateway_ip, gateway_mac,
+             json.dumps(ports), "{}", mac, last_scan),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def sentinel_get_baseline_entries(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> List[dict]:
+    """Return baseline entries for an exact NetworkIdentity from the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        rows = conn.execute(
+            """SELECT b.*, a.ip, a.mac as asset_mac
+               FROM baseline b JOIN assets a ON b.asset_id = a.id
+               WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
+               ORDER BY a.ip""",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["ports"] = json.loads(d.get("ports", "[]"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def sentinel_baseline_exists(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> bool:
+    """Return True if a baseline exists for this NetworkIdentity in the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM baseline WHERE target_network=? AND gateway_ip=? AND gateway_mac=?",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchone()[0]
+        return count > 0
+    finally:
+        conn.close()
+
+
+def sentinel_delete_baseline_for_identity(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> int:
+    """Delete baseline entries for an exact NetworkIdentity. Returns row count."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM baseline WHERE target_network=? AND gateway_ip=? AND gateway_mac=?",
+            (target_network, gateway_ip, gateway_mac),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+# Sentinel — events
+
+def sentinel_save_event(
+    network_id: str, event_id: str, event_type: str, timestamp: str,
+    asset_id: Optional[str], details: dict, resolved: bool = False,
+) -> None:
+    """Insert a Sentinel event into the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO events (id,timestamp,type,asset_id,details,resolved) VALUES (?,?,?,?,?,?)",
+            (event_id, timestamp, event_type, asset_id, json.dumps(details), int(resolved)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def sentinel_get_events(
+    network_id: str, resolved: Optional[bool] = None, limit: int = 100,
+) -> List[dict]:
+    """Return events from the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        if resolved is None:
+            rows = conn.execute(
+                "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE resolved=? ORDER BY timestamp DESC LIMIT ?",
+                (int(resolved), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["details"] = json.loads(d.get("details", "{}"))
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def sentinel_count_unresolved_events(network_id: str) -> int:
+    """Return count of unresolved events in the sentinel DB."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM events WHERE resolved=0").fetchone()[0]
+    finally:
+        conn.close()
+
+
+# Sentinel — state
+
+def sentinel_update_state(
+    network_id: str,
+    sentinel_status: str,
+    last_check_time: Optional[str] = None,
+    target_network: Optional[str] = None,
+    gateway_ip: Optional[str] = None,
+    gateway_mac: Optional[str] = None,
+) -> None:
+    """Upsert the sentinel state for a network.
+
+    last_check_time is only written when provided (successful check only).
+    A failed check must pass None to leave last_check_time unchanged.
+    """
+    import datetime
+    from datetime import timezone
+    now = datetime.datetime.now(timezone.utc).isoformat()
+    conn = get_sentinel_connection(network_id)
+    try:
+        existing = conn.execute(
+            "SELECT network_id FROM sentinel_state WHERE network_id=?", (network_id,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO sentinel_state
+                   (network_id,sentinel_status,last_check_time,target_network,gateway_ip,gateway_mac,updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (network_id, sentinel_status, last_check_time,
+                 target_network, gateway_ip, gateway_mac, now),
+            )
+        elif last_check_time is not None:
+            conn.execute(
+                """UPDATE sentinel_state
+                   SET sentinel_status=?, last_check_time=?,
+                       target_network=COALESCE(?,target_network),
+                       gateway_ip=COALESCE(?,gateway_ip),
+                       gateway_mac=COALESCE(?,gateway_mac),
+                       updated_at=?
+                   WHERE network_id=?""",
+                (sentinel_status, last_check_time,
+                 target_network, gateway_ip, gateway_mac, now, network_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE sentinel_state
+                   SET sentinel_status=?,
+                       target_network=COALESCE(?,target_network),
+                       gateway_ip=COALESCE(?,gateway_ip),
+                       gateway_mac=COALESCE(?,gateway_mac),
+                       updated_at=?
+                   WHERE network_id=?""",
+                (sentinel_status,
+                 target_network, gateway_ip, gateway_mac, now, network_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def sentinel_get_state(network_id: str) -> dict:
+    """Return the sentinel state for a network from the sentinel DB.
+
+    Returns:
+        dict with sentinel_status, last_check_time, target_network,
+        gateway_ip, gateway_mac. Empty dict if not found.
+    """
+    conn = get_sentinel_connection(network_id)
+    try:
+        row = conn.execute(
+            "SELECT * FROM sentinel_state WHERE network_id=?", (network_id,)
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def sentinel_has_conflicting_baseline(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> bool:
+    """Return True if a baseline exists for this CIDR but with a different identity."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        # We need to check across ALL sentinel DBs — but since each network_id
+        # maps to a unique DB, a conflict can only occur if we search by CIDR
+        # in the current DB (same network_id could store multiple CIDRs in theory,
+        # but in practice each DB is network-specific).
+        # Conflict = same CIDR but different gateway triplet in the same DB.
+        row = conn.execute(
+            """SELECT COUNT(*) FROM baseline
+               WHERE target_network=?
+                 AND (gateway_ip != ? OR gateway_mac != ?)""",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchone()
+        return row[0] > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()

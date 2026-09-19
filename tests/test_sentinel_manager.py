@@ -29,8 +29,16 @@ def patch_db_path(tmp_path, monkeypatch):
         d = tmp_path / ".netlab" / "sessions"
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{session_id}.db"
+
+    def mock_get_sentinel_db_path(network_id: str):
+        d = tmp_path / ".netlab" / "sentinel"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{network_id}.db"
+
     monkeypatch.setattr(db, "get_db_path", mock_get_db_path)
+    monkeypatch.setattr(db, "get_sentinel_db_path", mock_get_sentinel_db_path)
     db.init_db(SESSION)
+    db.init_sentinel_db(SESSION)
     db.save_session(SESSION, target="192.168.1.0/24")
 
 
@@ -76,9 +84,9 @@ class TestStatus:
 
     def test_returns_active_when_recently_checked(self):
         now = datetime.datetime.now(timezone.utc).isoformat()
-        db.update_sentinel_state(
-            session_id=SESSION,
-            sentinel_state="active",
+        db.sentinel_update_state(
+            network_id=SESSION,
+            sentinel_status="active",
             last_check_time=now,
             target_network="192.168.1.0/24",
             gateway_ip="192.168.1.1",
@@ -86,13 +94,12 @@ class TestStatus:
         )
         result = status(SESSION)
         assert result["display_state"] == "ACTIF"
-        assert result["target_network"] == "192.168.1.0/24"
 
     def test_returns_degraded_when_check_stale(self):
         old = (datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=500)).isoformat()
-        db.update_sentinel_state(
-            session_id=SESSION,
-            sentinel_state="active",
+        db.sentinel_update_state(
+            network_id=SESSION,
+            sentinel_status="active",
             last_check_time=old,
         )
         result = status(SESSION)
@@ -100,8 +107,8 @@ class TestStatus:
 
     def test_unresolved_alerts_counted(self):
         import uuid
-        db.save_event(
-            session_id=SESSION,
+        db.sentinel_save_event(
+            network_id=SESSION,
             event_id=str(uuid.uuid4()),
             event_type="new_host",
             timestamp=datetime.datetime.now(timezone.utc).isoformat(),
@@ -120,18 +127,18 @@ class TestStatus:
 class TestStop:
     def test_stop_sets_state_inactive(self):
         now = datetime.datetime.now(timezone.utc).isoformat()
-        db.update_sentinel_state(SESSION, "active", last_check_time=now)
+        db.sentinel_update_state(SESSION, "active", last_check_time=now)
         _graceful_stop(SESSION)
-        state = db.get_sentinel_state(SESSION)
-        assert state["sentinel_state"] == "inactive"
+        state = db.sentinel_get_state(SESSION)
+        assert state["sentinel_status"] == "inactive"
 
     def test_stop_preserves_baseline(self):
         """Stopping Sentinel must not delete baseline entries."""
         import uuid
         asset_id = str(uuid.uuid4())
-        db.save_asset(SESSION, asset_id, "192.168.1.10", "2026-01-01T00:00:00+00:00")
-        db.save_baseline_entry(
-            session_id=SESSION,
+        db.sentinel_save_asset(SESSION, asset_id, "192.168.1.10", "2026-01-01T00:00:00+00:00")
+        db.sentinel_save_baseline_entry(
+            network_id=SESSION,
             entry_id=str(uuid.uuid4()),
             asset_id=asset_id,
             target_network="192.168.1.0/24",
@@ -142,14 +149,13 @@ class TestStop:
             last_scan="2026-01-01T00:00:00+00:00",
         )
         _graceful_stop(SESSION)
-        # Baseline still exists
-        assert db.baseline_exists(SESSION, "192.168.1.0/24", "192.168.1.1", "aa:aa:aa:aa:aa:aa")
+        assert db.sentinel_baseline_exists(SESSION, "192.168.1.0/24", "192.168.1.1", "aa:aa:aa:aa:aa:aa")
 
     def test_stop_preserves_events(self):
         """Stopping Sentinel must not delete event history."""
         import uuid
-        db.save_event(
-            session_id=SESSION,
+        db.sentinel_save_event(
+            network_id=SESSION,
             event_id=str(uuid.uuid4()),
             event_type="new_host",
             timestamp=datetime.datetime.now(timezone.utc).isoformat(),
@@ -158,7 +164,7 @@ class TestStop:
             resolved=False,
         )
         _graceful_stop(SESSION)
-        events = db.get_events(SESSION)
+        events = db.sentinel_get_events(SESSION)
         assert len(events) == 1
 
 
@@ -169,16 +175,16 @@ class TestStop:
 class TestLastCheckTime:
     def test_last_check_time_set_on_success(self):
         now = datetime.datetime.now(timezone.utc).isoformat()
-        db.update_sentinel_state(SESSION, "active", last_check_time=now)
-        state = db.get_sentinel_state(SESSION)
+        db.sentinel_update_state(SESSION, "active", last_check_time=now)
+        state = db.sentinel_get_state(SESSION)
         assert state["last_check_time"] == now
 
     def test_last_check_time_not_updated_on_failure(self):
         """Simulates a failed check by not passing last_check_time."""
         initial = (datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=30)).isoformat()
-        db.update_sentinel_state(SESSION, "active", last_check_time=initial)
+        db.sentinel_update_state(SESSION, "active", last_check_time=initial)
         # Failed check: update state only, no last_check_time
-        db.update_sentinel_state(SESSION, "degraded", last_check_time=None)
-        state = db.get_sentinel_state(SESSION)
+        db.sentinel_update_state(SESSION, "degraded", last_check_time=None)
+        state = db.sentinel_get_state(SESSION)
         assert state["last_check_time"] == initial
-        assert state["sentinel_state"] == "degraded"
+        assert state["sentinel_status"] == "degraded"

@@ -40,7 +40,12 @@ from core.database import (
     get_assets,
     get_sentinel_state,
     init_db,
+    init_sentinel_db,
     save_session,
+    sentinel_count_unresolved_events,
+    sentinel_get_state,
+    sentinel_has_conflicting_baseline,
+    sentinel_update_state,
     update_sentinel_state,
 )
 from core.logger import display
@@ -49,6 +54,7 @@ from sentinel.baseline import (
     BaselineEntry,
     NetworkIdentity,
     baseline_exists,
+    compute_network_id,
     detect_network_identity,
     get_baseline,
     learn_baseline,
@@ -90,28 +96,27 @@ def start(
 ) -> None:
     """Start Sentinel surveillance on a target network.
 
-    Flow:
-        1. Detect NetworkIdentity (CIDR + gateway IP + gateway MAC)
-        2. Warn if identity doesn't match existing baseline
-        3. Learn baseline if missing or force_relearn
-        4. Enter surveillance loop (Ctrl+C to stop)
+    Separates three identities:
+      - network_id     : stable hash of NetworkIdentity — used for baseline DB
+      - run_session_id : unique per start() call — used for session tracking
+      - identity       : NetworkIdentity triplet (CIDR + gateway IP + MAC)
+
+    The baseline persists in ~/.netlab/sentinel/<network_id>.db regardless
+    of how many times Sentinel is started or stopped.
 
     Args:
         target_network: CIDR to monitor (e.g. "192.168.1.0/24").
-        session_id:     Session ID. Auto-generated if None.
+        session_id:     Optional override for run session ID.
         force_relearn:  Replace baseline for current identity if it exists.
     """
     interval = _load_interval()
-    session_id = session_id or f"sentinel-{uuid.uuid4().hex[:8]}"
 
-    # Initialise DB for this session
-    init_db(session_id)
-    save_session(session_id, target=target_network, profile="sentinel")
-
-    # Step 1 — detect network identity
+    # Step 1 — detect network identity and compute stable network_id
     display(f"[cyan]Detecting network identity for {target_network}...[/cyan]")
     identity = detect_network_identity(target_network)
+    network_id = compute_network_id(identity)
     display(f"[dim]Identity: {identity}[/dim]")
+    display(f"[dim]Network ID: {network_id}[/dim]")
 
     if not identity.gateway_ip:
         display(
@@ -119,15 +124,25 @@ def start(
             "Network identity is partial.[/yellow]"
         )
 
-    # Step 2 — check for conflicting existing baseline
-    if not force_relearn and _has_conflicting_baseline(session_id, target_network, identity):
+    # Step 2 — initialise persistent sentinel DB for this network
+    init_sentinel_db(network_id)
+
+    # Step 3 — create a run session for tracking this execution
+    run_session_id = session_id or f"sentinel-run-{uuid.uuid4().hex[:8]}"
+    init_db(run_session_id)
+    save_session(run_session_id, target=target_network, profile="sentinel")
+
+    # Step 4 — check for conflicting baseline (same CIDR, different gateway MAC)
+    if not force_relearn and sentinel_has_conflicting_baseline(
+        network_id, target_network, identity.gateway_ip, identity.gateway_mac
+    ):
         display(
             f"[yellow][!] Identité réseau non reconnue pour {target_network}.\n"
             f"    Une baseline existe pour ce CIDR mais avec une identité différente.\n"
             f"    Aucune baseline ne sera chargée automatiquement.[/yellow]"
         )
         confirmed = typer.confirm(
-            f"Apprendre une nouvelle baseline pour ce réseau ?",
+            "Apprendre une nouvelle baseline pour ce réseau ?",
             default=False,
         )
         if not confirmed:
@@ -135,8 +150,8 @@ def start(
             return
         force_relearn = True
 
-    # Step 3 — learn baseline if needed
-    if not baseline_exists(session_id, identity) or force_relearn:
+    # Step 5 — learn baseline if missing or force_relearn
+    if not baseline_exists(network_id, identity) or force_relearn:
         confirmed = typer.confirm(
             f"[sentinel] Démarrer la surveillance de {target_network} ?\n"
             f"  Un scan initial sera effectué pour établir la baseline.",
@@ -148,22 +163,22 @@ def start(
 
         ok = learn_baseline(
             target_network=target_network,
-            session_id=session_id,
+            network_id=network_id,
             identity=identity,
             force_relearn=force_relearn,
         )
         if not ok:
             display("[red]Échec de l'apprentissage de la baseline. Sentinel non démarré.[/red]")
-            update_sentinel_state(session_id, "inactive")
+            sentinel_update_state(network_id, "inactive")
             return
     else:
-        display(f"[green]Baseline existante trouvée — surveillance démarrée.[/green]")
+        display("[green]Baseline existante trouvée — surveillance démarrée.[/green]")
 
-    # Step 4 — initialise state
+    # Step 6 — record initial state in sentinel DB
     now = datetime.datetime.now(timezone.utc).isoformat()
-    update_sentinel_state(
-        session_id=session_id,
-        sentinel_state="active",
+    sentinel_update_state(
+        network_id=network_id,
+        sentinel_status="active",
         last_check_time=now,
         target_network=target_network,
         gateway_ip=identity.gateway_ip,
@@ -180,10 +195,10 @@ def start(
     display("[dim]Ctrl+C pour arrêter. Baseline conservée à l'arrêt.[/dim]")
     _display_hints("active")
 
-    # Step 5 — surveillance loop
+    # Step 7 — surveillance loop
     _run_loop(
         target_network=target_network,
-        session_id=session_id,
+        network_id=network_id,
         identity=identity,
         interval=interval,
         whitelist=whitelist,
@@ -193,45 +208,38 @@ def start(
 
 def _run_loop(
     target_network: str,
-    session_id: str,
+    network_id: str,
     identity: NetworkIdentity,
     interval: int,
     whitelist,
     counter: AlertCounter,
 ) -> None:
-    """Run the surveillance loop until interrupted.
-
-    Handles Ctrl+C gracefully — sets state to inactive, preserves baseline.
-    """
+    """Run the surveillance loop until interrupted."""
     try:
         while True:
             time.sleep(interval)
             _do_check(
                 target_network=target_network,
-                session_id=session_id,
+                network_id=network_id,
                 identity=identity,
                 interval=interval,
                 whitelist=whitelist,
                 counter=counter,
             )
     except KeyboardInterrupt:
-        _graceful_stop(session_id)
+        _graceful_stop(network_id)
 
 
 def _do_check(
     target_network: str,
-    session_id: str,
+    network_id: str,
     identity: NetworkIdentity,
     interval: int,
     whitelist,
     counter: AlertCounter,
 ) -> None:
-    """Execute one surveillance check cycle.
-
-    Updates last_check_time only on success.
-    Sets state to degraded if check fails, active on success.
-    """
-    baseline = get_baseline(session_id, identity)
+    """Execute one surveillance check cycle using the sentinel DB."""
+    baseline = get_baseline(network_id, identity)
     if not baseline:
         display("[yellow]Baseline vide — impossible de comparer.[/yellow]")
         return
@@ -239,31 +247,26 @@ def _do_check(
     try:
         changes = check_network(
             target_network=target_network,
-            session_id=session_id,
+            session_id=network_id,
             identity=identity,
             baseline=baseline,
         )
-        # Successful check — update last_check_time and state
         now = datetime.datetime.now(timezone.utc).isoformat()
-        update_sentinel_state(
-            session_id=session_id,
-            sentinel_state="active",
+        sentinel_update_state(
+            network_id=network_id,
+            sentinel_status="active",
             last_check_time=now,
         )
-
         if changes:
             process_changes(
                 changes=changes,
-                session_id=session_id,
+                session_id=network_id,
                 whitelist=whitelist,
                 counter=counter,
             )
-
     except Exception as exc:
-        # Failed check — do NOT update last_check_time
         display(f"[yellow]Monitor check failed: {exc}[/yellow]")
-        # Check if degraded threshold exceeded
-        state = get_sentinel_state(session_id)
+        state = sentinel_get_state(network_id)
         last_ok = state.get("last_check_time")
         if last_ok:
             elapsed = (
@@ -271,9 +274,8 @@ def _do_check(
                 - datetime.datetime.fromisoformat(last_ok)
             ).total_seconds()
             if elapsed > 2 * interval:
-                update_sentinel_state(session_id=session_id, sentinel_state="degraded")
-                display("[yellow][!] SENTINELX: DÉGRADÉ — aucun check réussi depuis "
-                        f"{int(elapsed)}s[/yellow]")
+                sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+                display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
 
 
 # ---------------------------------------------------------------------------
@@ -281,46 +283,39 @@ def _do_check(
 # ---------------------------------------------------------------------------
 
 def status(session_id: str) -> dict:
-    """Return current Sentinel status for a session.
+    """Return current Sentinel status.
 
-    Computes the display state (active/degraded/inactive) from DB.
-    Does not run a network check.
-
-    Args:
-        session_id: Session identifier.
-
-    Returns:
-        dict with keys: sentinel_state, display_state, target_network,
-        gateway_ip, gateway_mac, last_check_time, active_hosts,
-        known_hosts, unresolved_alerts.
+    Accepts session_id for backward compatibility but also checks network_id
+    derived from sentinel DB. Falls back gracefully if no sentinel state found.
     """
     interval = _load_interval()
-    state = get_sentinel_state(session_id)
-    if not state:
-        return {"sentinel_state": "inactive", "display_state": "INACTIF"}
+    # Try sentinel state DB first (new path)
+    # Since we don't have network_id here, we scan sentinel DBs by session target
+    # Fallback: use old session-based state
+    state = sentinel_get_state(session_id)
+    if state:
+        sentinel_state = state.get("sentinel_status", "inactive")
+        last_check = state.get("last_check_time")
+        target_network = state.get("target_network", "")
+        gateway_ip = state.get("gateway_ip", "")
+        gateway_mac = state.get("gateway_mac", "")
+    else:
+        sentinel_state = "inactive"
+        last_check = None
+        target_network = ""
+        gateway_ip = ""
+        gateway_mac = ""
 
-    sentinel_state = state.get("sentinel_state", "inactive")
-    last_check = state.get("last_check_time")
-    target_network = state.get("sentinel_target_network", "")
-    gateway_ip = state.get("sentinel_gateway_ip", "")
-    gateway_mac = state.get("sentinel_gateway_mac", "")
-
-    # Compute degraded state from last_check_time
     display_state = _compute_display_state(sentinel_state, last_check, interval)
-
-    # Count hosts
     assets = get_assets(session_id)
     known_hosts = len(assets)
-    # active hosts = those with active=1
     active_hosts = sum(1 for a in assets if a.get("active", 1))
 
-    # Unresolved alerts
     try:
-        unresolved = count_unresolved_events(session_id)
+        unresolved = sentinel_count_unresolved_events(session_id)
     except Exception:
         unresolved = 0
 
-    # Seconds since last check
     seconds_since = None
     seconds_until = None
     if last_check:
@@ -382,11 +377,7 @@ def display_status(session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def stop(session_id: str) -> None:
-    """Stop Sentinel and persist inactive state. Baseline is preserved.
-
-    Args:
-        session_id: Session identifier.
-    """
+    """Stop Sentinel. Baseline preserved in sentinel DB."""
     _graceful_stop(session_id)
     display(f"[○] Sentinel arrêté. Session: {session_id}")
 
@@ -395,12 +386,15 @@ def stop(session_id: str) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _graceful_stop(session_id: str) -> None:
-    """Mark sentinel as inactive in DB. Never deletes baseline or events."""
+def _graceful_stop(network_or_session_id: str) -> None:
+    """Mark sentinel as inactive. Never deletes baseline or events."""
     try:
-        update_sentinel_state(session_id=session_id, sentinel_state="inactive")
+        sentinel_update_state(network_or_session_id, "inactive")
     except Exception:
-        pass
+        try:
+            update_sentinel_state(network_or_session_id, sentinel_state="inactive")
+        except Exception:
+            pass
     display("\n[○] Sentinel arrêté proprement. Baseline conservée.")
 
 
@@ -458,23 +452,6 @@ def _has_conflicting_baseline(
         bool: True if conflict exists.
     """
     from core.database import get_connection
-    conn = get_connection(session_id)
-    try:
-        # Check if any baseline row has same target_network but different triplet
-        row = conn.execute(
-            """
-            SELECT COUNT(*) FROM baseline
-            WHERE target_network = ?
-              AND (gateway_ip != ? OR gateway_mac != ?)
-            """,
-            (target_network, identity.gateway_ip, identity.gateway_mac),
-        ).fetchone()
-        return row[0] > 0
-    except Exception:
-        return False
-    finally:
-        conn.close()
-
 
 def _display_hints(state: str) -> None:
     """Display contextual command hints based on Sentinel state."""

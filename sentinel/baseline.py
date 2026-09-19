@@ -35,13 +35,41 @@ from typing import Dict, List, Optional
 import typer
 
 from core.database import (
-    baseline_exists as db_baseline_exists,
-    delete_baseline_for_identity,
-    get_baseline_entries,
-    save_asset,
-    save_baseline_entry,
+    sentinel_baseline_exists as db_baseline_exists,
+    sentinel_delete_baseline_for_identity,
+    sentinel_get_baseline_entries,
+    sentinel_save_asset,
+    sentinel_save_baseline_entry,
 )
 from core.logger import display
+
+
+# ---------------------------------------------------------------------------
+# Network ID — stable identifier derived from NetworkIdentity
+# ---------------------------------------------------------------------------
+
+def compute_network_id(identity: "NetworkIdentity") -> str:
+    """Derive a stable, filesystem-safe identifier from a NetworkIdentity.
+
+    Uses SHA-256 of "target_network|gateway_ip|gateway_mac" (lowercase).
+    Truncated to 12 hex chars — deterministic across restarts.
+
+    Same network = same network_id, always.
+    Different gateway MAC = different network_id.
+
+    Args:
+        identity: NetworkIdentity triplet.
+
+    Returns:
+        str: 12-character lowercase hex string safe for use as a filename.
+
+    Examples:
+        NetworkIdentity("192.168.1.0/24", "192.168.1.1", "aa:bb:cc:dd:ee:ff")
+        → "a3f9c2b1e047"  (example only — actual value depends on hash)
+    """
+    import hashlib
+    raw = f"{identity.target_network}|{identity.gateway_ip}|{identity.gateway_mac}".lower()
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -210,18 +238,18 @@ def _get_arp_mac(ip: str) -> str:
 # baseline_exists wrapper
 # ---------------------------------------------------------------------------
 
-def baseline_exists(session_id: str, identity: NetworkIdentity) -> bool:
+def baseline_exists(network_id: str, identity: NetworkIdentity) -> bool:
     """Return True if a baseline exists for this exact NetworkIdentity.
 
     Args:
-        session_id: Session identifier.
+        network_id: Stable identifier from compute_network_id().
         identity:   NetworkIdentity to check.
 
     Returns:
         bool
     """
     return db_baseline_exists(
-        session_id,
+        network_id,
         identity.target_network,
         identity.gateway_ip,
         identity.gateway_mac,
@@ -233,23 +261,22 @@ def baseline_exists(session_id: str, identity: NetworkIdentity) -> bool:
 # ---------------------------------------------------------------------------
 
 def get_baseline(
-    session_id: str,
+    network_id: str,
     identity: NetworkIdentity,
 ) -> Dict[str, BaselineEntry]:
     """Return the stored baseline for a NetworkIdentity as a dict keyed by IP.
 
-    Only returns entries for the exact triplet (target_network, gateway_ip,
-    gateway_mac). Never returns entries for a different network identity.
+    Reads from the persistent sentinel DB (not a session DB).
 
     Args:
-        session_id: Session identifier.
+        network_id: Stable identifier from compute_network_id().
         identity:   NetworkIdentity to query.
 
     Returns:
         Dict[str, BaselineEntry]: {ip: BaselineEntry}. Empty if no baseline.
     """
-    rows = get_baseline_entries(
-        session_id,
+    rows = sentinel_get_baseline_entries(
+        network_id,
         identity.target_network,
         identity.gateway_ip,
         identity.gateway_mac,
@@ -275,25 +302,23 @@ def get_baseline(
 
 def learn_baseline(
     target_network: str,
-    session_id: str,
+    network_id: str,
     identity: NetworkIdentity,
     force_relearn: bool = False,
 ) -> bool:
     """Discover active hosts and their open ports, store as baseline.
 
-    Atomic relearn: if force_relearn=True, the old baseline is deleted only
-    after the new one has been successfully learned (at least 1 host found).
-    If discovery finds 0 hosts, the old baseline is preserved and False is
-    returned.
+    Stores in the persistent sentinel DB (~/.netlab/sentinel/<network_id>.db).
+    Atomic relearn: old baseline deleted ONLY after successful discovery.
 
     Args:
         target_network: CIDR to scan.
-        session_id:     Current audit session ID.
+        network_id:     Stable identifier from compute_network_id().
         identity:       NetworkIdentity for this baseline.
         force_relearn:  If True, replace existing baseline for this identity.
 
     Returns:
-        bool: True if baseline was successfully learned and stored, False otherwise.
+        bool: True if baseline was successfully learned and stored.
     """
     display(f"[cyan]Learning baseline for {identity}...[/cyan]")
 
@@ -324,7 +349,7 @@ def learn_baseline(
         port_xml = _run_nmap_tcp(ip, "normal", "1-1024,3389,5432,3306,1433,8080,8443")
         ports: List[int] = []
         if port_xml:
-            findings = _parse_tcp_xml(port_xml, ip, session_id)
+            findings = _parse_tcp_xml(port_xml, ip, network_id)
             ports = [f.target_port for f in findings if f.target_port is not None]
 
         asset_id = str(uuid.uuid4())
@@ -339,9 +364,9 @@ def learn_baseline(
 
     # Step 3 — atomic store
     # Delete old baseline ONLY after successful discovery
-    if force_relearn and baseline_exists(session_id, identity):
-        deleted = delete_baseline_for_identity(
-            session_id,
+    if force_relearn and baseline_exists(network_id, identity):
+        deleted = sentinel_delete_baseline_for_identity(
+            network_id,
             identity.target_network,
             identity.gateway_ip,
             identity.gateway_mac,
@@ -349,16 +374,16 @@ def learn_baseline(
         display(f"[dim]Replaced {deleted} old baseline entry(ies).[/dim]")
 
     for entry in new_entries:
-        # Ensure asset is in DB
-        save_asset(
-            session_id=session_id,
+        # Ensure asset is in sentinel DB
+        sentinel_save_asset(
+            network_id=network_id,
             asset_id=entry["asset_id"],
             ip=entry["ip"],
             first_seen=now,
             mac=entry["mac"] or None,
         )
-        save_baseline_entry(
-            session_id=session_id,
+        sentinel_save_baseline_entry(
+            network_id=network_id,
             entry_id=str(uuid.uuid4()),
             asset_id=entry["asset_id"],
             target_network=identity.target_network,

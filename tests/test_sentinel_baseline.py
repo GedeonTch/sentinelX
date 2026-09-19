@@ -18,6 +18,7 @@ from sentinel.baseline import (
     baseline_exists,
     get_baseline,
     learn_baseline,
+    compute_network_id,
     detect_network_identity,
     _get_gateway_ip,
     _get_arp_mac,
@@ -37,8 +38,16 @@ def patch_db_path(tmp_path, monkeypatch):
         d = tmp_path / ".netlab" / "sessions"
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{session_id}.db"
+
+    def mock_get_sentinel_db_path(network_id: str):
+        d = tmp_path / ".netlab" / "sentinel"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{network_id}.db"
+
     monkeypatch.setattr(db, "get_db_path", mock_get_db_path)
+    monkeypatch.setattr(db, "get_sentinel_db_path", mock_get_sentinel_db_path)
     db.init_db(SESSION)
+    db.init_sentinel_db(SESSION)
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +76,11 @@ class TestNetworkIdentity:
 # ---------------------------------------------------------------------------
 
 class TestBaselineExists:
-    def _insert_entry(self, session_id, identity, ip="192.168.1.10"):
+    def _insert_entry(self, network_id, identity, ip="192.168.1.10"):
         asset_id = str(uuid.uuid4())
-        db.save_asset(session_id, asset_id, ip, "2026-01-01T00:00:00+00:00")
-        db.save_baseline_entry(
-            session_id=session_id,
+        db.sentinel_save_asset(network_id, asset_id, ip, "2026-01-01T00:00:00+00:00")
+        db.sentinel_save_baseline_entry(
+            network_id=network_id,
             entry_id=str(uuid.uuid4()),
             asset_id=asset_id,
             target_network=identity.target_network,
@@ -109,11 +118,11 @@ class TestBaselineExists:
 # ---------------------------------------------------------------------------
 
 class TestGetBaseline:
-    def _insert(self, session_id, identity, ip, ports):
+    def _insert(self, network_id, identity, ip, ports):
         asset_id = str(uuid.uuid4())
-        db.save_asset(session_id, asset_id, ip, "2026-01-01T00:00:00+00:00")
-        db.save_baseline_entry(
-            session_id=session_id,
+        db.sentinel_save_asset(network_id, asset_id, ip, "2026-01-01T00:00:00+00:00")
+        db.sentinel_save_baseline_entry(
+            network_id=network_id,
             entry_id=str(uuid.uuid4()),
             asset_id=asset_id,
             target_network=identity.target_network,
@@ -196,11 +205,10 @@ class TestLearnBaseline:
 
     def test_relearn_only_deletes_current_identity(self):
         """--relearn must not touch IDENTITY_B when relearning IDENTITY_A."""
-        # Insert IDENTITY_B baseline first
         asset_id = str(uuid.uuid4())
-        db.save_asset(SESSION, asset_id, "192.168.1.20", "2026-01-01T00:00:00+00:00")
-        db.save_baseline_entry(
-            session_id=SESSION,
+        db.sentinel_save_asset(SESSION, asset_id, "192.168.1.20", "2026-01-01T00:00:00+00:00")
+        db.sentinel_save_baseline_entry(
+            network_id=SESSION,
             entry_id=str(uuid.uuid4()),
             asset_id=asset_id,
             target_network=IDENTITY_B.target_network,
@@ -210,13 +218,10 @@ class TestLearnBaseline:
             mac=None,
             last_scan="2026-01-01T00:00:00+00:00",
         )
-        # Learn IDENTITY_A with relearn
         with patch("sentinel.baseline._run_nmap_ping", return_value=PING_XML_ONE), \
              patch("sentinel.baseline._run_nmap_tcp", return_value=PORT_XML_ONE), \
              patch("sentinel.baseline._get_arp_mac", return_value=""):
             learn_baseline("192.168.1.0/24", SESSION, IDENTITY_A, force_relearn=True)
-
-        # IDENTITY_B must still be there
         assert baseline_exists(SESSION, IDENTITY_B)
 
     def test_relearn_failed_discovery_preserves_old_baseline(self):
@@ -234,3 +239,61 @@ class TestLearnBaseline:
         assert ok is False
         # Old baseline still there
         assert baseline_exists(SESSION, IDENTITY_A)
+
+
+# ---------------------------------------------------------------------------
+# compute_network_id — A2 stability tests
+# ---------------------------------------------------------------------------
+
+class TestComputeNetworkId:
+    def test_deterministic_same_identity(self):
+        """Same identity always produces the same network_id."""
+        a = compute_network_id(IDENTITY_A)
+        b = compute_network_id(IDENTITY_A)
+        assert a == b
+
+    def test_different_mac_produces_different_id(self):
+        """Different gateway MAC → different network_id."""
+        id_a = compute_network_id(IDENTITY_A)
+        id_b = compute_network_id(IDENTITY_B)
+        assert id_a != id_b
+
+    def test_empty_mac_produces_different_id_from_known_mac(self):
+        id_known = compute_network_id(IDENTITY_A)
+        id_empty = compute_network_id(IDENTITY_EMPTY_MAC)
+        assert id_known != id_empty
+
+    def test_result_is_12_hex_chars(self):
+        nid = compute_network_id(IDENTITY_A)
+        assert len(nid) == 12
+        assert all(c in "0123456789abcdef" for c in nid)
+
+    def test_baseline_persists_across_restart_simulation(self):
+        """Simulate restart: same identity → same network_id → baseline found."""
+        nid = compute_network_id(IDENTITY_A)
+        db.init_sentinel_db(nid)
+
+        # First "start" — save asset first, then baseline (FK requires asset to exist)
+        asset_id = str(uuid.uuid4())
+        db.sentinel_save_asset(nid, asset_id, "192.168.1.10", "2026-01-01T00:00:00+00:00")
+        db.sentinel_save_baseline_entry(
+            network_id=nid,
+            entry_id=str(uuid.uuid4()),
+            asset_id=asset_id,           # must match an existing asset
+            target_network=IDENTITY_A.target_network,
+            gateway_ip=IDENTITY_A.gateway_ip,
+            gateway_mac=IDENTITY_A.gateway_mac,
+            ports=[22, 80],
+            mac=None,
+            last_scan="2026-01-01T00:00:00+00:00",
+        )
+        assert db.sentinel_baseline_exists(nid, IDENTITY_A.target_network,
+                                           IDENTITY_A.gateway_ip, IDENTITY_A.gateway_mac)
+
+        # "Restart" — recompute network_id from same identity
+        nid_after_restart = compute_network_id(IDENTITY_A)
+        assert nid_after_restart == nid  # same network_id
+
+        # Baseline still found after restart
+        assert db.sentinel_baseline_exists(nid_after_restart, IDENTITY_A.target_network,
+                                           IDENTITY_A.gateway_ip, IDENTITY_A.gateway_mac)
