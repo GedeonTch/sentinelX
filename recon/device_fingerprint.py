@@ -48,29 +48,32 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def fingerprint(target: str, session_id: str) -> List[Finding]:
+def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> List[Finding]:
     """Discover active hosts on a target and fingerprint their OS.
 
     Performs two nmap passes:
       1. Ping scan to find active hosts
       2. OS detection on each active host
 
-    Asks for (y/n) confirmation before sending any network traffic.
+    Asks for (y/n) confirmation before sending any network traffic,
+    unless auto_confirm=True (used by netlab scan --yes pipeline).
 
     Args:
-        target:     IP address or CIDR range (e.g. "192.168.1.0/24").
-        session_id: Current audit session ID — stamped on every Finding.
+        target:       IP address or CIDR range (e.g. "192.168.1.0/24").
+        session_id:   Current audit session ID — stamped on every Finding.
+        auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
         List[Finding]: One Finding per active host. Empty list if no hosts found
                        or if the user cancels.
     """
-    confirmed = typer.confirm(
-        f"[device_fingerprint] Start host discovery on {target}?"
-    )
-    if not confirmed:
-        display("[yellow]Host discovery cancelled.[/yellow]")
-        return []
+    if not auto_confirm:
+        confirmed = typer.confirm(
+            f"[device_fingerprint] Start host discovery on {target}?"
+        )
+        if not confirmed:
+            display("[yellow]Host discovery cancelled.[/yellow]")
+            return []
 
     display(f"[cyan]Starting host discovery on {target}...[/cyan]")
 

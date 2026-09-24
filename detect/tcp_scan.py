@@ -69,16 +69,19 @@ def tcp_scan(
     session_id: str,
     profile: str = "normal",
     ports: str = DEFAULT_PORTS,
+    auto_confirm: bool = False,
 ) -> List[Finding]:
     """Scan TCP ports on a target and return one Finding per open port.
 
-    Asks for (y/n) confirmation before sending any traffic.
+    Asks for (y/n) confirmation before sending any traffic,
+    unless auto_confirm=True (used by netlab scan --yes pipeline).
 
     Args:
-        target:     IP address or hostname to scan.
-        session_id: Current audit session ID.
-        profile:    Scan profile — normal, stealth, aggressive.
-        ports:      Port range string (nmap format, e.g. "1-1024,8080").
+        target:       IP address or hostname to scan.
+        session_id:   Current audit session ID.
+        profile:      Scan profile — normal, stealth, aggressive.
+        ports:        Port range string (nmap format, e.g. "1-1024,8080").
+        auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
         List[Finding]: One Finding per open TCP port. Empty if none found
@@ -88,12 +91,13 @@ def tcp_scan(
         display(f"[red]Unknown profile '{profile}'. Using 'normal'.[/red]")
         profile = "normal"
 
-    confirmed = typer.confirm(
-        f"[tcp_scan] Scan TCP ports {ports} on {target} (profile: {profile})?"
-    )
-    if not confirmed:
-        display("[yellow]TCP scan cancelled.[/yellow]")
-        return []
+    if not auto_confirm:
+        confirmed = typer.confirm(
+            f"[tcp_scan] Scan TCP ports {ports} on {target} (profile: {profile})?"
+        )
+        if not confirmed:
+            display("[yellow]TCP scan cancelled.[/yellow]")
+            return []
 
     display(f"[cyan]Starting TCP scan on {target} (profile: {profile})...[/cyan]")
 

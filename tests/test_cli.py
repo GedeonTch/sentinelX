@@ -12,8 +12,8 @@ Covers:
 - netlab doctor (env ready / env not ready)
 - netlab scan (confirmation yes / no / invalid profile)
 - netlab findings list / show / explain (session with findings / empty / not found)
-- netlab sentinel start / status / stop
-- netlab report generate (valid / invalid format)
+- netlab sentinel start / status / stop (real sentinel_manager calls)
+- netlab report generate (html/json, --output, PDF rejected)
 - netlab cleanup (session / sessions+older-than / cancelled)
 - netlab config set / show
 """
@@ -318,33 +318,85 @@ class TestFindingsExplain:
 
 
 # ---------------------------------------------------------------------------
-# sentinel
+# sentinel — real sentinel_manager calls (A4 Task 2)
 # ---------------------------------------------------------------------------
 
 class TestSentinel:
-    def test_sentinel_start_cancelled(self):
-        result = runner.invoke(app, ["sentinel", "start"], input="n\n")
-        assert result.exit_code == 0
-        assert "cancelled" in result.output.lower()
+    def test_sentinel_start_requires_target(self):
+        result = runner.invoke(app, ["sentinel", "start"])
+        assert result.exit_code != 0
 
-    def test_sentinel_start_not_yet_implemented(self):
-        result = runner.invoke(app, ["sentinel", "start"], input="y\n")
+    def test_sentinel_start_calls_manager_with_real_signature(self):
+        with patch("sentinel.sentinel_manager.start") as mock_start:
+            result = runner.invoke(
+                app,
+                ["sentinel", "start", "--target", "192.168.1.0/24"],
+            )
         assert result.exit_code == 0
-        assert "not yet implemented" in result.output.lower()
+        mock_start.assert_called_once_with(
+            target_network="192.168.1.0/24",
+            session_id=None,
+            force_relearn=False,
+        )
 
-    def test_sentinel_status_not_yet_implemented(self):
+    def test_sentinel_start_passes_session_and_relearn(self):
+        with patch("sentinel.sentinel_manager.start") as mock_start:
+            result = runner.invoke(
+                app,
+                [
+                    "sentinel", "start",
+                    "--target", "10.0.0.0/24",
+                    "--session", "session-001",
+                    "--relearn",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_start.assert_called_once_with(
+            target_network="10.0.0.0/24",
+            session_id="session-001",
+            force_relearn=True,
+        )
+
+    def test_sentinel_status_requires_session(self):
         result = runner.invoke(app, ["sentinel", "status"])
-        assert result.exit_code == 0
-        assert "not yet implemented" in result.output.lower()
+        assert result.exit_code != 0
 
-    def test_sentinel_stop_not_yet_implemented(self):
-        result = runner.invoke(app, ["sentinel", "stop"])
+    def test_sentinel_status_calls_display_status(self):
+        with patch("sentinel.sentinel_manager.display_status") as mock_status:
+            result = runner.invoke(
+                app,
+                ["sentinel", "status", "--session", "net-abc"],
+            )
         assert result.exit_code == 0
-        assert "not yet implemented" in result.output.lower()
+        mock_status.assert_called_once_with("net-abc")
+
+    def test_sentinel_stop_requires_session(self):
+        result = runner.invoke(app, ["sentinel", "stop"])
+        assert result.exit_code != 0
+
+    def test_sentinel_stop_calls_manager_stop(self):
+        with patch("sentinel.sentinel_manager.stop") as mock_stop:
+            result = runner.invoke(
+                app,
+                ["sentinel", "stop", "--session", "net-abc"],
+            )
+        assert result.exit_code == 0
+        mock_stop.assert_called_once_with("net-abc")
+
+    def test_sentinel_start_does_not_swallow_manager_exceptions(self):
+        with patch(
+            "sentinel.sentinel_manager.start",
+            side_effect=RuntimeError("identity failed"),
+        ):
+            result = runner.invoke(
+                app,
+                ["sentinel", "start", "--target", "192.168.1.0/24"],
+            )
+        assert result.exit_code != 0
 
 
 # ---------------------------------------------------------------------------
-# report
+# report — real generator calls (A4 Task 3)
 # ---------------------------------------------------------------------------
 
 class TestReport:
@@ -356,14 +408,65 @@ class TestReport:
         assert result.exit_code == 1
         assert "Invalid format" in result.output
 
-    def test_report_generate_valid_formats(self):
-        for fmt in ("pdf", "html", "json"):
+    def test_report_rejects_pdf(self):
+        result = runner.invoke(
+            app,
+            ["report", "generate", "--session", "session-001", "--format", "pdf"],
+        )
+        assert result.exit_code == 1
+        assert "PDF" in result.output
+        assert "not supported" in result.output.lower()
+
+    def test_report_generate_json_calls_generator(self):
+        with patch("reports.generator.generate_report", return_value=True) as mock_gen:
             result = runner.invoke(
                 app,
-                ["report", "generate", "--session", "session-001", "--format", fmt],
+                ["report", "generate", "--session", "session-001", "--format", "json"],
             )
-            assert result.exit_code == 0
-            assert "not yet implemented" in result.output.lower()
+        assert result.exit_code == 0
+        assert "Report saved" in result.output
+        mock_gen.assert_called_once()
+        kwargs = mock_gen.call_args.kwargs
+        assert kwargs["session_id"] == "session-001"
+        assert kwargs["format"] == "json"
+        assert kwargs["output_path"].endswith("session-001.json")
+
+    def test_report_generate_html_calls_generator(self):
+        with patch("reports.generator.generate_report", return_value=True) as mock_gen:
+            result = runner.invoke(
+                app,
+                ["report", "generate", "--session", "session-001", "--format", "html"],
+            )
+        assert result.exit_code == 0
+        kwargs = mock_gen.call_args.kwargs
+        assert kwargs["format"] == "html"
+        assert kwargs["output_path"].endswith("session-001.html")
+
+    def test_report_generate_honours_output_option(self):
+        with patch("reports.generator.generate_report", return_value=True) as mock_gen:
+            result = runner.invoke(
+                app,
+                [
+                    "report", "generate",
+                    "--session", "session-001",
+                    "--format", "json",
+                    "--output", "/tmp/custom-report.json",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_gen.assert_called_once_with(
+            session_id="session-001",
+            format="json",
+            output_path="/tmp/custom-report.json",
+        )
+
+    def test_report_generate_false_exits_one(self):
+        with patch("reports.generator.generate_report", return_value=False):
+            result = runner.invoke(
+                app,
+                ["report", "generate", "--session", "session-001", "--format", "json"],
+            )
+        assert result.exit_code == 1
 
     def test_report_requires_session(self):
         result = runner.invoke(app, ["report", "generate"])

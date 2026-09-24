@@ -70,17 +70,20 @@ def udp_scan(
     session_id: str,
     profile: str = "normal",
     ports: str = DEFAULT_UDP_PORTS,
+    auto_confirm: bool = False,
 ) -> List[Finding]:
     """Scan UDP ports on a target and return one Finding per confirmed open port.
 
     Requires root/sudo on Linux for raw socket access.
-    Asks for (y/n) confirmation before sending any traffic.
+    Asks for (y/n) confirmation before sending any traffic,
+    unless auto_confirm=True (used by netlab scan --yes pipeline).
 
     Args:
-        target:     IP address or hostname to scan.
-        session_id: Current audit session ID.
-        profile:    Scan profile — normal, stealth, aggressive.
-        ports:      Port list/range (nmap format).
+        target:       IP address or hostname to scan.
+        session_id:   Current audit session ID.
+        profile:      Scan profile — normal, stealth, aggressive.
+        ports:        Port list/range (nmap format).
+        auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
         List[Finding]: One Finding per confirmed open UDP port.
@@ -89,13 +92,14 @@ def udp_scan(
         display(f"[red]Unknown profile '{profile}'. Using 'normal'.[/red]")
         profile = "normal"
 
-    confirmed = typer.confirm(
-        f"[udp_scan] Scan UDP ports on {target} (profile: {profile})? "
-        f"[requires root, may be slow]"
-    )
-    if not confirmed:
-        display("[yellow]UDP scan cancelled.[/yellow]")
-        return []
+    if not auto_confirm:
+        confirmed = typer.confirm(
+            f"[udp_scan] Scan UDP ports on {target} (profile: {profile})? "
+            f"[requires root, may be slow]"
+        )
+        if not confirmed:
+            display("[yellow]UDP scan cancelled.[/yellow]")
+            return []
 
     display(f"[cyan]Starting UDP scan on {target} (profile: {profile})...[/cyan]")
     display("[dim]UDP scanning is slow — only common ports are scanned by default.[/dim]")
