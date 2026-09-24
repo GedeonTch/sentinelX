@@ -20,6 +20,7 @@ Covers:
 
 import pytest
 from pathlib import Path
+from contextlib import ExitStack
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
@@ -132,39 +133,67 @@ class TestScan:
         assert result.exit_code == 0
         assert "cancelled" in result.output.lower()
 
-    def test_scan_confirmed_creates_session(self, tmp_path):
-        """Confirming a scan must create a session DB and exit zero."""
+    def _run_scan_with_stubbed_pipeline(self, target, profile):
+        """Run scan with every network/pipeline dependency replaced by a stub."""
         import core.database as db
 
-        def mock_db_path(session_id: str) -> Path:
-            d = tmp_path / ".netlab" / "sessions"
-            d.mkdir(parents=True, exist_ok=True)
-            return d / f"{session_id}.db"
+        host_finding = make_finding(module="device_fingerprint", target_ip="192.168.1.1")
+        port_finding = make_finding(module="tcp_scan", target_ip="192.168.1.1")
 
-        with patch.object(db, "get_db_path", side_effect=mock_db_path):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(db, "init_db"))
+            stack.enter_context(patch.object(db, "save_session"))
+            stack.enter_context(patch.object(db, "save_findings"))
+            stack.enter_context(patch.object(db, "update_finding_risk_score"))
+            stack.enter_context(patch.object(db, "close_session"))
+            fingerprint = stack.enter_context(
+                patch("recon.device_fingerprint.fingerprint", return_value=[host_finding])
+            )
+            tcp_scan = stack.enter_context(
+                patch("detect.tcp_scan.tcp_scan", return_value=[port_finding])
+            )
+            udp_scan = stack.enter_context(
+                patch("detect.udp_scan.udp_scan", return_value=[])
+            )
+            stack.enter_context(
+                patch("detect.service_detection.enrich_findings", return_value=[port_finding])
+            )
+            stack.enter_context(
+                patch("detect.misconfig_detection.detect_misconfigs", return_value=[])
+            )
+            stack.enter_context(
+                patch("knowledge.knowledge_base.get_explanation_for_finding", return_value=None)
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.score_findings", return_value=[port_finding])
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.get_global_score", return_value=25.0)
+            )
+
             result = runner.invoke(
                 app,
-                ["scan", "--target", "192.168.1.1", "--profile", "normal"],
+                ["scan", "--target", target, "--profile", profile],
                 input="y\n",
             )
-        assert result.exit_code == 0
-        assert "Session created" in result.output
 
-    def test_scan_stealth_profile_accepted(self, tmp_path):
-        import core.database as db
+        assert result.exit_code == 0, result.output
+        assert "RÉSULTAT : SUCCESS" in result.output
+        session_id = fingerprint.call_args.args[1]
+        fingerprint.assert_called_once_with(target, session_id, auto_confirm=False)
+        tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
+        udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
+        return result
 
-        def mock_db_path(session_id: str) -> Path:
-            d = tmp_path / ".netlab" / "sessions"
-            d.mkdir(parents=True, exist_ok=True)
-            return d / f"{session_id}.db"
+    def test_scan_confirmed_creates_session(self):
+        """A positive confirmation runs the complete pipeline without network I/O."""
+        result = self._run_scan_with_stubbed_pipeline("192.168.1.1", "normal")
+        assert "Session:" in result.output
 
-        with patch.object(db, "get_db_path", side_effect=mock_db_path):
-            result = runner.invoke(
-                app,
-                ["scan", "--target", "10.0.0.0/24", "--profile", "stealth"],
-                input="y\n",
-            )
-        assert result.exit_code == 0
+    def test_scan_stealth_profile_accepted(self):
+        """The stealth profile is accepted and reaches the stubbed pipeline."""
+        result = self._run_scan_with_stubbed_pipeline("10.0.0.0/24", "stealth")
+        assert "Profile: stealth" in result.output
 
     def test_scan_shows_confirmation_prompt(self):
         """The CLI must ask for confirmation before any active scan."""
