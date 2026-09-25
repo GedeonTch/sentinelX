@@ -336,23 +336,30 @@ def _run_pipeline(
                        f"{mc_ok}/{len(active_ips)} réussis",
                        failed_hosts=mc_failed_hosts)
 
-    # ── Step 7 — Explanation enrichment ───────────────────────────────────
+    # ── Step 8 — Explanation enrichment ───────────────────────────────────
+    # Knowledge Base enrichment is deliberately non-critical: an unavailable
+    # or failing explanation must not change the pipeline status or interrupt
+    # scoring and persistence of the findings.
     all_findings = enriched + misconfig_findings
     explained = []
     try:
         from knowledge.knowledge_base import get_explanation_for_finding
-        for f in all_findings:
-            if f.explanation is None:
+    except Exception:
+        get_explanation_for_finding = None
+
+    for f in all_findings:
+        if get_explanation_for_finding is not None and f.explanation is None:
+            try:
                 exp = get_explanation_for_finding(f.module, f.target_service)
                 if exp:
                     f = dataclasses.replace(f, explanation=exp)
-            explained.append(f)
-        result.add("explanation", "ok", f"{len(explained)} finding(s) processed")
-    except Exception as exc:
-        explained = all_findings
-        result.add("explanation", "failed", str(exc))
+            except Exception:
+                pass
+        explained.append(f)
 
-    # ── Step 8 — Risk scoring ─────────────────────────────────────────────
+    result.add("explanation", "ok", f"{len(explained)} finding(s) processed")
+
+    # ── Step 9 — Risk scoring ─────────────────────────────────────────────
     scored = explained
     try:
         from core.risk_scorer import score_findings, get_global_score

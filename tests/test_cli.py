@@ -133,12 +133,20 @@ class TestScan:
         assert result.exit_code == 0
         assert "cancelled" in result.output.lower()
 
-    def _run_scan_with_stubbed_pipeline(self, target, profile):
+    def _run_scan_with_stubbed_pipeline(
+        self,
+        target,
+        profile,
+        knowledge_base_result=None,
+        knowledge_base_side_effect=None,
+        pipeline_findings=None,
+    ):
         """Run scan with every network/pipeline dependency replaced by a stub."""
         import core.database as db
 
         host_finding = make_finding(module="device_fingerprint", target_ip="192.168.1.1")
         port_finding = make_finding(module="tcp_scan", target_ip="192.168.1.1")
+        pipeline_findings = pipeline_findings or [port_finding]
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(db, "init_db"))
@@ -150,22 +158,26 @@ class TestScan:
                 patch("recon.device_fingerprint.fingerprint", return_value=[host_finding])
             )
             tcp_scan = stack.enter_context(
-                patch("detect.tcp_scan.tcp_scan", return_value=[port_finding])
+                patch("detect.tcp_scan.tcp_scan", return_value=pipeline_findings)
             )
             udp_scan = stack.enter_context(
                 patch("detect.udp_scan.udp_scan", return_value=[])
             )
             stack.enter_context(
-                patch("detect.service_detection.enrich_findings", return_value=[port_finding])
+                patch("detect.service_detection.enrich_findings", return_value=pipeline_findings)
             )
             stack.enter_context(
                 patch("detect.misconfig_detection.detect_misconfigs", return_value=[])
             )
-            stack.enter_context(
-                patch("knowledge.knowledge_base.get_explanation_for_finding", return_value=None)
+            knowledge_base = stack.enter_context(
+                patch(
+                    "knowledge.knowledge_base.get_explanation_for_finding",
+                    return_value=knowledge_base_result,
+                    side_effect=knowledge_base_side_effect,
+                )
             )
-            stack.enter_context(
-                patch("core.risk_scorer.score_findings", return_value=[port_finding])
+            score_findings = stack.enter_context(
+                patch("core.risk_scorer.score_findings", return_value=pipeline_findings)
             )
             stack.enter_context(
                 patch("core.risk_scorer.get_global_score", return_value=25.0)
@@ -183,17 +195,65 @@ class TestScan:
         fingerprint.assert_called_once_with(target, session_id, auto_confirm=False)
         tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
         udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
-        return result
+        return result, knowledge_base, score_findings
 
     def test_scan_confirmed_creates_session(self):
         """A positive confirmation runs the complete pipeline without network I/O."""
-        result = self._run_scan_with_stubbed_pipeline("192.168.1.1", "normal")
+        result, _, _ = self._run_scan_with_stubbed_pipeline("192.168.1.1", "normal")
         assert "Session:" in result.output
 
     def test_scan_stealth_profile_accepted(self):
         """The stealth profile is accepted and reaches the stubbed pipeline."""
-        result = self._run_scan_with_stubbed_pipeline("10.0.0.0/24", "stealth")
+        result, _, _ = self._run_scan_with_stubbed_pipeline("10.0.0.0/24", "stealth")
         assert "Profile: stealth" in result.output
+
+    def test_scan_attaches_knowledge_base_explanation(self):
+        explanation = Explanation(
+            what="SMBv1 is enabled.",
+            attack="EternalBlue exploitation.",
+            defense="Disable SMBv1.",
+        )
+        result, knowledge_base, score_findings = self._run_scan_with_stubbed_pipeline(
+            "192.168.1.1",
+            "normal",
+            knowledge_base_result=explanation,
+        )
+
+        assert result.exit_code == 0
+        knowledge_base.assert_called_once_with("tcp_scan", "smb")
+        explained = score_findings.call_args.args[0]
+        assert explained[0].explanation == explanation
+
+    def test_scan_continues_when_knowledge_base_fails(self):
+        second_finding = make_finding(
+            module="udp_scan",
+            target_ip="192.168.1.1",
+            target_service="dns",
+        )
+        second_explanation = Explanation(
+            what="DNS service exposed.",
+            attack="DNS information disclosure.",
+            defense="Restrict DNS exposure.",
+        )
+
+        def knowledge_base_side_effect(module, target_service):
+            if module == "tcp_scan":
+                raise RuntimeError("KB unavailable")
+            return second_explanation
+
+        result, knowledge_base, score_findings = self._run_scan_with_stubbed_pipeline(
+            "192.168.1.1",
+            "normal",
+            knowledge_base_side_effect=knowledge_base_side_effect,
+            pipeline_findings=[make_finding(module="tcp_scan"), second_finding],
+        )
+
+        assert result.exit_code == 0
+        assert "RÉSULTAT : SUCCESS" in result.output
+        assert knowledge_base.call_count == 2
+        explained = score_findings.call_args.args[0]
+        assert explained[0].explanation is None
+        assert explained[1].explanation == second_explanation
 
     def test_scan_shows_confirmation_prompt(self):
         """The CLI must ask for confirmation before any active scan."""
