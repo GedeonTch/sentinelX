@@ -143,6 +143,8 @@ class TestScan:
         knowledge_base_result=None,
         knowledge_base_side_effect=None,
         pipeline_findings=None,
+        use_yes=False,
+        expose_mocks=False,
     ):
         """Run scan with every network/pipeline dependency replaced by a stub."""
         import core.database as db
@@ -154,7 +156,7 @@ class TestScan:
         with ExitStack() as stack:
             stack.enter_context(patch.object(db, "init_db"))
             stack.enter_context(patch.object(db, "save_session"))
-            stack.enter_context(patch.object(db, "save_findings"))
+            save_findings = stack.enter_context(patch.object(db, "save_findings"))
             stack.enter_context(patch.object(db, "update_finding_risk_score"))
             stack.enter_context(patch.object(db, "close_session"))
             fingerprint = stack.enter_context(
@@ -166,10 +168,10 @@ class TestScan:
             udp_scan = stack.enter_context(
                 patch("detect.udp_scan.udp_scan", return_value=[])
             )
-            stack.enter_context(
+            enrich_findings = stack.enter_context(
                 patch("detect.service_detection.enrich_findings", return_value=pipeline_findings)
             )
-            stack.enter_context(
+            detect_misconfigs = stack.enter_context(
                 patch("detect.misconfig_detection.detect_misconfigs", return_value=[])
             )
             knowledge_base = stack.enter_context(
@@ -186,18 +188,23 @@ class TestScan:
                 patch("core.risk_scorer.get_global_score", return_value=25.0)
             )
 
+            scan_args = ["scan", "--target", target, "--profile", profile]
+            if use_yes:
+                scan_args.append("--yes")
             result = runner.invoke(
                 app,
-                ["scan", "--target", target, "--profile", profile],
-                input="y\n",
+                scan_args,
+                input="" if use_yes else "y\n",
             )
 
         assert result.exit_code == 0, result.output
         assert "RÉSULTAT : SUCCESS" in result.output
         session_id = fingerprint.call_args.args[1]
-        fingerprint.assert_called_once_with(target, session_id, auto_confirm=False)
-        tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
-        udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=False)
+        fingerprint.assert_called_once_with(target, session_id, auto_confirm=use_yes)
+        tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=use_yes)
+        udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=use_yes)
+        if expose_mocks:
+            return result, knowledge_base, score_findings, enrich_findings, detect_misconfigs, save_findings
         return result, knowledge_base, score_findings
 
     def test_scan_confirmed_creates_session(self):
@@ -209,6 +216,40 @@ class TestScan:
         """The stealth profile is accepted and reaches the stubbed pipeline."""
         result, _, _ = self._run_scan_with_stubbed_pipeline("10.0.0.0/24", "stealth")
         assert "Profile: stealth" in result.output
+
+    def test_scan_verifies_remaining_pipeline_calls(self):
+        (
+            result,
+            _,
+            score_findings,
+            enrich_findings,
+            detect_misconfigs,
+            save_findings,
+        ) = self._run_scan_with_stubbed_pipeline(
+            "192.168.1.1",
+            "normal",
+            expose_mocks=True,
+        )
+
+        assert result.exit_code == 0
+        enrich_findings.assert_called_once()
+        enriched_findings = enrich_findings.call_args.args[0]
+        session_id = detect_misconfigs.call_args.args[1]
+        detect_misconfigs.assert_called_once_with(enriched_findings, session_id)
+        score_findings.assert_called_once_with(enriched_findings)
+        assert save_findings.call_count == 3
+        assert save_findings.call_args_list[1].args[0] == enriched_findings
+        assert save_findings.call_args_list[2].args[0] == score_findings.return_value
+
+    def test_scan_yes_skips_global_confirmation(self):
+        result, _, _ = self._run_scan_with_stubbed_pipeline(
+            "192.168.1.1",
+            "normal",
+            use_yes=True,
+        )
+
+        assert result.exit_code == 0
+        assert "Start full scan" not in result.output
 
     def test_scan_attaches_knowledge_base_explanation(self):
         explanation = Explanation(
