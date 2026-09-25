@@ -69,11 +69,14 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 - CVE lookup from local knowledge base
 - Risk scoring with documented formula
 - Basic Sentinel: baseline learning + simple network change detection (new port, ARP change)
-- PDF / HTML / JSON report generation
+- HTML / JSON report generation (PDF explicitly out of scope V1 — browser print to PDF)
 - Lab cleanup (artifact detection + restore)
 - `netlab doctor` environment verification
+- Contextual suggestions for standalone capabilities (smb_enum, default_creds, dns_enum, passive_recon) — never automatic execution
 
 > **V1 Sentinel clarification**: Sentinel Core = baseline + detection of simple network changes (new port, MAC change, new host). NOT behavioral analysis. NOT EDR. NOT CrowdStrike. Simple, deterministic, rule-based only.
+
+> **V1 Standalone modules**: `dns_enum`, `passive_recon`, `smb_enum`, `default_creds` are NOT called automatically by `netlab scan`. They are available as explicit commands and may be suggested contextually based on scan results. The user always makes the final decision.
 
 ### What V1 is NOT — Explicitly Out of Scope
 
@@ -84,6 +87,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 - No user accounts — V3
 - No distributed agents — V4 Enterprise
 - No SIEM, no EDR, no machine learning, no cloud
+- No PDF export — V2 (weasyprint/reportlab dependency; use HTML + browser print)
 
 > **Rule**: No new feature can be added while the current ticket is not finished, tested, README read, and understood by the developer.
 
@@ -283,13 +287,13 @@ Only `core/database.py` is authorized to import `sqlite3`.
 
 ```text
 Name        : Lab State Cleanup
-File        : 06_cleanup/restore.py
+File        : cleanup/restore.py
 
 Input       : session_id (current session only)
 
 Step 1 — Detect
     Find all artifacts created or modified by NetLab
-    during the current session (from session log)
+    during the current session (from artifact_detector)
 
 Step 2 — Validate ownership
     Every artifact must belong to session_id
@@ -339,10 +343,9 @@ netlab findings list --session S001
 netlab findings show 1
 netlab findings explain 1
 netlab findings rescan --session S001
-netlab sentinel start
-netlab sentinel status
-netlab sentinel stop
-netlab report generate --session S001 --format pdf
+netlab sentinel start --target 192.168.1.0/24
+netlab sentinel status --session <id>
+netlab sentinel stop --session <id>
 netlab report generate --session S001 --format html
 netlab report generate --session S001 --format json
 netlab cleanup --session S001
@@ -350,7 +353,16 @@ netlab cleanup --sessions --older-than 30d
 netlab config set lab.scope 192.168.1.0/24
 netlab config show
 netlab --version
+
+# Standalone specialized commands (not called by netlab scan)
+netlab whois <ip>
+netlab smb_enum --target <ip>
+netlab creds_check --target <ip>
 ```
+
+> **Note on PDF**: `netlab report generate --format pdf` is NOT supported in V1.
+> Use `--format html` and print to PDF from the browser.
+> PDF support is planned for V2.
 
 ---
 
@@ -557,7 +569,7 @@ V1 is done when AND ONLY WHEN all of these pass:
 - [ ] Risk calculated by transparent formula (`risk_score` by `risk_scorer`)
 - [ ] Results persist between commands (SQLite `session_id`)
 - [ ] Rescan shows what changed (status `VERIFIED`)
-- [ ] PDF/HTML report generated, JSON export working
+- [ ] HTML/JSON report generated (PDF is V2 — use HTML + browser print)
 - [ ] Sentinel detects ARP change and new port without false positive on lab network
 
 **Technical**
