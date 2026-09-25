@@ -30,6 +30,7 @@ from core.dependencies import (
     check_status,
     environment_ready,
 )
+from core.finding import Finding
 from core.logger import display
 
 # ---------------------------------------------------------------------------
@@ -210,8 +211,8 @@ def scan(
             raise typer.Exit(code=0)
 
     result = PipelineResult()
-    _run_pipeline(target, profile, session, yes, result)
-    _render_scan_summary(result)
+    findings = _run_pipeline(target, profile, session, yes, result)
+    _render_scan_summary(result, findings)
 
     if result.overall_status == "FAILED":
         raise typer.Exit(code=1)
@@ -223,8 +224,8 @@ def _run_pipeline(
     session: Optional[str],
     auto_confirm: bool,
     result: PipelineResult,
-) -> None:
-    """Execute the full scan pipeline. Mutates result in place."""
+) -> List[Finding]:
+    """Execute the full scan pipeline and return produced findings."""
     from core.database import (
         close_session, init_db, save_findings, save_session,
         update_finding_risk_score,
@@ -242,7 +243,7 @@ def _run_pipeline(
         result.add("session", "ok", f"Session {session_id}")
     except Exception as exc:
         result.add("session", "failed", str(exc))
-        return  # cannot continue without a session
+        return []  # cannot continue without a session
 
     # ── Step 2 — DISCOVER ─────────────────────────────────────────────────
     active_ips: List[str] = []
@@ -371,12 +372,12 @@ def _run_pipeline(
         result.add("risk_scoring", "failed", str(exc))
 
     # ── Step 9 — Persist final findings ───────────────────────────────────
+    result.findings_count = len(scored)
     try:
         save_findings(scored)
         for f in scored:
             if f.risk_score is not None:
                 update_finding_risk_score(session_id, f.id, f.risk_score)
-        result.findings_count = len(scored)
         result.add("persist", "ok", f"{len(scored)} finding(s) saved")
     except Exception as exc:
         result.add("persist", "failed", str(exc))
@@ -387,9 +388,22 @@ def _run_pipeline(
     except Exception:
         pass  # non-fatal
 
+    return scored
 
-def _render_scan_summary(result: PipelineResult) -> None:
-    """Display the pipeline execution summary with step statuses."""
+
+def _render_scan_summary(
+    result: PipelineResult,
+    findings: List[Finding],
+) -> None:
+    """Display pipeline steps, findings by severity, and final status."""
+    from core.finding import Severity
+    severity_counts = {severity.value: 0 for severity in Severity}
+    for finding in findings:
+        severity = getattr(finding, "severity", None)
+        severity_value = getattr(severity, "value", severity)
+        if severity_value in severity_counts:
+            severity_counts[severity_value] += 1
+
     display("")
     for step in result.steps:
         color = step.color()
@@ -398,19 +412,24 @@ def _render_scan_summary(result: PipelineResult) -> None:
         for host in step.failed_hosts:
             display(f"  [dim]└─ {host}[/dim]")
 
+    severity_table = Table(title="Findings", box=box.ROUNDED)
+    severity_table.add_column("Severity", style="bold")
+    severity_table.add_column("Count", justify="right")
+    for severity in Severity:
+        severity_table.add_row(severity.name, str(severity_counts[severity.value]))
+    display(severity_table)
+
     display("\n" + "─" * 40)
     status = result.overall_status
     status_color = {"SUCCESS": "green", "PARTIAL": "yellow", "FAILED": "red"}.get(status, "white")
     display(f"[bold {status_color}]RÉSULTAT : {status}[/bold {status_color}]")
     display("─" * 40)
-
-    if result.overall_status != "FAILED":
-        display(f"[dim]Session:[/dim] {result.session_id}")
-        display(f"[dim]Findings:[/dim] {result.findings_count}")
-        if result.global_score is not None:
-            display(f"[dim]Global score:[/dim] {result.global_score:.1f}/100")
-        display(f"\n[dim]› netlab findings list --session {result.session_id}[/dim]")
-        display(f"[dim]› netlab report generate --session {result.session_id} --format html[/dim]")
+    display(f"[dim]Session:[/dim] {result.session_id}")
+    display(f"[dim]Findings:[/dim] {result.findings_count}")
+    if result.global_score is not None:
+        display(f"[dim]Global score:[/dim] {result.global_score:.1f}/100")
+    display(f"\n[dim]› netlab findings list --session {result.session_id}[/dim]")
+    display(f"[dim]› netlab report generate --session {result.session_id} --format html[/dim]")
 
     if result.failure_count:
         display(f"\n[yellow]⚠ {result.failure_count} opération(s) ont échoué.[/yellow]")

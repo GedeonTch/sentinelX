@@ -19,12 +19,15 @@ Covers:
 """
 
 import pytest
+from io import StringIO
 from pathlib import Path
 from contextlib import ExitStack
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
+from rich.console import Console
+from rich.table import Table
 
-from cli import app
+from cli import app, PipelineResult, _render_scan_summary, _run_pipeline
 from core.finding import (
     Finding,
     Evidence,
@@ -264,6 +267,129 @@ class TestScan:
         )
         # Prompt must appear before cancellation
         assert "?" in result.output or "confirm" in result.output.lower() or "cancel" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# scan summary
+# ---------------------------------------------------------------------------
+
+class TestScanSummary:
+    def test_summary_renders_severity_counts_and_success_details(self):
+        findings = (
+            [make_finding(severity=Severity.CRITICAL)]
+            + [make_finding(severity=Severity.HIGH) for _ in range(2)]
+            + [make_finding(severity=Severity.MEDIUM) for _ in range(3)]
+            + [make_finding(severity=Severity.LOW)]
+        )
+        result = PipelineResult(
+            steps=[],
+            session_id="session-summary",
+            findings_count=len(findings),
+            global_score=72.5,
+        )
+
+        with patch("cli.display") as display:
+            _render_scan_summary(result, findings)
+
+        table = next(
+            call.args[0]
+            for call in display.call_args_list
+            if isinstance(call.args[0], Table)
+        )
+        output = StringIO()
+        Console(file=output, width=80).print(table)
+        rendered_table = output.getvalue()
+
+        assert "CRITICAL" in rendered_table and "1" in rendered_table
+        assert "HIGH" in rendered_table and "2" in rendered_table
+        assert "MEDIUM" in rendered_table and "3" in rendered_table
+        assert "LOW" in rendered_table and "1" in rendered_table
+        assert "INFO" in rendered_table and "0" in rendered_table
+
+        rendered_output = "\n".join(str(call.args[0]) for call in display.call_args_list)
+        assert "session-summary" in rendered_output
+        assert "72.5/100" in rendered_output
+        assert "RÉSULTAT : SUCCESS" in rendered_output
+        assert "netlab findings list --session session-summary" in rendered_output
+        assert "netlab report generate --session session-summary --format html" in rendered_output
+
+    def test_summary_renders_partial_status(self):
+        result = PipelineResult(session_id="session-partial")
+        result.add("session", "ok")
+        result.add("tcp_scan", "partial", "1/2 réussis")
+
+        with patch("cli.display") as display:
+            _render_scan_summary(result, [])
+
+        rendered_output = "\n".join(str(call.args[0]) for call in display.call_args_list)
+        assert "RÉSULTAT : PARTIAL" in rendered_output
+
+    def test_summary_renders_failed_status(self):
+        result = PipelineResult(session_id="session-failed")
+        result.add("session", "failed", "database unavailable")
+
+        with patch("cli.display") as display:
+            _render_scan_summary(result, [])
+
+        rendered_output = "\n".join(str(call.args[0]) for call in display.call_args_list)
+        assert "RÉSULTAT : FAILED" in rendered_output
+
+    def test_summary_keeps_findings_when_persistence_fails(self):
+        import core.database as db
+
+        host_finding = make_finding(module="device_fingerprint")
+        finding = make_finding(module="tcp_scan", severity=Severity.HIGH)
+        result = PipelineResult()
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(db, "init_db"))
+            stack.enter_context(patch.object(db, "save_session"))
+            stack.enter_context(patch.object(db, "close_session"))
+            stack.enter_context(patch.object(db, "update_finding_risk_score"))
+            stack.enter_context(
+                patch.object(db, "save_findings", side_effect=[None, None, RuntimeError("DB unavailable")])
+            )
+            stack.enter_context(
+                patch("recon.device_fingerprint.fingerprint", return_value=[host_finding])
+            )
+            stack.enter_context(
+                patch("detect.tcp_scan.tcp_scan", return_value=[finding])
+            )
+            stack.enter_context(patch("detect.udp_scan.udp_scan", return_value=[]))
+            stack.enter_context(
+                patch("detect.service_detection.enrich_findings", return_value=[finding])
+            )
+            stack.enter_context(
+                patch("detect.misconfig_detection.detect_misconfigs", return_value=[])
+            )
+            stack.enter_context(
+                patch("knowledge.knowledge_base.get_explanation_for_finding", return_value=None)
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.score_findings", return_value=[finding])
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.get_global_score", return_value=70.0)
+            )
+
+            produced = _run_pipeline("192.168.1.1", "normal", None, False, result)
+
+        assert produced == [finding]
+        assert result.findings_count == 1
+        assert result.overall_status == "PARTIAL"
+
+        with patch("cli.display") as display:
+            _render_scan_summary(result, produced)
+
+        table = next(
+            call.args[0]
+            for call in display.call_args_list
+            if isinstance(call.args[0], Table)
+        )
+        output = StringIO()
+        Console(file=output, width=80).print(table)
+        rendered_table = output.getvalue()
+        assert "HIGH" in rendered_table and "1" in rendered_table
 
 
 # ---------------------------------------------------------------------------
