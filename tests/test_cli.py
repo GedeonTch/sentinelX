@@ -14,7 +14,7 @@ Covers:
 - netlab findings list / show / explain (session with findings / empty / not found)
 - netlab sentinel start / status / stop (real sentinel_manager calls)
 - netlab report generate (html/json, --output, PDF rejected)
-- netlab cleanup (session / sessions+older-than / cancelled)
+- netlab cleanup (--session restore_session / --sessions older-than stub / cancelled)
 - netlab config set / show
 """
 
@@ -734,7 +734,12 @@ class TestReport:
 # ---------------------------------------------------------------------------
 
 class TestCleanup:
-    def test_cleanup_session_cancelled(self):
+    def test_cleanup_session_cancelled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        sessions = tmp_path / ".netlab" / "sessions"
+        sessions.mkdir(parents=True)
+        db_path = sessions / "session-001.db"
+        db_path.write_bytes(b"db")
         result = runner.invoke(
             app,
             ["cleanup", "--session", "session-001"],
@@ -742,6 +747,37 @@ class TestCleanup:
         )
         assert result.exit_code == 0
         assert "cancelled" in result.output.lower()
+        assert db_path.exists()
+
+    def test_cleanup_session_yes_deletes_db(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        sessions = tmp_path / ".netlab" / "sessions"
+        sessions.mkdir(parents=True)
+        db_path = sessions / "session-001.db"
+        db_path.write_bytes(b"db")
+        result = runner.invoke(
+            app,
+            ["cleanup", "--session", "session-001"],
+            input="yes\n",
+        )
+        assert result.exit_code == 0
+        assert not db_path.exists()
+
+    def test_cleanup_session_partial_exits_one(self, monkeypatch):
+        from cleanup.restore import RestoreStatus
+        monkeypatch.setattr(
+            "cleanup.restore.restore_session",
+            lambda _sid: RestoreStatus.PARTIAL,
+        )
+        result = runner.invoke(
+            app,
+            ["cleanup", "--session", "session-001"],
+        )
+        assert result.exit_code == 1
+
+    def test_cleanup_invalid_session_exits_one(self):
+        result = runner.invoke(app, ["cleanup", "--session", "../evil"])
+        assert result.exit_code == 1
 
     def test_cleanup_sessions_older_than_cancelled(self):
         result = runner.invoke(

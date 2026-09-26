@@ -615,11 +615,14 @@ def cleanup_main(
     if ctx.invoked_subcommand is not None:
         return
     if session:
-        confirmed = typer.confirm(f"Remove all artifacts for session {session}?", default=False)
-        if not confirmed:
-            display("[yellow]Cleanup cancelled.[/yellow]")
-            raise typer.Exit(code=0)
-        display("[yellow]Cleanup not yet implemented (tickets #018–#019).[/yellow]")
+        from cleanup.restore import RestoreStatus, restore_session
+        try:
+            status = restore_session(session)
+        except ValueError as exc:
+            display(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        if status == RestoreStatus.PARTIAL:
+            raise typer.Exit(code=1)
         return
     if sessions and older_than:
         confirmed = typer.confirm(f"Remove all sessions older than {older_than}?", default=False)
