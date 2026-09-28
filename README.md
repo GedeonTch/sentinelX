@@ -85,6 +85,14 @@ Détail complet des tickets et des règles d'architecture : [`docs/sentinelx_ste
 
 > 🚧 V1 en cours de construction — instructions d'installation à venir une fois le premier pipeline complet fonctionnel.
 
+## VERIFY — Ticket #021
+
+`netlab findings rescan --session <id>` vérifie les Findings de la session originale sans créer une nouvelle session. Le contrôle est ciblé selon le module : TCP et UDP rescannent le port concerné ; les misconfigurations utilisent la règle nécessaire, par exemple TCP 80 et 443 pour `http_no_https` ou UDP 161 pour `snmp_exposed`.
+
+Une Finding encore observée reste `OPEN`. Une Finding absente devient `VERIFIED` uniquement si son contrôle s’est terminé correctement. Un contrôle échoué, annulé, incomplet ou non supporté conserve l’ancien statut et produit un résultat VERIFY `PARTIAL` ou `FAILED`. VERIFY ne crée jamais automatiquement `REMEDIATED`, et les Findings `ACCEPTED` sont exclues par défaut.
+
+Le matching utilise un fingerprint stable dérivé du contexte de session et de l’identité de la Finding ; l’UUID généré à la détection ne sert pas à reconnaître une Finding lors d’un rescan.
+
 ## Licence
 
 MIT — voir [`LICENSE`](LICENSE).

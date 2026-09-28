@@ -45,6 +45,18 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 
 
 # ---------------------------------------------------------------------------
+# Discovery outcomes
+# ---------------------------------------------------------------------------
+
+class DiscoveryCancelled(Exception):
+    """Raised when the user refuses the discovery confirmation."""
+
+
+class DiscoveryFailed(Exception):
+    """Raised when the discovery tool cannot provide a valid result."""
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -64,8 +76,12 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
         auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
-        List[Finding]: One Finding per active host. Empty list if no hosts found
-                       or if the user cancels.
+        List[Finding]: One Finding per active host. Empty list when discovery
+                       succeeds but no active hosts are found.
+
+    Raises:
+        DiscoveryCancelled: If the user refuses the discovery confirmation.
+        DiscoveryFailed: If the discovery tool returns no valid result.
     """
     if not auto_confirm:
         confirmed = typer.confirm(
@@ -73,7 +89,7 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
         )
         if not confirmed:
             display("[yellow]Host discovery cancelled.[/yellow]")
-            return []
+            raise DiscoveryCancelled("User cancelled host discovery")
 
     display(f"[cyan]Starting host discovery on {target}...[/cyan]")
 
@@ -86,9 +102,9 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
         progress.add_task(target, total=None)
         ping_xml = _run_nmap_ping(target)
 
-    if not ping_xml:
+    if ping_xml is None:
         display("[yellow]No response from nmap ping scan.[/yellow]")
-        return []
+        raise DiscoveryFailed("Nmap ping scan returned no result")
 
     active_ips = _parse_active_hosts(ping_xml)
     if not active_ips:
@@ -186,15 +202,15 @@ def _run_nmap(cmd: List[str], timeout: int = 300) -> Optional[str]:
                 f"{result.stderr.strip()[:200]}[/yellow]"
             )
         return result.stdout if result.stdout.strip() else None
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         display("[red]nmap not found. Run 'netlab doctor' to check dependencies.[/red]")
-        return None
-    except subprocess.TimeoutExpired:
+        raise DiscoveryFailed("nmap executable unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
         display(f"[yellow]nmap timed out after {timeout}s — skipping.[/yellow]")
-        return None
+        raise DiscoveryFailed(f"nmap timed out after {timeout}s") from exc
     except Exception as exc:
         display(f"[red]nmap error: {exc}[/red]")
-        return None
+        raise DiscoveryFailed(f"nmap error: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +228,9 @@ def _parse_active_hosts(xml_output: str) -> List[str]:
     """
     try:
         root = ET.fromstring(xml_output)
-    except ET.ParseError:
+    except ET.ParseError as exc:
         display("[red]Failed to parse nmap XML output.[/red]")
-        return []
+        raise DiscoveryFailed("Invalid nmap XML output") from exc
 
     active = []
     for host in root.findall("host"):

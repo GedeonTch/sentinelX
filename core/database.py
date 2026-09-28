@@ -150,6 +150,7 @@ def init_db(session_id: str) -> None:
                 target                   TEXT NOT NULL,
                 profile                  TEXT NOT NULL DEFAULT 'normal',
                 status                   TEXT NOT NULL DEFAULT 'running',
+                discover_status          TEXT,
                 notes                    TEXT,
                 sentinel_state           TEXT DEFAULT 'inactive',
                 last_check_time          TEXT,
@@ -158,6 +159,12 @@ def init_db(session_id: str) -> None:
                 sentinel_gateway_mac     TEXT
             )
         """)
+
+        session_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "discover_status" not in session_columns:
+            cursor.execute("ALTER TABLE sessions ADD COLUMN discover_status TEXT")
 
         # findings — core of the system
         # evidence and explanation are stored as JSON strings
@@ -272,13 +279,15 @@ def close_session(
     session_id: str,
     end_time: Optional[str] = None,
     status: str = "completed",
+    discover_status: Optional[str] = None,
 ) -> None:
     """Mark a session as closed with an end timestamp.
 
     Args:
         session_id: Unique session identifier.
         end_time:   ISO 8601 datetime string. Defaults to current UTC time.
-        status:     Final status (completed / failed).
+        status:          Final status (completed / partial / failed).
+        discover_status: Terminal DISCOVER outcome, if available.
     """
     import datetime
     from datetime import timezone
@@ -289,8 +298,12 @@ def close_session(
     conn = get_connection(session_id)
     try:
         conn.execute(
-            "UPDATE sessions SET end_time = ?, status = ? WHERE id = ?",
-            (end_time, status, session_id),
+            """
+            UPDATE sessions
+            SET end_time = ?, status = ?, discover_status = ?
+            WHERE id = ?
+            """,
+            (end_time, status, discover_status, session_id),
         )
         conn.commit()
     finally:

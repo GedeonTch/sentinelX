@@ -18,7 +18,12 @@ from sentinel.sentinel_manager import (
     stop,
     _compute_display_state,
     _graceful_stop,
+    _do_check,
 )
+from sentinel.alerting import AlertCounter
+from sentinel.baseline import BaselineEntry
+from sentinel.monitor import NetworkChange, ScanDegradedError
+from sentinel.whitelist import Whitelist
 
 SESSION = "session-manager-test"
 
@@ -188,3 +193,63 @@ class TestLastCheckTime:
         state = db.sentinel_get_state(SESSION)
         assert state["last_check_time"] == initial
         assert state["sentinel_status"] == "degraded"
+
+
+class TestDegradedArpCheck:
+    def test_degraded_check_processes_changes_without_updating_last_check(self):
+        initial = (datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=30)).isoformat()
+        db.sentinel_update_state(SESSION, "active", last_check_time=initial)
+        change = NetworkChange("mac_change", "192.168.1.10", "mac changed", "active ARP")
+        whitelist = Whitelist()
+
+        with patch("sentinel.sentinel_manager.get_baseline", return_value={"ip": object()}), \
+             patch(
+                 "sentinel.sentinel_manager.check_network",
+                 side_effect=ScanDegradedError("partial", [change]),
+             ), \
+             patch("sentinel.sentinel_manager.process_changes") as process_changes, \
+             patch("sentinel.sentinel_manager.sentinel_update_state") as update_state:
+            _do_check(
+                target_network="192.168.1.0/24",
+                network_id=SESSION,
+                identity=object(),
+                interval=60,
+                whitelist=whitelist,
+                counter=AlertCounter(),
+            )
+
+        process_changes.assert_called_once()
+        assert update_state.call_args.kwargs["sentinel_status"] == "degraded"
+        assert "last_check_time" not in update_state.call_args.kwargs
+
+    def test_ping_success_tcp_failure_keeps_last_check_time(self):
+        initial = (datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=30)).isoformat()
+        db.sentinel_update_state(SESSION, "active", last_check_time=initial)
+        baseline = {
+            "192.168.1.10": BaselineEntry(
+                asset_id="a1",
+                ip="192.168.1.10",
+                mac="",
+                ports=[22],
+                last_scan="2026-01-01T00:00:00+00:00",
+            )
+        }
+
+        with patch("sentinel.sentinel_manager.get_baseline", return_value=baseline), \
+             patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
+             patch("sentinel.monitor._get_arp_mac", return_value=""), \
+             patch("sentinel.monitor._get_open_ports", return_value=None), \
+             patch("sentinel.sentinel_manager.process_changes") as process_changes:
+            _do_check(
+                target_network="192.168.1.0/24",
+                network_id=SESSION,
+                identity=object(),
+                interval=60,
+                whitelist=Whitelist(),
+                counter=AlertCounter(),
+            )
+
+        state = db.sentinel_get_state(SESSION)
+        assert state["sentinel_status"] == "degraded"
+        assert state["last_check_time"] == initial
+        process_changes.assert_not_called()

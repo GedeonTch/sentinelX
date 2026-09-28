@@ -27,6 +27,8 @@ from recon.device_fingerprint import (
     _parse_host,
     _extract_mac_hostname,
     _detect_os,
+    DiscoveryCancelled,
+    DiscoveryFailed,
     fingerprint,
 )
 
@@ -130,9 +132,9 @@ class TestParseActiveHosts:
         result = _parse_active_hosts(PING_XML_EMPTY)
         assert result == []
 
-    def test_malformed_xml_returns_empty_list(self):
-        result = _parse_active_hosts(MALFORMED_XML)
-        assert result == []
+    def test_malformed_xml_raises_discovery_failed(self):
+        with pytest.raises(DiscoveryFailed):
+            _parse_active_hosts(MALFORMED_XML)
 
 
 # ---------------------------------------------------------------------------
@@ -284,16 +286,16 @@ class TestParseHost:
 # ---------------------------------------------------------------------------
 
 class TestFingerprint:
-    def test_cancelled_by_user_returns_empty(self):
+    def test_cancelled_by_user_raises_discovery_cancelled(self):
         with patch("recon.device_fingerprint.typer.confirm", return_value=False):
-            result = fingerprint("192.168.1.0/24", "session-test")
-        assert result == []
+            with pytest.raises(DiscoveryCancelled):
+                fingerprint("192.168.1.0/24", "session-test")
 
-    def test_nmap_not_found_returns_empty(self):
+    def test_nmap_not_found_raises_discovery_failed(self):
         with patch("recon.device_fingerprint.typer.confirm", return_value=True), \
              patch("recon.device_fingerprint._run_nmap", return_value=None):
-            result = fingerprint("192.168.1.0/24", "session-test")
-        assert result == []
+            with pytest.raises(DiscoveryFailed):
+                fingerprint("192.168.1.0/24", "session-test")
 
     def test_no_active_hosts_returns_empty(self):
         with patch("recon.device_fingerprint.typer.confirm", return_value=True), \
@@ -301,6 +303,12 @@ class TestFingerprint:
              patch("recon.device_fingerprint._run_nmap_os", return_value=None):
             result = fingerprint("192.168.1.0/24", "session-test")
         assert result == []
+
+    def test_malformed_ping_xml_raises_discovery_failed(self):
+        with patch("recon.device_fingerprint.typer.confirm", return_value=True), \
+             patch("recon.device_fingerprint._run_nmap_ping", return_value=MALFORMED_XML):
+            with pytest.raises(DiscoveryFailed):
+                fingerprint("192.168.1.0/24", "session-test")
 
     def test_one_active_host_returns_one_finding(self):
         with patch("recon.device_fingerprint.typer.confirm", return_value=True), \

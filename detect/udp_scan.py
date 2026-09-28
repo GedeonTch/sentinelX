@@ -62,6 +62,18 @@ PROFILE_FLAGS = {
 
 
 # ---------------------------------------------------------------------------
+# Public scan outcomes
+# ---------------------------------------------------------------------------
+
+class UdpScanFailed(Exception):
+    """Raised when a UDP scan cannot produce a valid result."""
+
+
+class UdpScanCancelled(Exception):
+    """Raised when the user cancels a UDP scan."""
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -86,7 +98,12 @@ def udp_scan(
         auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
-        List[Finding]: One Finding per confirmed open UDP port.
+        List[Finding]: One Finding per confirmed open UDP port. Empty only
+                       when the scan succeeds and no open ports are found.
+
+    Raises:
+        UdpScanFailed: If Nmap fails or returns invalid XML.
+        UdpScanCancelled: If the user cancels this host scan.
     """
     if profile not in PROFILE_FLAGS:
         display(f"[red]Unknown profile '{profile}'. Using 'normal'.[/red]")
@@ -99,7 +116,7 @@ def udp_scan(
         )
         if not confirmed:
             display("[yellow]UDP scan cancelled.[/yellow]")
-            return []
+            raise UdpScanCancelled(f"User cancelled UDP scan for {target}")
 
     display(f"[cyan]Starting UDP scan on {target} (profile: {profile})...[/cyan]")
     display("[dim]UDP scanning is slow — only common ports are scanned by default.[/dim]")
@@ -114,7 +131,13 @@ def udp_scan(
 
     if not xml_output:
         display(f"[yellow]No response from nmap UDP scan on {target}.[/yellow]")
-        return []
+        raise UdpScanFailed(f"Nmap UDP scan returned no result for {target}")
+
+    try:
+        ET.fromstring(xml_output)
+    except ET.ParseError as exc:
+        display("[red]Failed to parse nmap UDP XML output.[/red]")
+        raise UdpScanFailed(f"Invalid nmap UDP XML output for {target}") from exc
 
     findings = _parse_udp_xml(xml_output, target, session_id)
 

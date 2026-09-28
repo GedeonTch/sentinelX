@@ -114,11 +114,19 @@ class TestJsonReport:
         assert "risk_score" in data["scoring_formula"]
 
     def test_json_contains_session_info(self, tmp_path):
+        db.close_session(SESSION, status="completed", discover_status="EMPTY")
         output = tmp_path / "report.json"
         generate_report(SESSION, "json", str(output))
         data = json.loads(output.read_text())
         assert "session" in data
         assert data["session"]["target"] == "192.168.1.0/24"
+        assert data["session"]["discover_status"] == "EMPTY"
+
+    def test_json_preserves_null_discover_status_for_legacy_session(self, tmp_path):
+        output = tmp_path / "report.json"
+        generate_report(SESSION, "json", str(output))
+        data = json.loads(output.read_text())
+        assert data["session"]["discover_status"] is None
 
     def test_json_contains_cve_refs(self, tmp_path):
         db.save_finding(make_finding(cve_refs=["CVE-2017-0144", "CVE-2017-0145"]))
@@ -199,6 +207,21 @@ class TestHtmlReport:
         generate_report(SESSION, "html", str(output))
         content = output.read_text()
         assert "192.168.1.0/24" in content
+
+    @pytest.mark.parametrize("discover_status", ["OK", "EMPTY", "CANCELLED", "FAILED"])
+    def test_html_shows_discovery_outcome(self, tmp_path, discover_status):
+        db.close_session(SESSION, status="completed", discover_status=discover_status)
+        output = tmp_path / "report.html"
+        generate_report(SESSION, "html", str(output))
+        content = output.read_text()
+        assert "Discovery" in content
+        assert discover_status in content
+
+    def test_html_handles_legacy_null_discovery_outcome(self, tmp_path):
+        output = tmp_path / "report.html"
+        generate_report(SESSION, "html", str(output))
+        content = output.read_text()
+        assert "Discovery outcome unavailable" in content
 
     def test_html_shows_finding_severity(self, tmp_path):
         db.save_finding(make_finding(severity=Severity.CRITICAL))

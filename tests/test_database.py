@@ -105,6 +105,53 @@ class TestInitDb:
         assert "baseline" in tables
         assert "events" in tables
 
+    def test_sessions_include_discover_status_column(self):
+        db.init_db(SESSION_A)
+        conn = db.get_connection(SESSION_A)
+        try:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+        finally:
+            conn.close()
+
+        assert "discover_status" in columns
+
+    def test_migrates_existing_sessions_table_idempotently(self):
+        conn = db.get_connection(SESSION_A)
+        try:
+            conn.execute("""
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT,
+                    target TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    notes TEXT
+                )
+            """)
+            conn.execute(
+                "INSERT INTO sessions (id, start_time, target, profile, status) VALUES (?, ?, ?, ?, ?)",
+                (SESSION_A, "2026-09-26T00:00:00+00:00", "192.168.1.1", "normal", "completed"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.init_db(SESSION_A)
+        db.init_db(SESSION_A)
+        session = db.get_session(SESSION_A)
+        assert session["discover_status"] is None
+
+        conn = db.get_connection(SESSION_A)
+        try:
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)")]
+        finally:
+            conn.close()
+        assert columns.count("discover_status") == 1
+
     def test_init_db_is_idempotent(self):
         """Calling init_db twice must not raise and tables must still exist."""
         db.init_db(SESSION_A)
@@ -159,6 +206,30 @@ class TestSessions:
         session = db.get_session(SESSION_A)
         assert session["end_time"] == "2026-09-08T12:00:00+00:00"
         assert session["status"] == "failed"
+
+    @pytest.mark.parametrize("discover_status", ["OK", "EMPTY", "CANCELLED", "FAILED"])
+    def test_close_session_persists_discover_status(self, discover_status):
+        db.save_session(SESSION_A, target="192.168.1.1")
+        db.close_session(SESSION_A, status="completed", discover_status=discover_status)
+
+        session = db.get_session(SESSION_A)
+        assert session["status"] == "completed"
+        assert session["discover_status"] == discover_status
+        assert session["end_time"] is not None
+
+    def test_close_session_defaults_discover_status_to_null(self):
+        db.save_session(SESSION_A, target="192.168.1.1")
+        db.close_session(SESSION_A, status="completed")
+
+        assert db.get_session(SESSION_A)["discover_status"] is None
+
+    def test_close_session_with_partial_status(self):
+        db.save_session(SESSION_A, target="192.168.1.1")
+        db.close_session(SESSION_A, status="partial")
+
+        session = db.get_session(SESSION_A)
+        assert session["status"] == "partial"
+        assert session["end_time"] is not None
 
     def test_save_session_with_notes(self):
         db.save_session(SESSION_A, target="192.168.1.1", notes="Lab test run")

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
@@ -51,10 +53,22 @@ class StepResult:
     failed_hosts: List[str] = field(default_factory=list)
 
     def icon(self) -> str:
-        return {"ok": "✓", "partial": "⚠", "failed": "✗"}.get(self.status, "?")
+        return {
+            "ok": "✓",
+            "empty": "○",
+            "cancelled": "–",
+            "partial": "⚠",
+            "failed": "✗",
+        }.get(self.status, "?")
 
     def color(self) -> str:
-        return {"ok": "green", "partial": "yellow", "failed": "red"}.get(self.status, "white")
+        return {
+            "ok": "green",
+            "empty": "yellow",
+            "cancelled": "yellow",
+            "partial": "yellow",
+            "failed": "red",
+        }.get(self.status, "white")
 
 
 @dataclass
@@ -245,150 +259,228 @@ def _run_pipeline(
         result.add("session", "failed", str(exc))
         return []  # cannot continue without a session
 
-    # ── Step 2 — DISCOVER ─────────────────────────────────────────────────
-    active_ips: List[str] = []
+    session_close_status = "completed"
+    discover_status = None
     try:
-        from recon.device_fingerprint import fingerprint
-        host_findings = fingerprint(target, session_id, auto_confirm=auto_confirm)
-        if host_findings:
-            save_findings(host_findings)
-            active_ips = list({f.target_ip for f in host_findings if f.target_ip})
-            result.add("discover", "ok", f"{len(active_ips)} host(s) found")
-        else:
-            result.add("discover", "ok", "0 hosts found (network may be empty)")
-    except Exception as exc:
-        result.add("discover", "failed", str(exc))
-        # No IPs — subsequent steps will produce empty results but we continue
-
-    # ── Step 3 — TCP scan ─────────────────────────────────────────────────
-    all_tcp_findings = []
-    if active_ips:
-        tcp_ok, tcp_fail, tcp_failed_hosts = 0, 0, []
-        from detect.tcp_scan import tcp_scan
-        for ip in active_ips:
-            try:
-                findings = tcp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
-                all_tcp_findings.extend(findings)
-                tcp_ok += 1
-            except Exception as exc:
-                tcp_fail += 1
-                tcp_failed_hosts.append(ip)
-        if tcp_fail == 0:
-            result.add("tcp_scan", "ok", f"{tcp_ok}/{len(active_ips)} hosts scanned")
-        else:
-            result.add("tcp_scan", "partial",
-                       f"{tcp_ok}/{len(active_ips)} réussis",
-                       failed_hosts=tcp_failed_hosts)
-        if all_tcp_findings:
-            save_findings(all_tcp_findings)
-
-    # ── Step 4 — UDP scan ─────────────────────────────────────────────────
-    all_udp_findings = []
-    if active_ips:
-        udp_ok, udp_fail, udp_failed_hosts = 0, 0, []
-        from detect.udp_scan import udp_scan
-        for ip in active_ips:
-            try:
-                findings = udp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
-                all_udp_findings.extend(findings)
-                udp_ok += 1
-            except Exception as exc:
-                udp_fail += 1
-                udp_failed_hosts.append(ip)
-        if udp_fail == 0:
-            result.add("udp_scan", "ok", f"{udp_ok}/{len(active_ips)} hosts scanned")
-        else:
-            result.add("udp_scan", "partial",
-                       f"{udp_ok}/{len(active_ips)} réussis",
-                       failed_hosts=udp_failed_hosts)
-        if all_udp_findings:
-            save_findings(all_udp_findings)
-
-    # ── Step 5 — CVE enrichment ───────────────────────────────────────────
-    all_port_findings = all_tcp_findings + all_udp_findings
-    enriched = all_port_findings
-    if all_port_findings:
+        # ── Step 2 — DISCOVER ─────────────────────────────────────────────────
+        active_ips: List[str] = []
         try:
-            from detect.service_detection import enrich_findings
-            enriched = enrich_findings(all_port_findings)
-            result.add("cve_enrichment", "ok", f"{len(enriched)} finding(s) processed")
+            from recon.device_fingerprint import (
+                DiscoveryCancelled,
+                DiscoveryFailed,
+                fingerprint,
+            )
+            host_findings = fingerprint(target, session_id, auto_confirm=auto_confirm)
+            if host_findings:
+                discover_status = "OK"
+                save_findings(host_findings)
+                active_ips = list({f.target_ip for f in host_findings if f.target_ip})
+                result.add("discover", "ok", f"{len(active_ips)} host(s) found")
+            else:
+                discover_status = "EMPTY"
+                result.add("discover", "empty", "EMPTY: discovery succeeded with 0 hosts")
+                return []
+        except DiscoveryCancelled as exc:
+            discover_status = "CANCELLED"
+            result.add("discover", "cancelled", f"CANCELLED: {exc}")
+            return []
+        except DiscoveryFailed as exc:
+            discover_status = "FAILED"
+            result.add("discover", "failed", f"FAILED: {exc}")
+            session_close_status = "failed"
+            return []
         except Exception as exc:
-            result.add("cve_enrichment", "failed", str(exc))
+            discover_status = "FAILED"
+            result.add("discover", "failed", f"FAILED: {exc}")
+            session_close_status = "failed"
+            return []
 
-    # ── Step 6 — Misconfiguration detection ───────────────────────────────
-    misconfig_findings = []
-    if active_ips and enriched:
-        mc_ok, mc_fail, mc_failed_hosts = 0, 0, []
-        from detect.misconfig_detection import detect_misconfigs
-        for ip in active_ips:
+        # ── Step 3 — TCP scan ─────────────────────────────────────────────────
+        all_tcp_findings = []
+        if active_ips:
+            tcp_ok, tcp_fail, tcp_cancelled = 0, 0, 0
+            tcp_failed_hosts = []
+            from detect.tcp_scan import (
+                TcpScanCancelled,
+                TcpScanFailed,
+                tcp_scan,
+            )
+            for ip in active_ips:
+                try:
+                    findings = tcp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
+                    all_tcp_findings.extend(findings)
+                    tcp_ok += 1
+                except TcpScanFailed:
+                    tcp_fail += 1
+                    tcp_failed_hosts.append(ip)
+                except TcpScanCancelled:
+                    tcp_cancelled += 1
+            tcp_detail = (
+                f"{tcp_ok}/{len(active_ips)} hosts scanned"
+                + (f" — {tcp_fail} failed" if tcp_fail else "")
+                + (f" — {tcp_cancelled} cancelled" if tcp_cancelled else "")
+            )
+            if tcp_ok == len(active_ips):
+                tcp_status = "ok"
+            elif tcp_ok == 0 and tcp_fail == 0:
+                tcp_status = "cancelled"
+            elif tcp_ok == 0 and tcp_fail > 0:
+                tcp_status = "failed"
+            else:
+                tcp_status = "partial"
+            result.add("tcp_scan", tcp_status, tcp_detail, failed_hosts=tcp_failed_hosts)
+            if all_tcp_findings:
+                save_findings(all_tcp_findings)
+
+        # ── Step 4 — UDP scan ─────────────────────────────────────────────────
+        all_udp_findings = []
+        if active_ips:
+            udp_ok, udp_fail, udp_cancelled = 0, 0, 0
+            udp_failed_hosts = []
+            from detect.udp_scan import (
+                UdpScanCancelled,
+                UdpScanFailed,
+                udp_scan,
+            )
+            for ip in active_ips:
+                try:
+                    findings = udp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
+                    all_udp_findings.extend(findings)
+                    udp_ok += 1
+                except UdpScanFailed:
+                    udp_fail += 1
+                    udp_failed_hosts.append(ip)
+                except UdpScanCancelled:
+                    udp_cancelled += 1
+            udp_detail = (
+                f"{udp_ok}/{len(active_ips)} hosts scanned"
+                + (f" — {udp_fail} failed" if udp_fail else "")
+                + (f" — {udp_cancelled} cancelled" if udp_cancelled else "")
+            )
+            if udp_ok == len(active_ips):
+                udp_status = "ok"
+            elif udp_ok == 0 and udp_fail == 0:
+                udp_status = "cancelled"
+            elif udp_ok == 0 and udp_fail > 0:
+                udp_status = "failed"
+            else:
+                udp_status = "partial"
+            result.add("udp_scan", udp_status, udp_detail, failed_hosts=udp_failed_hosts)
+            if all_udp_findings:
+                save_findings(all_udp_findings)
+
+        # ── Step 5 — CVE enrichment ───────────────────────────────────────────
+        all_port_findings = all_tcp_findings + all_udp_findings
+        enriched = all_port_findings
+        if all_port_findings:
             try:
-                ip_findings = [f for f in enriched if f.target_ip == ip]
-                mc = detect_misconfigs(ip_findings, session_id)
-                misconfig_findings.extend(mc)
-                mc_ok += 1
+                from detect.service_detection import enrich_findings
+                enriched = enrich_findings(all_port_findings)
+                result.add("cve_enrichment", "ok", f"{len(enriched)} finding(s) processed")
             except Exception as exc:
-                mc_fail += 1
-                mc_failed_hosts.append(ip)
-        if mc_fail == 0:
-            result.add("misconfig_detection", "ok",
-                       f"{len(misconfig_findings)} misconfiguration(s) found")
+                result.add("cve_enrichment", "failed", str(exc))
+
+        # ── Step 6 — Misconfiguration detection ───────────────────────────────
+        misconfig_findings = []
+        if active_ips and enriched:
+            mc_ok, mc_fail, mc_failed_hosts = 0, 0, []
+            from detect.misconfig_detection import detect_misconfigs
+            for ip in active_ips:
+                try:
+                    ip_findings = [f for f in enriched if f.target_ip == ip]
+                    mc = detect_misconfigs(ip_findings, session_id)
+                    misconfig_findings.extend(mc)
+                    mc_ok += 1
+                except Exception as exc:
+                    mc_fail += 1
+                    mc_failed_hosts.append(ip)
+            if mc_fail == 0:
+                result.add("misconfig_detection", "ok",
+                           f"{len(misconfig_findings)} misconfiguration(s) found")
+            else:
+                result.add("misconfig_detection", "partial",
+                           f"{mc_ok}/{len(active_ips)} réussis",
+                           failed_hosts=mc_failed_hosts)
+
+        # ── Step 8 — Explanation enrichment ───────────────────────────────────
+        # Explanation failures are non-critical for the Findings themselves, but
+        # remain observable so the session can be marked partial.
+        all_findings = enriched + misconfig_findings
+        explained = []
+        explanation_failures = 0
+        try:
+            from knowledge.knowledge_base import get_explanation_for_finding
+        except Exception:
+            get_explanation_for_finding = None
+            if all_findings:
+                explanation_failures = 1
+
+        for f in all_findings:
+            if get_explanation_for_finding is not None and f.explanation is None:
+                try:
+                    exp = get_explanation_for_finding(f.module, f.target_service)
+                    if exp:
+                        f = dataclasses.replace(f, explanation=exp)
+                except Exception:
+                    explanation_failures += 1
+            explained.append(f)
+
+        if explanation_failures:
+            result.add(
+                "explanation",
+                "partial",
+                f"{len(explained)} finding(s) processed — "
+                f"{explanation_failures} explanation failure(s)",
+            )
         else:
-            result.add("misconfig_detection", "partial",
-                       f"{mc_ok}/{len(active_ips)} réussis",
-                       failed_hosts=mc_failed_hosts)
+            result.add("explanation", "ok", f"{len(explained)} finding(s) processed")
 
-    # ── Step 8 — Explanation enrichment ───────────────────────────────────
-    # Knowledge Base enrichment is deliberately non-critical: an unavailable
-    # or failing explanation must not change the pipeline status or interrupt
-    # scoring and persistence of the findings.
-    all_findings = enriched + misconfig_findings
-    explained = []
-    try:
-        from knowledge.knowledge_base import get_explanation_for_finding
+        # ── Step 9 — Risk scoring ─────────────────────────────────────────────
+        scored = explained
+        try:
+            from core.risk_scorer import score_findings, get_global_score
+            scored = score_findings(explained)
+            result.global_score = get_global_score(scored)
+            result.add("risk_scoring", "ok",
+                       f"global score: {result.global_score:.1f}" if result.global_score else "no qualifying findings")
+        except Exception as exc:
+            result.add("risk_scoring", "failed", str(exc))
+
+        # ── Step 9 — Persist final findings ───────────────────────────────────
+        result.findings_count = len(scored)
+        try:
+            save_findings(scored)
+            for f in scored:
+                if f.risk_score is not None:
+                    update_finding_risk_score(session_id, f.id, f.risk_score)
+            result.add("persist", "ok", f"{len(scored)} finding(s) saved")
+        except Exception as exc:
+            result.add("persist", "failed", str(exc))
+
+        return scored
+
     except Exception:
-        get_explanation_for_finding = None
+        session_close_status = "failed"
+        raise
 
-    for f in all_findings:
-        if get_explanation_for_finding is not None and f.explanation is None:
-            try:
-                exp = get_explanation_for_finding(f.module, f.target_service)
-                if exp:
-                    f = dataclasses.replace(f, explanation=exp)
-            except Exception:
-                pass
-        explained.append(f)
-
-    result.add("explanation", "ok", f"{len(explained)} finding(s) processed")
-
-    # ── Step 9 — Risk scoring ─────────────────────────────────────────────
-    scored = explained
-    try:
-        from core.risk_scorer import score_findings, get_global_score
-        scored = score_findings(explained)
-        result.global_score = get_global_score(scored)
-        result.add("risk_scoring", "ok",
-                   f"global score: {result.global_score:.1f}" if result.global_score else "no qualifying findings")
-    except Exception as exc:
-        result.add("risk_scoring", "failed", str(exc))
-
-    # ── Step 9 — Persist final findings ───────────────────────────────────
-    result.findings_count = len(scored)
-    try:
-        save_findings(scored)
-        for f in scored:
-            if f.risk_score is not None:
-                update_finding_risk_score(session_id, f.id, f.risk_score)
-        result.add("persist", "ok", f"{len(scored)} finding(s) saved")
-    except Exception as exc:
-        result.add("persist", "failed", str(exc))
-
-    # ── Step 10 — Close session ───────────────────────────────────────────
-    try:
-        close_session(session_id)
-    except Exception:
-        pass  # non-fatal
-
-    return scored
+    finally:
+        if session_close_status != "failed":
+            session_close_status = {
+                "SUCCESS": "completed",
+                "PARTIAL": "partial",
+                "FAILED": "failed",
+            }[result.overall_status]
+        try:
+            close_session(
+                session_id,
+                status=session_close_status,
+                discover_status=discover_status,
+            )
+        except Exception as exc:
+            display(
+                "[yellow]Warning: session could not be closed cleanly: "
+                f"{exc}[/yellow]"
+            )
 
 
 def _render_scan_summary(
@@ -407,7 +499,7 @@ def _render_scan_summary(
     display("")
     for step in result.steps:
         color = step.color()
-        display(f"[{color}]{step.icon()} {step.name}[/{color}]"
+        display(f"[{color}]{step.icon()} {step.name} [{step.status.upper()}][/{color}]"
                 + (f"  [dim]{step.detail}[/dim]" if step.detail else ""))
         for host in step.failed_hosts:
             display(f"  [dim]└─ {host}[/dim]")
@@ -511,13 +603,228 @@ def findings_explain(
 @findings_app.command("rescan")
 def findings_rescan(
     session: str = typer.Option(..., "--session", "-s", help="Session ID."),
+    finding: Optional[str] = typer.Option(None, "--finding", help="Only verify one Finding."),
 ) -> None:
-    """Rescan the session targets and update finding statuses."""
-    confirmed = typer.confirm(f"Rescan all targets from session {session}?")
-    if not confirmed:
-        display("[yellow]Rescan cancelled.[/yellow]")
+    """Verify Findings in the original session without creating a new session."""
+    if not typer.confirm(f"Verify Findings for session {session}?", default=False):
+        display("[yellow]VERIFY cancelled.[/yellow]")
         raise typer.Exit(code=0)
-    display("[yellow]Rescan not yet implemented.[/yellow]")
+
+    try:
+        outcome = _run_verify(session, finding)
+    except Exception as exc:
+        display(f"[red]VERIFY failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    _render_verify_summary(outcome)
+    if outcome["status"] == "FAILED":
+        raise typer.Exit(code=1)
+
+
+def _finding_fingerprint(finding: Finding, session: dict) -> str:
+    """Return a stable identity for a Finding inside its audit context."""
+    payload = {
+        "context": {
+            "session_id": session["id"],
+            "target": session["target"],
+        },
+        "finding": {
+            "module": finding.module,
+            "category": finding.category.value,
+            "target_ip": finding.target_ip,
+            "target_port": finding.target_port,
+            "target_service": finding.target_service,
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _verify_control(finding: Finding, session: dict) -> dict:
+    """Run the smallest real control capable of verifying one Finding."""
+    from detect.tcp_scan import TcpScanCancelled, TcpScanFailed, tcp_scan
+    from detect.udp_scan import UdpScanCancelled, UdpScanFailed, udp_scan
+
+    module = finding.module
+    profile = session["profile"]
+    target_ip = finding.target_ip
+    session_id = session["id"]
+
+    try:
+        if module == "tcp_scan":
+            if finding.target_port is None:
+                return {"state": "PARTIAL", "findings": [], "detail": "TCP Finding has no port"}
+            current = tcp_scan(
+                target_ip, session_id, profile=profile,
+                ports=str(finding.target_port), auto_confirm=True,
+            )
+            return {"state": "SUCCESS", "findings": current, "detail": "TCP control completed"}
+
+        if module == "udp_scan":
+            if finding.target_port is None:
+                return {"state": "PARTIAL", "findings": [], "detail": "UDP Finding has no port"}
+            current = udp_scan(
+                target_ip, session_id, profile=profile,
+                ports=str(finding.target_port), auto_confirm=True,
+            )
+            return {"state": "SUCCESS", "findings": current, "detail": "UDP control completed"}
+
+        if not module.startswith("misconfig_detection."):
+            return {"state": "PARTIAL", "findings": [], "detail": f"Unsupported module: {module}"}
+
+        rule = module.split(".", 1)[1]
+        if rule == "snmp_exposed":
+            current = udp_scan(
+                target_ip, session_id, profile=profile,
+                ports="161", auto_confirm=True,
+            )
+        elif rule == "http_no_https":
+            current = tcp_scan(
+                target_ip, session_id, profile=profile,
+                ports="80,443", auto_confirm=True,
+            )
+        elif rule in {
+            "telnet_exposed",
+            "ftp_plaintext",
+            "smb_signing_missing",
+            "ssh_weak_version",
+            "rdp_exposed",
+        }:
+            if finding.target_port is None:
+                return {"state": "PARTIAL", "findings": [], "detail": "Misconfiguration has no port"}
+            current = tcp_scan(
+                target_ip, session_id, profile=profile,
+                ports=str(finding.target_port), auto_confirm=True,
+            )
+        else:
+            return {
+                "state": "PARTIAL",
+                "findings": [],
+                "detail": f"Unsupported misconfiguration rule: {rule}",
+            }
+
+        if rule == "smb_signing_missing" and any(
+            item.target_port == 445 for item in current
+        ):
+            return {
+                "state": "PARTIAL",
+                "findings": [],
+                "detail": "SMB signing cannot be verified while TCP 445 remains open",
+            }
+
+        from detect.misconfig_detection import detect_misconfigs
+        current_misconfigs = detect_misconfigs(current, session_id)
+        current_misconfigs = [
+            item for item in current_misconfigs if item.module == module
+        ]
+        return {
+            "state": "SUCCESS",
+            "findings": current_misconfigs,
+            "detail": f"{rule} control completed",
+        }
+    except (TcpScanCancelled, TcpScanFailed, UdpScanCancelled, UdpScanFailed) as exc:
+        return {"state": "FAILED", "findings": [], "detail": str(exc)}
+    except Exception as exc:
+        return {"state": "FAILED", "findings": [], "detail": str(exc)}
+
+
+def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
+    """Verify eligible Findings in the existing session and persist the diff."""
+    from core.database import (
+        get_finding_by_id, get_findings, get_session,
+        save_findings, update_finding_status,
+    )
+    from core.finding import FindingStatus
+
+    session = get_session(session_id)
+    if session is None:
+        raise ValueError(f"Session '{session_id}' not found")
+
+    if finding_id is not None:
+        selected = get_finding_by_id(session_id, finding_id)
+        if selected is None:
+            raise ValueError(f"Finding '{finding_id}' not found in session '{session_id}'")
+        findings = [selected]
+    else:
+        findings = get_findings(session_id)
+
+    eligible = [
+        item for item in findings
+        if item.status in (FindingStatus.OPEN, FindingStatus.VERIFIED)
+    ]
+    excluded = [item for item in findings if item not in eligible]
+    outcomes = []
+    current_by_fingerprint = {}
+    old_by_fingerprint = {
+        _finding_fingerprint(item, session): item for item in eligible
+    }
+
+    for item in eligible:
+        outcome = _verify_control(item, session)
+        outcome["original"] = item
+        outcomes.append(outcome)
+        if outcome["state"] != "SUCCESS":
+            continue
+        for current in outcome["findings"]:
+            current_by_fingerprint[_finding_fingerprint(current, session)] = current
+
+    failed = sum(item["state"] == "FAILED" for item in outcomes)
+    partial = sum(item["state"] == "PARTIAL" for item in outcomes)
+    verified = []
+    still_present = []
+    inconclusive = list(excluded)
+
+    for outcome in outcomes:
+        original = outcome["original"]
+        if outcome["state"] != "SUCCESS":
+            inconclusive.append(original)
+            continue
+        fingerprint = _finding_fingerprint(original, session)
+        if fingerprint in current_by_fingerprint:
+            still_present.append(original)
+        else:
+            update_finding_status(session_id, original.id, FindingStatus.VERIFIED)
+            verified.append(original)
+
+    persisted_new = []
+    for fingerprint, current in current_by_fingerprint.items():
+        original = old_by_fingerprint.get(fingerprint)
+        if original is not None:
+            current = dataclasses.replace(
+                current,
+                id=original.id,
+                status=FindingStatus.OPEN,
+            )
+        else:
+            persisted_new.append(current)
+        save_findings([current])
+
+    if not outcomes:
+        status = "PARTIAL"
+    elif failed == len(outcomes):
+        status = "FAILED"
+    elif failed or partial or excluded:
+        status = "PARTIAL"
+    else:
+        status = "SUCCESS"
+
+    return {
+        "status": status,
+        "still_present": still_present,
+        "verified": verified,
+        "new": persisted_new,
+        "inconclusive": inconclusive,
+        "excluded": excluded,
+    }
+
+
+def _render_verify_summary(outcome: dict) -> None:
+    """Display the VERIFY result without changing session lifecycle fields."""
+    display(f"[bold]VERIFY: {outcome['status']}[/bold]")
+    display(f"Findings toujours présentes: {len(outcome['still_present'])}")
+    display(f"Findings VERIFIED: {len(outcome['verified'])}")
+    display(f"Nouvelles Findings: {len(outcome['new'])}")
+    display(f"Findings non concluantes: {len(outcome['inconclusive'])}")
 
 
 # ---------------------------------------------------------------------------

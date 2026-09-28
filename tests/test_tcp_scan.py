@@ -13,6 +13,7 @@ Critical negative tests:
 - open|filtered port MUST NOT produce a Finding
 """
 
+import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -25,6 +26,8 @@ from core.finding import (
     FindingStatus,
 )
 from detect.tcp_scan import (
+    TcpScanCancelled,
+    TcpScanFailed,
     tcp_scan,
     _parse_tcp_xml,
     _extract_service,
@@ -298,16 +301,39 @@ class TestProfileFlags:
 # ---------------------------------------------------------------------------
 
 class TestTcpScan:
-    def test_cancelled_by_user_returns_empty(self):
+    def test_cancelled_by_user_raises_tcp_scan_cancelled(self):
         with patch("detect.tcp_scan.typer.confirm", return_value=False):
-            result = tcp_scan("192.168.1.1", "session-test")
-        assert result == []
+            with pytest.raises(TcpScanCancelled):
+                tcp_scan("192.168.1.1", "session-test")
 
-    def test_nmap_not_found_returns_empty(self):
+    def test_nmap_not_found_raises_tcp_scan_failed(self):
         with patch("detect.tcp_scan.typer.confirm", return_value=True), \
              patch("detect.tcp_scan._run_nmap_tcp", return_value=None):
-            result = tcp_scan("192.168.1.1", "session-test")
-        assert result == []
+            with pytest.raises(TcpScanFailed):
+                tcp_scan("192.168.1.1", "session-test")
+
+    def test_timeout_raises_tcp_scan_failed(self):
+        with patch("detect.tcp_scan.typer.confirm", return_value=True), \
+             patch("detect.tcp_scan.subprocess.run", side_effect=subprocess.TimeoutExpired("nmap", 300)):
+            with pytest.raises(TcpScanFailed):
+                tcp_scan("192.168.1.1", "session-test")
+
+    def test_subprocess_error_raises_tcp_scan_failed(self):
+        with patch("detect.tcp_scan.typer.confirm", return_value=True), \
+             patch("detect.tcp_scan.subprocess.run", side_effect=RuntimeError("nmap failed")):
+            with pytest.raises(TcpScanFailed):
+                tcp_scan("192.168.1.1", "session-test")
+
+    def test_malformed_xml_raises_tcp_scan_failed(self):
+        with patch("detect.tcp_scan.typer.confirm", return_value=True), \
+             patch("detect.tcp_scan._run_nmap_tcp", return_value=MALFORMED_XML):
+            with pytest.raises(TcpScanFailed):
+                tcp_scan("192.168.1.1", "session-test")
+
+    def test_valid_empty_xml_returns_empty(self):
+        with patch("detect.tcp_scan.typer.confirm", return_value=True), \
+             patch("detect.tcp_scan._run_nmap_tcp", return_value=TCP_XML_EMPTY):
+            assert tcp_scan("192.168.1.1", "session-test") == []
 
     def test_open_port_confirmed_returns_finding(self):
         with patch("detect.tcp_scan.typer.confirm", return_value=True), \

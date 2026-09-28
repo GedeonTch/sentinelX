@@ -7,6 +7,7 @@ Critical negative tests:
 - Only strict "open" state produces a Finding
 """
 
+import subprocess
 import pytest
 from unittest.mock import patch
 
@@ -16,6 +17,8 @@ from core.finding import (
     FindingStatus,
 )
 from detect.udp_scan import (
+    UdpScanCancelled,
+    UdpScanFailed,
     udp_scan,
     _parse_udp_xml,
     _extract_udp_service,
@@ -164,16 +167,39 @@ class TestUdpFindingInvariants:
 # ---------------------------------------------------------------------------
 
 class TestUdpScan:
-    def test_cancelled_returns_empty(self):
+    def test_cancelled_raises_udp_scan_cancelled(self):
         with patch("detect.udp_scan.typer.confirm", return_value=False):
-            result = udp_scan("192.168.1.1", "session-test")
-        assert result == []
+            with pytest.raises(UdpScanCancelled):
+                udp_scan("192.168.1.1", "session-test")
 
-    def test_nmap_not_found_returns_empty(self):
+    def test_nmap_not_found_raises_udp_scan_failed(self):
         with patch("detect.udp_scan.typer.confirm", return_value=True), \
              patch("detect.udp_scan._run_nmap_udp", return_value=None):
-            result = udp_scan("192.168.1.1", "session-test")
-        assert result == []
+            with pytest.raises(UdpScanFailed):
+                udp_scan("192.168.1.1", "session-test")
+
+    def test_timeout_raises_udp_scan_failed(self):
+        with patch("detect.udp_scan.typer.confirm", return_value=True), \
+             patch("detect.udp_scan.subprocess.run", side_effect=subprocess.TimeoutExpired("nmap", 600)):
+            with pytest.raises(UdpScanFailed):
+                udp_scan("192.168.1.1", "session-test")
+
+    def test_subprocess_error_raises_udp_scan_failed(self):
+        with patch("detect.udp_scan.typer.confirm", return_value=True), \
+             patch("detect.udp_scan.subprocess.run", side_effect=RuntimeError("nmap failed")):
+            with pytest.raises(UdpScanFailed):
+                udp_scan("192.168.1.1", "session-test")
+
+    def test_malformed_xml_raises_udp_scan_failed(self):
+        with patch("detect.udp_scan.typer.confirm", return_value=True), \
+             patch("detect.udp_scan._run_nmap_udp", return_value="not xml <<<"):
+            with pytest.raises(UdpScanFailed):
+                udp_scan("192.168.1.1", "session-test")
+
+    def test_valid_empty_xml_returns_empty(self):
+        with patch("detect.udp_scan.typer.confirm", return_value=True), \
+             patch("detect.udp_scan._run_nmap_udp", return_value=UDP_XML_EMPTY):
+            assert udp_scan("192.168.1.1", "session-test") == []
 
     def test_open_udp_port_returns_finding(self):
         with patch("detect.udp_scan.typer.confirm", return_value=True), \

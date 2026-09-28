@@ -10,7 +10,12 @@ import pytest
 from unittest.mock import patch
 
 from sentinel.baseline import BaselineEntry, NetworkIdentity
-from sentinel.monitor import NetworkChange, check_network, ScanFailedError
+from sentinel.monitor import (
+    NetworkChange,
+    ScanDegradedError,
+    ScanFailedError,
+    check_network,
+)
 
 IDENTITY = NetworkIdentity("192.168.1.0/24", "192.168.1.1", "aa:aa:aa:aa:aa:aa")
 SESSION = "session-monitor-test"
@@ -168,13 +173,14 @@ class TestScanFailedContract:
             changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
         assert changes == []
 
-    def test_port_scan_failure_skips_host_silently(self):
-        """None from _get_open_ports → host skipped, no new_port change reported."""
+    def test_port_scan_failure_degrades_without_new_port(self):
+        """None from _get_open_ports → degraded check, no new_port change."""
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=None), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
-        new_ports = [c for c in changes if c.change_type == "new_port"]
+            with pytest.raises(ScanDegradedError) as exc_info:
+                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+        new_ports = [c for c in exc_info.value.changes if c.change_type == "new_port"]
         assert new_ports == []
 
     def test_port_scan_empty_result_reports_no_new_ports(self):

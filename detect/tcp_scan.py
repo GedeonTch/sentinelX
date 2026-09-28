@@ -61,6 +61,18 @@ PROFILE_FLAGS = {
 
 
 # ---------------------------------------------------------------------------
+# Public scan outcomes
+# ---------------------------------------------------------------------------
+
+class TcpScanFailed(Exception):
+    """Raised when a TCP scan cannot produce a valid result."""
+
+
+class TcpScanCancelled(Exception):
+    """Raised when the user cancels a TCP scan."""
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -84,8 +96,12 @@ def tcp_scan(
         auto_confirm: If True, skip the (y/n) prompt. Default False.
 
     Returns:
-        List[Finding]: One Finding per open TCP port. Empty if none found
-                       or if user cancels.
+        List[Finding]: One Finding per open TCP port. Empty only when the
+                       scan succeeds and no open ports are found.
+
+    Raises:
+        TcpScanFailed: If Nmap fails or returns invalid XML.
+        TcpScanCancelled: If the user cancels this host scan.
     """
     if profile not in PROFILE_FLAGS:
         display(f"[red]Unknown profile '{profile}'. Using 'normal'.[/red]")
@@ -97,7 +113,7 @@ def tcp_scan(
         )
         if not confirmed:
             display("[yellow]TCP scan cancelled.[/yellow]")
-            return []
+            raise TcpScanCancelled(f"User cancelled TCP scan for {target}")
 
     display(f"[cyan]Starting TCP scan on {target} (profile: {profile})...[/cyan]")
 
@@ -111,7 +127,13 @@ def tcp_scan(
 
     if not xml_output:
         display(f"[yellow]No response from nmap TCP scan on {target}.[/yellow]")
-        return []
+        raise TcpScanFailed(f"Nmap TCP scan returned no result for {target}")
+
+    try:
+        ET.fromstring(xml_output)
+    except ET.ParseError as exc:
+        display("[red]Failed to parse nmap TCP XML output.[/red]")
+        raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
 
     findings = _parse_tcp_xml(xml_output, target, session_id)
 

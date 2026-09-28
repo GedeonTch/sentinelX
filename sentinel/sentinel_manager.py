@@ -59,7 +59,11 @@ from sentinel.baseline import (
     get_baseline,
     learn_baseline,
 )
-from sentinel.monitor import check_network, ScanFailedError
+from sentinel.monitor import (
+    ScanDegradedError,
+    ScanFailedError,
+    check_network,
+)
 from sentinel.whitelist import load_whitelist
 
 
@@ -264,20 +268,25 @@ def _do_check(
                 whitelist=whitelist,
                 counter=counter,
             )
-    except ScanFailedError as exc:
-        # Ping scan failed — do NOT update last_check_time
-        # Network state is unknown — this is not a successful check
+    except ScanDegradedError as exc:
+        # Partial check: process observed changes, but do not update
+        # last_check_time because global discovery was incomplete.
         display(f"[yellow]Monitor: {exc}[/yellow]")
-        state = sentinel_get_state(network_id)
-        last_ok = state.get("last_check_time")
-        if last_ok:
-            elapsed = (
-                datetime.datetime.now(timezone.utc)
-                - datetime.datetime.fromisoformat(last_ok)
-            ).total_seconds()
-            if elapsed > 2 * interval:
-                sentinel_update_state(network_id=network_id, sentinel_status="degraded")
-                display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
+        if exc.changes:
+            process_changes(
+                changes=exc.changes,
+                session_id=network_id,
+                whitelist=whitelist,
+                counter=counter,
+            )
+        sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+        display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
+    except ScanFailedError as exc:
+        # Ping and targeted ARP did not provide a usable host check.
+        # Never update last_check_time and never infer host removal.
+        display(f"[yellow]Monitor: {exc}[/yellow]")
+        sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+        display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
     except Exception as exc:
         # Unexpected error — same behaviour: no last_check_time update
         display(f"[yellow]Monitor check error: {exc}[/yellow]")

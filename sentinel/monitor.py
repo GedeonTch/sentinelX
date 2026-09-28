@@ -6,82 +6,39 @@ Role: Compare the current network state to the stored baseline and return
 
 This module does NOT create Findings, does NOT write to DB, does NOT alert.
 It only observes and reports raw changes. alerting.py decides what to do.
-
-Changes detected (V1):
-    new_host    — an IP is active but not in the baseline
-    new_port    — a port is open on a known host but not in its baseline
-    mac_change  — the MAC of a known host differs from the baseline
-
-NOT detected in V1:
-    removed_host — a baseline host that no longer responds (out of scope)
-
-Return contract (A3 fix):
-    check_network() raises ScanFailedError if the ping scan itself fails.
-    Callers (_do_check in sentinel_manager) must catch ScanFailedError and
-    NOT update last_check_time — a failed scan is not a successful check.
-
-    _get_open_ports() returns:
-        None      → port scan failed for this host (skip, do not report)
-        []        → scan succeeded, no open ports found
-        [n, ...]  → scan succeeded, ports found
-
-Rules enforced here:
-- ZERO import sqlite3
-- ZERO print() — display via core/logger.py
-- ZERO risk_score calculation
 """
 
 from __future__ import annotations
 
-import subprocess
-import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from core.logger import display
+from sentinel.arp_probe import ArpProbeStatus, arp_probe
 from sentinel.baseline import BaselineEntry, NetworkIdentity
 
 
-# ---------------------------------------------------------------------------
-# ScanFailedError — raised when the ping scan itself fails
-# ---------------------------------------------------------------------------
-
 class ScanFailedError(Exception):
-    """Raised by check_network() when the ping scan could not be completed.
-
-    Callers must catch this and NOT update last_check_time.
-    A failed scan is not a successful check — the network state is unknown.
-    """
-    pass
+    """Raised when ping failed and no known host was recovered by ARP."""
 
 
-# ---------------------------------------------------------------------------
-# NetworkChange dataclass
-# ---------------------------------------------------------------------------
+class ScanDegradedError(Exception):
+    """Raised when ping failed but targeted ARP recovered known hosts."""
+
+    def __init__(self, message: str, changes: List["NetworkChange"]):
+        super().__init__(message)
+        self.changes = changes
+
 
 @dataclass
 class NetworkChange:
-    """A detected deviation from the stored baseline.
+    """A detected deviation from the stored baseline."""
 
-    Attributes:
-        change_type: "new_host" | "new_port" | "mac_change"
-        asset_ip:    IP address of the affected host.
-        detail:      Human-readable description of the change.
-                     Format conventions:
-                       new_host  → "new host detected"
-                       new_port  → "port <n> opened"
-                       mac_change → "mac changed from <old> to <new>"
-        evidence:    Raw output that produced the observation (for Finding.evidence.raw).
-    """
     change_type: str
     asset_ip: str
     detail: str
     evidence: str
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 
 def check_network(
     target_network: str,
@@ -91,35 +48,37 @@ def check_network(
 ) -> List[NetworkChange]:
     """Compare current network state to baseline and return detected changes.
 
-    Performs a lightweight ping scan to find active hosts, then a TCP port
-    scan on known hosts to detect new ports, and reads the ARP cache for
-    MAC changes.
-
-    A host that disappears (in baseline but not responding) is NOT reported
-    in V1 — removed_host is out of scope.
-
-    Args:
-        target_network: CIDR to monitor.
-        session_id:     Current session ID (for TCP scan results context).
-        identity:       NetworkIdentity being monitored.
-        baseline:       {ip: BaselineEntry} dict from sentinel/baseline.py.
-
-    Returns:
-        List[NetworkChange]: Detected changes. Empty if network matches baseline.
+    A failed ping scan may recover baseline IPs with one targeted active ARP
+    probe each. Such a partial check raises ScanDegradedError after collecting
+    changes, so callers can process them without marking the check successful.
     """
     display(f"[dim]Checking network {target_network}...[/dim]")
 
     changes: List[NetworkChange] = []
+    services_degraded = False
 
-    # Step 1 — discover currently active hosts
     current_hosts = _get_active_hosts(target_network)
+    ping_failed = current_hosts is None
     if current_hosts is None:
-        # Ping scan failed entirely — raise so caller knows not to update last_check_time
+        current_hosts = []
+
+    arp_recovered = False
+    arp_results = {}
+    if ping_failed:
+        for ip in baseline:
+            result = arp_probe(ip)
+            arp_results[ip] = result
+            if result.status is ArpProbeStatus.PRESENT:
+                current_hosts.append(ip)
+                arp_recovered = True
+
+    if ping_failed and not arp_recovered:
         raise ScanFailedError(
-            f"Ping scan failed for {target_network} — network state unknown."
+            f"Ping scan failed for {target_network}; no known host was recovered by ARP."
         )
 
-    # Step 2 — detect new hosts
+    # ARP fallback only probes baseline IPs and therefore never creates
+    # new_host changes.
     for ip in current_hosts:
         if ip not in baseline:
             changes.append(NetworkChange(
@@ -129,28 +88,34 @@ def check_network(
                 evidence=f"Host {ip} responded to ping but is not in the baseline.",
             ))
 
-    # Step 3 — check known hosts for new ports and MAC changes
     for ip, entry in baseline.items():
         if ip not in current_hosts:
-            continue  # host not responding — not reported in V1
+            continue
 
-        # MAC change check (via ARP cache)
-        current_mac = _get_arp_mac(ip)
+        arp_result = arp_results.get(ip)
+        if arp_result is not None:
+            current_mac = (
+                arp_result.mac
+                if arp_result.status is ArpProbeStatus.PRESENT and arp_result.mac
+                else ""
+            )
+        else:
+            current_mac = _get_arp_mac(ip)
         if current_mac and entry.mac and current_mac != entry.mac.lower():
             changes.append(NetworkChange(
                 change_type="mac_change",
                 asset_ip=ip,
                 detail=f"mac changed from {entry.mac} to {current_mac}",
                 evidence=(
-                    f"ARP cache shows {ip} → {current_mac}. "
+                    f"Active ARP probe shows {ip} → {current_mac}. "
                     f"Baseline MAC was {entry.mac}."
                 ),
             ))
 
-        # New port check — scan known hosts only
         current_ports = _get_open_ports(ip)
         if current_ports is None:
-            continue  # scan failed — skip this host silently
+            services_degraded = True
+            continue
 
         for port in current_ports:
             if port not in entry.ports:
@@ -169,22 +134,18 @@ def check_network(
     else:
         display("[dim]Monitor: no changes detected.[/dim]")
 
+    if ping_failed or services_degraded:
+        if ping_failed:
+            message = "Ping scan failed; known hosts were partially checked with targeted ARP."
+        else:
+            message = "Service scan failed for at least one present host."
+        raise ScanDegradedError(message, changes)
+
     return changes
 
 
-# ---------------------------------------------------------------------------
-# Internal scan helpers
-# ---------------------------------------------------------------------------
-
 def _get_active_hosts(target_network: str) -> Optional[List[str]]:
-    """Run a lightweight ping scan and return list of active IPs.
-
-    Args:
-        target_network: CIDR or single IP.
-
-    Returns:
-        List[str]: Active IPs, or None if the scan failed entirely.
-    """
+    """Run a lightweight ping scan and return active IPs, or None on failure."""
     try:
         from recon.device_fingerprint import _run_nmap_ping, _parse_active_hosts
         xml = _run_nmap_ping(target_network)
@@ -196,24 +157,11 @@ def _get_active_hosts(target_network: str) -> Optional[List[str]]:
 
 
 def _get_open_ports(ip: str) -> Optional[List[int]]:
-    """Run a TCP port scan on a single host and return open port numbers.
-
-    Return contract (A3):
-        None      → scan failed (nmap error, timeout) — caller must skip this host
-        []        → scan succeeded, no open ports found
-        [n, ...]  → scan succeeded, these ports are open
-
-    Args:
-        ip: Single IP address.
-
-    Returns:
-        Optional[List[int]]: Open ports, or None if scan failed.
-    """
+    """Run a TCP port scan; None means the scan failed."""
     try:
         from detect.tcp_scan import _run_nmap_tcp, _parse_tcp_xml
         xml = _run_nmap_tcp(ip, "normal", "1-1024,3389,5432,3306,1433,8080,8443")
         if xml is None:
-            # nmap returned nothing — scan failed, state unknown
             return None
         findings = _parse_tcp_xml(xml, ip, "sentinel-monitor")
         return [f.target_port for f in findings if f.target_port is not None]
@@ -222,22 +170,8 @@ def _get_open_ports(ip: str) -> Optional[List[int]]:
 
 
 def _get_arp_mac(ip: str) -> str:
-    """Read the MAC address for an IP from the OS ARP cache.
-
-    Args:
-        ip: IP address to look up.
-
-    Returns:
-        str: MAC address (lowercase), or "" if not found.
-    """
-    try:
-        result = subprocess.run(
-            ["arp", "-n", ip],
-            capture_output=True, text=True, timeout=10,
-        )
-        match = re.search(r"([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})", result.stdout)
-        if match:
-            return match.group(1).lower()
-    except Exception:
-        pass
+    """Return a MAC only when an active targeted ARP probe responds."""
+    result = arp_probe(ip)
+    if result.status is ArpProbeStatus.PRESENT and result.mac:
+        return result.mac
     return ""

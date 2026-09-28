@@ -28,6 +28,9 @@ from rich.console import Console
 from rich.table import Table
 
 from cli import app, PipelineResult, _render_scan_summary, _run_pipeline
+from recon.device_fingerprint import DiscoveryCancelled, DiscoveryFailed
+from detect.tcp_scan import TcpScanCancelled, TcpScanFailed
+from detect.udp_scan import UdpScanCancelled, UdpScanFailed
 from core.finding import (
     Finding,
     Evidence,
@@ -198,7 +201,8 @@ class TestScan:
             )
 
         assert result.exit_code == 0, result.output
-        assert "RÉSULTAT : SUCCESS" in result.output
+        expected_status = "PARTIAL" if knowledge_base_side_effect else "SUCCESS"
+        assert f"RÉSULTAT : {expected_status}" in result.output
         session_id = fingerprint.call_args.args[1]
         fingerprint.assert_called_once_with(target, session_id, auto_confirm=use_yes)
         tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=use_yes)
@@ -206,6 +210,383 @@ class TestScan:
         if expose_mocks:
             return result, knowledge_base, score_findings, enrich_findings, detect_misconfigs, save_findings
         return result, knowledge_base, score_findings
+
+    def _run_pipeline_with_port_outcomes(
+        self,
+        tcp_outcomes,
+        udp_outcomes,
+        explanation_side_effect=None,
+        explanation_import_error=False,
+        close_session_side_effect=None,
+        scored_findings=None,
+    ):
+        import core.database as db
+
+        host_findings = [
+            make_finding(module="device_fingerprint", target_ip="192.168.1.10"),
+            make_finding(module="device_fingerprint", target_ip="192.168.1.20"),
+        ]
+        result = PipelineResult()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(db, "init_db"))
+            stack.enter_context(patch.object(db, "save_session"))
+            stack.enter_context(patch.object(db, "save_findings"))
+            stack.enter_context(patch.object(db, "update_finding_risk_score"))
+            close_session = stack.enter_context(
+                patch.object(db, "close_session", side_effect=close_session_side_effect)
+            )
+            stack.enter_context(patch("recon.device_fingerprint.fingerprint", return_value=host_findings))
+            tcp_scan = stack.enter_context(
+                patch("detect.tcp_scan.tcp_scan", side_effect=tcp_outcomes)
+            )
+            udp_scan = stack.enter_context(
+                patch("detect.udp_scan.udp_scan", side_effect=udp_outcomes)
+            )
+            stack.enter_context(
+                patch(
+                    "core.risk_scorer.score_findings",
+                    return_value=scored_findings if scored_findings is not None else [],
+                )
+            )
+            stack.enter_context(patch("core.risk_scorer.get_global_score", return_value=None))
+            if explanation_import_error:
+                import builtins
+
+                real_import = builtins.__import__
+
+                def import_without_knowledge_base(name, *args, **kwargs):
+                    if name == "knowledge.knowledge_base":
+                        raise RuntimeError("knowledge base import failed")
+                    return real_import(name, *args, **kwargs)
+
+                stack.enter_context(
+                    patch("builtins.__import__", side_effect=import_without_knowledge_base)
+                )
+            else:
+                stack.enter_context(
+                    patch(
+                        "knowledge.knowledge_base.get_explanation_for_finding",
+                        return_value=None,
+                        side_effect=explanation_side_effect,
+                    )
+                )
+
+            produced = _run_pipeline("192.168.1.0/24", "normal", None, True, result)
+
+        return result, produced, tcp_scan, udp_scan, close_session
+
+    def test_port_scans_all_successful_empty_are_ok(self):
+        result, produced, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], []], udp_outcomes=[[], []]
+        )
+
+        assert produced == []
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="OK"
+        )
+        assert next(s for s in result.steps if s.name == "tcp_scan").status == "ok"
+        assert next(s for s in result.steps if s.name == "udp_scan").status == "ok"
+        assert "2/2 hosts scanned" in next(
+            s for s in result.steps if s.name == "tcp_scan"
+        ).detail
+
+    def test_port_scans_all_successful_with_findings_are_ok(self):
+        finding = make_finding(module="tcp_scan", target_ip="192.168.1.10")
+        result, produced, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[finding], [finding]], udp_outcomes=[[], []]
+        )
+
+        assert result.overall_status == "SUCCESS"
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="OK"
+        )
+        assert next(s for s in result.steps if s.name == "tcp_scan").status == "ok"
+
+    def test_port_scan_success_and_failure_is_partial(self):
+        result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], TcpScanFailed("nmap failed")], udp_outcomes=[[], []]
+        )
+
+        tcp_step = next(s for s in result.steps if s.name == "tcp_scan")
+        assert tcp_step.status == "partial"
+        assert "1 failed" in tcp_step.detail
+        assert "2/2 hosts scanned" not in tcp_step.detail
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="partial", discover_status="OK"
+        )
+
+    def test_port_scan_success_and_cancellation_is_partial(self):
+        result, _, _, _, _ = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], TcpScanCancelled("user cancelled")], udp_outcomes=[[], []]
+        )
+
+        tcp_step = next(s for s in result.steps if s.name == "tcp_scan")
+        assert tcp_step.status == "partial"
+        assert "1 cancelled" in tcp_step.detail
+
+    def test_port_scan_all_failed_is_failed(self):
+        result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[TcpScanFailed("first"), TcpScanFailed("second")],
+            udp_outcomes=[[], []],
+        )
+
+        tcp_step = next(s for s in result.steps if s.name == "tcp_scan")
+        assert tcp_step.status == "failed"
+        assert "0/2 hosts scanned" in tcp_step.detail
+        assert "2 failed" in tcp_step.detail
+        assert result.overall_status == "PARTIAL"
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="partial", discover_status="OK"
+        )
+
+    def test_port_scan_all_cancelled_is_cancelled(self):
+        result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[TcpScanCancelled("first"), TcpScanCancelled("second")],
+            udp_outcomes=[[], []],
+        )
+
+        tcp_step = next(s for s in result.steps if s.name == "tcp_scan")
+        assert tcp_step.status == "cancelled"
+        assert "0/2 hosts scanned" in tcp_step.detail
+        assert "2 cancelled" in tcp_step.detail
+        assert result.overall_status == "SUCCESS"
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="OK"
+        )
+
+    def test_port_scan_failed_and_cancelled_without_success_is_failed(self):
+        result, _, _, _, _ = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[TcpScanFailed("failed"), TcpScanCancelled("cancelled")],
+            udp_outcomes=[[], []],
+        )
+
+        tcp_step = next(s for s in result.steps if s.name == "tcp_scan")
+        assert tcp_step.status == "failed"
+        assert "1 failed" in tcp_step.detail
+        assert "1 cancelled" in tcp_step.detail
+
+    def test_udp_scan_success_and_failure_is_partial(self):
+        result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], []],
+            udp_outcomes=[[], UdpScanFailed("nmap failed")],
+        )
+
+        udp_step = next(s for s in result.steps if s.name == "udp_scan")
+        assert udp_step.status == "partial"
+        assert "1 failed" in udp_step.detail
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="partial", discover_status="OK"
+        )
+
+    def test_explanation_failure_marks_pipeline_partial_and_session_partial(self):
+        finding = make_finding(module="tcp_scan", target_ip="192.168.1.10")
+        result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[finding], [finding]],
+            udp_outcomes=[[], []],
+            explanation_side_effect=RuntimeError("knowledge base unavailable"),
+        )
+
+        explanation_step = next(s for s in result.steps if s.name == "explanation")
+        assert explanation_step.status == "partial"
+        assert result.overall_status == "PARTIAL"
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="partial", discover_status="OK"
+        )
+
+    def test_close_session_failure_warns_without_changing_success(self):
+        finding = make_finding(module="tcp_scan", target_ip="192.168.1.10")
+        with patch("cli.display") as display:
+            result, produced, _, _, close_session = self._run_pipeline_with_port_outcomes(
+                tcp_outcomes=[[finding], [finding]],
+                udp_outcomes=[[], []],
+                close_session_side_effect=RuntimeError("database is locked"),
+                scored_findings=[finding],
+            )
+
+        assert result.overall_status == "SUCCESS"
+        assert produced == [finding]
+        assert "session_close" not in {step.name for step in result.steps}
+        close_session.assert_called_once()
+        assert any(
+            "Warning: session could not be closed cleanly: database is locked" in str(call.args[0])
+            for call in display.call_args_list
+        )
+
+    def test_close_session_failure_warns_without_changing_partial(self):
+        with patch("cli.display") as display:
+            result, _, _, _, close_session = self._run_pipeline_with_port_outcomes(
+                tcp_outcomes=[[], TcpScanFailed("nmap failed")],
+                udp_outcomes=[[], []],
+                close_session_side_effect=RuntimeError("database is locked"),
+            )
+
+        assert result.overall_status == "PARTIAL"
+        assert "session_close" not in {step.name for step in result.steps}
+        close_session.assert_called_once()
+        assert any(
+            "Warning: session could not be closed cleanly: database is locked" in str(call.args[0])
+            for call in display.call_args_list
+        )
+
+    def test_close_session_failure_warns_without_changing_failed(self):
+        result, _, _, close_session = self._run_scan_with_discovery_outcome(
+            side_effect=DiscoveryFailed("nmap unavailable"),
+            expose_mocks=True,
+            close_session_side_effect=RuntimeError("database is locked"),
+        )
+
+        assert result.exit_code == 1
+        assert "RÉSULTAT : FAILED" in result.output
+        assert "Warning: session could not be closed cleanly: database is locked" in result.output
+        close_session.assert_called_once()
+
+    def test_empty_findings_ignore_knowledge_base_import_failure(self):
+        result, produced, _, _, close_session = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], []],
+            udp_outcomes=[[], []],
+            explanation_import_error=True,
+        )
+
+        explanation_step = next(s for s in result.steps if s.name == "explanation")
+        assert produced == []
+        assert explanation_step.status == "ok"
+        assert result.overall_status == "SUCCESS"
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="OK"
+        )
+
+    def test_unexpected_pipeline_exception_closes_failed_session(self):
+        import core.database as db
+
+        result = PipelineResult()
+        host_findings = [
+            make_finding(module="device_fingerprint", target_ip="192.168.1.10"),
+            make_finding(module="device_fingerprint", target_ip="192.168.1.20"),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(db, "init_db"))
+            stack.enter_context(patch.object(db, "save_session"))
+            stack.enter_context(patch.object(db, "save_findings"))
+            stack.enter_context(patch.object(db, "update_finding_risk_score"))
+            close_session = stack.enter_context(patch.object(db, "close_session"))
+            stack.enter_context(
+                patch("recon.device_fingerprint.fingerprint", return_value=host_findings)
+            )
+            stack.enter_context(
+                patch(
+                    "detect.tcp_scan.tcp_scan",
+                    side_effect=RuntimeError("unexpected scanner error"),
+                )
+            )
+
+            with pytest.raises(RuntimeError, match="unexpected scanner error"):
+                _run_pipeline("192.168.1.0/24", "normal", None, True, result)
+
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="failed", discover_status="OK"
+        )
+
+    def _run_scan_with_discovery_outcome(
+        self,
+        return_value=None,
+        side_effect=None,
+        expose_mocks=False,
+        close_session_side_effect=None,
+    ):
+        import core.database as db
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(db, "init_db"))
+            stack.enter_context(patch.object(db, "save_session"))
+            stack.enter_context(patch.object(db, "save_findings"))
+            stack.enter_context(patch.object(db, "update_finding_risk_score"))
+            close_session = stack.enter_context(
+                patch.object(db, "close_session", side_effect=close_session_side_effect)
+            )
+            tcp_scan = stack.enter_context(patch("detect.tcp_scan.tcp_scan", return_value=[]))
+            udp_scan = stack.enter_context(patch("detect.udp_scan.udp_scan", return_value=[]))
+            stack.enter_context(
+                patch(
+                    "recon.device_fingerprint.fingerprint",
+                    return_value=return_value,
+                    side_effect=side_effect,
+                )
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.score_findings", return_value=[])
+            )
+            stack.enter_context(
+                patch("core.risk_scorer.get_global_score", return_value=None)
+            )
+            stack.enter_context(
+                patch("knowledge.knowledge_base.get_explanation_for_finding", return_value=None)
+            )
+
+            result = runner.invoke(
+                app,
+                ["scan", "--target", "192.168.1.0/24"],
+                input="y\n",
+            )
+            if expose_mocks:
+                return result, tcp_scan, udp_scan, close_session
+            return result
+
+    def test_discover_success_with_multiple_hosts_is_ok(self):
+        findings = [
+            make_finding(module="device_fingerprint", target_ip="192.168.1.10"),
+            make_finding(module="device_fingerprint", target_ip="192.168.1.20"),
+        ]
+        result = self._run_scan_with_discovery_outcome(return_value=findings)
+
+        assert result.exit_code == 0
+        assert "discover [OK]" in result.output
+        assert "2 host(s) found" in result.output
+        assert "EMPTY" not in result.output
+
+    def test_discover_success_with_no_hosts_is_empty(self):
+        result, tcp_scan, udp_scan, close_session = self._run_scan_with_discovery_outcome(
+            return_value=[], expose_mocks=True
+        )
+
+        assert result.exit_code == 0
+        assert "discover [EMPTY]" in result.output
+        assert "EMPTY: discovery succeeded with 0 hosts" in result.output
+        tcp_scan.assert_not_called()
+        udp_scan.assert_not_called()
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="EMPTY"
+        )
+
+    def test_discover_user_cancellation_is_cancelled(self):
+        result, tcp_scan, udp_scan, close_session = self._run_scan_with_discovery_outcome(
+            side_effect=DiscoveryCancelled("user refused discovery"),
+            expose_mocks=True,
+        )
+
+        assert result.exit_code == 0
+        assert "discover [CANCELLED]" in result.output
+        assert "EMPTY" not in result.output
+        tcp_scan.assert_not_called()
+        udp_scan.assert_not_called()
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="completed", discover_status="CANCELLED"
+        )
+
+    def test_discover_tool_failure_is_failed(self):
+        result, tcp_scan, udp_scan, close_session = self._run_scan_with_discovery_outcome(
+            side_effect=DiscoveryFailed("nmap unavailable"),
+            expose_mocks=True,
+        )
+
+        assert result.exit_code == 1
+        assert "discover [FAILED]" in result.output
+        assert "RÉSULTAT : FAILED" in result.output
+        assert "EMPTY" not in result.output
+        tcp_scan.assert_not_called()
+        udp_scan.assert_not_called()
+        close_session.assert_called_once_with(
+            close_session.call_args.args[0], status="failed", discover_status="FAILED"
+        )
 
     def test_scan_confirmed_creates_session(self):
         """A positive confirmation runs the complete pipeline without network I/O."""
@@ -293,7 +674,7 @@ class TestScan:
         )
 
         assert result.exit_code == 0
-        assert "RÉSULTAT : SUCCESS" in result.output
+        assert "RÉSULTAT : PARTIAL" in result.output
         assert knowledge_base.call_count == 2
         explained = score_findings.call_args.args[0]
         assert explained[0].explanation is None
