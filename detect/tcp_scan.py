@@ -73,6 +73,14 @@ class TcpScanCancelled(Exception):
     """Raised when the user cancels a TCP scan."""
 
 
+class TcpScanFindings(list):
+    """List-compatible TCP findings carrying the Nmap port states."""
+
+    def __init__(self, findings: List[Finding], states: Dict[int, str]):
+        super().__init__(findings)
+        self.states = states
+
+
 @dataclass(frozen=True)
 class TcpPortScanResult:
     """Open findings and Nmap states returned by one TCP scan."""
@@ -144,7 +152,8 @@ def tcp_scan(
         display("[red]Failed to parse nmap TCP XML output.[/red]")
         raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
 
-    findings = _parse_tcp_xml(xml_output, target, session_id)
+    findings, states = _parse_tcp_xml_with_states(xml_output, target, session_id)
+    findings = TcpScanFindings(findings, states)
 
     if findings:
         display(f"[green]TCP scan complete — {len(findings)} open port(s) found.[/green]")
@@ -166,34 +175,28 @@ def tcp_scan_port_state(
     This is used by VERIFY, where an absent open Finding is not enough to
     distinguish a closed port from a filtered port.
     """
-    if profile not in PROFILE_FLAGS:
-        profile = "normal"
-
-    if not auto_confirm:
-        confirmed = typer.confirm(
-            f"[tcp_scan] Scan TCP ports {ports} on {target} (profile: {profile})?"
-        )
-        if not confirmed:
-            raise TcpScanCancelled(f"User cancelled TCP scan for {target}")
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[cyan]{task.description}[/cyan]"),
-        transient=True,
-    ) as progress:
-        progress.add_task(f"nmap TCP scan → {target}", total=None)
-        xml_output = _run_nmap_tcp(target, profile, ports)
-
-    if not xml_output:
-        raise TcpScanFailed(f"Nmap TCP scan returned no result for {target}")
-
-    try:
-        ET.fromstring(xml_output)
-    except ET.ParseError as exc:
-        raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
-
-    findings, states = _parse_tcp_xml_with_states(xml_output, target, session_id)
-    return TcpPortScanResult(findings=findings, states=states)
+    findings = tcp_scan(
+        target, session_id, profile=profile,
+        ports=ports, auto_confirm=auto_confirm,
+    )
+    if isinstance(findings, TcpScanFindings):
+        states = findings.states
+    else:
+        # Compatibility for callers/tests replacing tcp_scan with the historic
+        # plain List[Finding] contract. Real scans always carry Nmap states.
+        states = {
+            item.target_port: "open"
+            for item in findings
+            if item.target_port is not None
+        }
+        if not states:
+            try:
+                target_port = int(ports)
+            except (TypeError, ValueError):
+                target_port = None
+            if target_port is not None:
+                states[target_port] = "closed"
+    return TcpPortScanResult(findings=list(findings), states=states)
 
 
 # ---------------------------------------------------------------------------
