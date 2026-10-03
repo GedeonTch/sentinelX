@@ -28,6 +28,11 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - pwd is unavailable on Windows
+    pwd = None
+
 from core.finding import (
     Finding,
     Evidence,
@@ -43,6 +48,41 @@ from core.finding import (
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
+
+def _real_user_home() -> Path:
+    """Return the data home for the user who invoked SentinelX.
+
+    Under sudo, Path.home() resolves to /root even though the data belongs to
+    the invoking user. Prefer SUDO_USER, then SUDO_UID. If sudo metadata is
+    present but cannot be resolved, fail rather than silently writing data to
+    root's home. With no sudo metadata, preserve normal Path.home() behaviour.
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    sudo_uid = os.environ.get("SUDO_UID")
+
+    if sudo_user and pwd is not None:
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except (KeyError, TypeError):
+            pass
+
+    if sudo_uid and pwd is not None:
+        try:
+            return Path(pwd.getpwuid(int(sudo_uid)).pw_dir)
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    if sudo_user or sudo_uid:
+        home = os.environ.get("HOME")
+        if home and Path(home) != Path.home() and home != "/root":
+            return Path(home)
+        raise RuntimeError(
+            "Unable to resolve the invoking user's home directory under sudo; "
+            "refusing to use /root/.netlab."
+        )
+
+    return Path.home()
+
 
 def _validate_session_id(session_id: str) -> str:
     """Validate that session_id is safe to use as a filesystem path component.
@@ -84,7 +124,7 @@ def get_db_path(session_id: str) -> Path:
         ValueError: If session_id contains unsafe characters.
     """
     _validate_session_id(session_id)
-    db_dir = Path.home() / ".netlab" / "sessions"
+    db_dir = _real_user_home() / ".netlab" / "sessions"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / f"{session_id}.db"
 
@@ -1046,7 +1086,7 @@ def get_sentinel_db_path(network_id: str) -> Path:
         ValueError: If network_id is unsafe (path traversal check).
     """
     _validate_session_id(network_id)
-    db_dir = Path.home() / ".netlab" / "sentinel"
+    db_dir = _real_user_home() / ".netlab" / "sentinel"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / f"{network_id}.db"
 
