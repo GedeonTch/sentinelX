@@ -9,6 +9,7 @@ import core.database as db
 from cli import _finding_fingerprint, _run_verify, app
 from typer.testing import CliRunner
 from core.finding import Category, Confidence, Evidence, Finding, FindingStatus, Severity
+from detect.tcp_scan import TcpPortScanResult, _parse_tcp_xml_with_states
 
 SESSION = "verify-session"
 runner = CliRunner()
@@ -19,6 +20,12 @@ def isolated_db(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(db, "get_db_path", lambda session_id: tmp_path / f"{session_id}.db")
     db.init_db(SESSION)
     db.save_session(SESSION, target="192.168.10.0/24", profile="normal")
+
+
+def _tcp_result(findings, states=None):
+    if states is None:
+        states = {item.target_port: "open" for item in findings if item.target_port is not None}
+    return TcpPortScanResult(findings=findings, states=states)
 
 
 def make_finding(module="tcp_scan", port=23, service="telnet", status=FindingStatus.OPEN):
@@ -57,7 +64,7 @@ def test_targeted_tcp_verify_keeps_open_finding_and_session_fields():
 
     current = make_finding()
     current.id = "new-scanner-id"
-    with patch("detect.tcp_scan.tcp_scan", return_value=[current]) as scan:
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([current], {23: "open"})) as scan:
         result = _run_verify(SESSION, original.id)
 
     scan.assert_called_once_with(
@@ -76,7 +83,7 @@ def test_successful_absence_marks_open_finding_verified():
     original = make_finding()
     db.save_finding(original)
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[]):
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "closed"})):
         result = _run_verify(SESSION, original.id)
 
     stored = db.get_finding_by_id(SESSION, original.id)
@@ -85,12 +92,25 @@ def test_successful_absence_marks_open_finding_verified():
     assert stored.status == FindingStatus.VERIFIED
 
 
+def test_filtered_port_is_partial_and_never_verified():
+    original = make_finding()
+    db.save_finding(original)
+
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "filtered"})):
+        result = _run_verify(SESSION, original.id)
+
+    stored = db.get_finding_by_id(SESSION, original.id)
+    assert result["status"] == "PARTIAL"
+    assert result["inconclusive"][0].id == original.id
+    assert stored.status == FindingStatus.OPEN
+
+
 def test_verified_finding_that_reappears_becomes_open():
     original = make_finding(status=FindingStatus.VERIFIED)
     db.save_finding(original)
     current = make_finding()
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[current]):
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([current], {23: "open"})):
         result = _run_verify(SESSION, original.id)
 
     assert result["status"] == "SUCCESS"
@@ -116,7 +136,10 @@ def test_new_finding_is_persisted_without_merging_with_old_one():
     new_finding = make_finding(port=80, service="http")
     new_finding.id = "scanner-generated-id"
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[new_finding]):
+    with patch(
+        "detect.tcp_scan.tcp_scan_port_state",
+        return_value=_tcp_result([new_finding], {23: "closed", 80: "open"}),
+    ):
         result = _run_verify(SESSION, original.id)
 
     stored = db.get_findings(SESSION)
@@ -151,7 +174,10 @@ def test_http_misconfig_controls_both_http_ports():
     db.save_finding(original)
     http = make_finding(module="tcp_scan", port=80, service="http")
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[http]) as scan:
+    with patch(
+        "detect.tcp_scan.tcp_scan_port_state",
+        return_value=_tcp_result([http], {80: "open", 443: "closed"}),
+    ) as scan:
         result = _run_verify(SESSION, original.id)
 
     scan.assert_called_once_with(
@@ -170,7 +196,10 @@ def test_smb_signing_stays_partial_when_port_445_remains_open():
     db.save_finding(original)
     smb = make_finding(module="tcp_scan", port=445, service="microsoft-ds")
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[smb]):
+    with patch(
+        "detect.tcp_scan.tcp_scan_port_state",
+        return_value=_tcp_result([smb], {445: "open"}),
+    ):
         result = _run_verify(SESSION, original.id)
 
     assert result["status"] == "PARTIAL"
@@ -241,7 +270,10 @@ def test_mixed_success_and_partial_is_partial():
     tcp_current = make_finding()
     from detect.udp_scan import UdpScanCancelled
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[tcp_current]), \
+    with patch(
+        "detect.tcp_scan.tcp_scan_port_state",
+        return_value=_tcp_result([tcp_current], {23: "open"}),
+    ), \
          patch("detect.udp_scan.udp_scan", side_effect=UdpScanCancelled("cancelled")):
         result = _run_verify(SESSION)
 
@@ -256,7 +288,7 @@ def test_persistence_error_never_reports_verify_success():
     original = make_finding()
     db.save_finding(original)
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[]), \
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "closed"})), \
          patch.object(db, "update_finding_status", side_effect=RuntimeError("database locked")):
         result = runner.invoke(
             app,
@@ -291,7 +323,10 @@ def test_duplicate_current_fingerprint_is_persisted_once():
     first.id = "scanner-result-one"
     second.id = "scanner-result-two"
 
-    with patch("detect.tcp_scan.tcp_scan", return_value=[first, second]):
+    with patch(
+        "detect.tcp_scan.tcp_scan_port_state",
+        return_value=_tcp_result([first, second], {23: "open"}),
+    ):
         result = _run_verify(SESSION, original.id)
 
     assert result["status"] == "SUCCESS"
@@ -308,6 +343,17 @@ def test_accepted_finding_is_excluded_and_nonconclusive():
     assert result["status"] == "PARTIAL"
     assert result["inconclusive"][0].id == accepted.id
     assert db.get_finding_by_id(SESSION, accepted.id).status == FindingStatus.ACCEPTED
+
+
+@pytest.mark.parametrize("state", ["open", "closed", "filtered"])
+def test_tcp_xml_parser_preserves_port_state(state):
+    xml = f"""<?xml version=\"1.0\"?>
+<nmaprun><host><address addr=\"192.168.10.10\" addrtype=\"ipv4\"/>
+<ports><port protocol=\"tcp\" portid=\"23\"><state state=\"{state}\"/></port></ports>
+</host></nmaprun>"""
+    findings, states = _parse_tcp_xml_with_states(xml, "192.168.10.10", SESSION)
+    assert states[23] == state
+    assert bool(findings) is (state == "open")
 
 
 def test_cli_renders_verify_summary():

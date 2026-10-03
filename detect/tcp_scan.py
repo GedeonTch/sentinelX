@@ -33,7 +33,8 @@ Rules enforced here:
 
 import subprocess
 import xml.etree.ElementTree as ET
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import typer
 
@@ -70,6 +71,14 @@ class TcpScanFailed(Exception):
 
 class TcpScanCancelled(Exception):
     """Raised when the user cancels a TCP scan."""
+
+
+@dataclass(frozen=True)
+class TcpPortScanResult:
+    """Open findings and Nmap states returned by one TCP scan."""
+
+    findings: List[Finding]
+    states: Dict[int, str]
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +154,48 @@ def tcp_scan(
     return findings
 
 
+def tcp_scan_port_state(
+    target: str,
+    session_id: str,
+    profile: str = "normal",
+    ports: str = DEFAULT_PORTS,
+    auto_confirm: bool = False,
+) -> TcpPortScanResult:
+    """Run one TCP scan and retain Nmap's state for every scanned port.
+
+    This is used by VERIFY, where an absent open Finding is not enough to
+    distinguish a closed port from a filtered port.
+    """
+    if profile not in PROFILE_FLAGS:
+        profile = "normal"
+
+    if not auto_confirm:
+        confirmed = typer.confirm(
+            f"[tcp_scan] Scan TCP ports {ports} on {target} (profile: {profile})?"
+        )
+        if not confirmed:
+            raise TcpScanCancelled(f"User cancelled TCP scan for {target}")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}[/cyan]"),
+        transient=True,
+    ) as progress:
+        progress.add_task(f"nmap TCP scan → {target}", total=None)
+        xml_output = _run_nmap_tcp(target, profile, ports)
+
+    if not xml_output:
+        raise TcpScanFailed(f"Nmap TCP scan returned no result for {target}")
+
+    try:
+        ET.fromstring(xml_output)
+    except ET.ParseError as exc:
+        raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
+
+    findings, states = _parse_tcp_xml_with_states(xml_output, target, session_id)
+    return TcpPortScanResult(findings=findings, states=states)
+
+
 # ---------------------------------------------------------------------------
 # nmap subprocess
 # ---------------------------------------------------------------------------
@@ -188,11 +239,11 @@ def _run_nmap_tcp(target: str, profile: str, ports: str) -> Optional[str]:
 # XML parser
 # ---------------------------------------------------------------------------
 
-def _parse_tcp_xml(
+def _parse_tcp_xml_with_states(
     xml_output: str,
     target: str,
     session_id: str,
-) -> List[Finding]:
+) -> tuple[List[Finding], Dict[int, str]]:
     """Parse nmap XML output and build one Finding per open TCP port.
 
     Only ports with state="open" produce a Finding.
@@ -209,15 +260,17 @@ def _parse_tcp_xml(
         session_id: Current audit session ID.
 
     Returns:
-        List[Finding]: One per open port.
+        Tuple[List[Finding], Dict[int, str]]: Open findings and the Nmap state
+        for every scanned TCP port.
     """
     try:
         root = ET.fromstring(xml_output)
     except ET.ParseError:
         display("[red]Failed to parse nmap TCP XML output.[/red]")
-        return []
+        return [], {}
 
     findings = []
+    states: Dict[int, str] = {}
 
     for host in root.findall("host"):
         # Use the actual IP from the XML (may differ from target if hostname given)
@@ -233,10 +286,12 @@ def _parse_tcp_xml(
                 continue
 
             state_elem = port_elem.find("state")
-            if state_elem is None or state_elem.get("state") != "open":
+            port_num = int(port_elem.get("portid", 0))
+            state = state_elem.get("state", "unknown") if state_elem is not None else "unknown"
+            states[port_num] = state
+            if state != "open":
                 continue  # NEVER report closed or filtered ports
 
-            port_num = int(port_elem.get("portid", 0))
             service_elem = port_elem.find("service")
             service_name, service_version, confidence = _extract_service(service_elem)
 
@@ -260,6 +315,16 @@ def _parse_tcp_xml(
                 risk_score=None,
             ))
 
+    return findings, states
+
+
+def _parse_tcp_xml(
+    xml_output: str,
+    target: str,
+    session_id: str,
+) -> List[Finding]:
+    """Parse Nmap XML while preserving the existing open-finding contract."""
+    findings, _ = _parse_tcp_xml_with_states(xml_output, target, session_id)
     return findings
 
 

@@ -642,7 +642,11 @@ def _finding_fingerprint(finding: Finding, session: dict) -> str:
 
 def _verify_control(finding: Finding, session: dict) -> dict:
     """Run the smallest real control capable of verifying one Finding."""
-    from detect.tcp_scan import TcpScanCancelled, TcpScanFailed, tcp_scan
+    from detect.tcp_scan import (
+        TcpScanCancelled,
+        TcpScanFailed,
+        tcp_scan_port_state,
+    )
     from detect.udp_scan import UdpScanCancelled, UdpScanFailed, udp_scan
 
     module = finding.module
@@ -650,15 +654,32 @@ def _verify_control(finding: Finding, session: dict) -> dict:
     target_ip = finding.target_ip
     session_id = session["id"]
 
+    def run_tcp_control(ports: str) -> dict:
+        """Run one TCP control and preserve the target port state."""
+        result = tcp_scan_port_state(
+            target_ip, session_id, profile=profile,
+            ports=ports, auto_confirm=True,
+        )
+        state = result.states.get(finding.target_port, "unknown")
+        if state == "filtered":
+            return {
+                "state": "PARTIAL",
+                "findings": [],
+                "detail": f"TCP port {finding.target_port} is filtered",
+            }
+        if state not in {"open", "closed"}:
+            return {
+                "state": "PARTIAL",
+                "findings": [],
+                "detail": f"TCP port {finding.target_port} state is unknown",
+            }
+        return {"state": "SUCCESS", "findings": result.findings, "detail": "TCP control completed"}
+
     try:
         if module == "tcp_scan":
             if finding.target_port is None:
                 return {"state": "PARTIAL", "findings": [], "detail": "TCP Finding has no port"}
-            current = tcp_scan(
-                target_ip, session_id, profile=profile,
-                ports=str(finding.target_port), auto_confirm=True,
-            )
-            return {"state": "SUCCESS", "findings": current, "detail": "TCP control completed"}
+            return run_tcp_control(str(finding.target_port))
 
         if module == "udp_scan":
             if finding.target_port is None:
@@ -679,10 +700,10 @@ def _verify_control(finding: Finding, session: dict) -> dict:
                 ports="161", auto_confirm=True,
             )
         elif rule == "http_no_https":
-            current = tcp_scan(
-                target_ip, session_id, profile=profile,
-                ports="80,443", auto_confirm=True,
-            )
+            tcp_result = run_tcp_control("80,443")
+            if tcp_result["state"] != "SUCCESS":
+                return tcp_result
+            current = tcp_result["findings"]
         elif rule in {
             "telnet_exposed",
             "ftp_plaintext",
@@ -692,10 +713,10 @@ def _verify_control(finding: Finding, session: dict) -> dict:
         }:
             if finding.target_port is None:
                 return {"state": "PARTIAL", "findings": [], "detail": "Misconfiguration has no port"}
-            current = tcp_scan(
-                target_ip, session_id, profile=profile,
-                ports=str(finding.target_port), auto_confirm=True,
-            )
+            tcp_result = run_tcp_control(str(finding.target_port))
+            if tcp_result["state"] != "SUCCESS":
+                return tcp_result
+            current = tcp_result["findings"]
         else:
             return {
                 "state": "PARTIAL",
