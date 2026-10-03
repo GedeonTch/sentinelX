@@ -189,13 +189,6 @@ def tcp_scan_port_state(
             for item in findings
             if item.target_port is not None
         }
-        if not states:
-            try:
-                target_port = int(ports)
-            except (TypeError, ValueError):
-                target_port = None
-            if target_port is not None:
-                states[target_port] = "closed"
     return TcpPortScanResult(findings=list(findings), states=states)
 
 

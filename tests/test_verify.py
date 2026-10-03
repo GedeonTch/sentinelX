@@ -105,6 +105,19 @@ def test_filtered_port_is_partial_and_never_verified():
     assert stored.status == FindingStatus.OPEN
 
 
+def test_legacy_empty_tcp_list_is_unknown_not_closed():
+    original = make_finding()
+    db.save_finding(original)
+
+    with patch("detect.tcp_scan.tcp_scan", return_value=[]):
+        result = _run_verify(SESSION, original.id)
+
+    stored = db.get_finding_by_id(SESSION, original.id)
+    assert result["status"] == "PARTIAL"
+    assert result["inconclusive"][0].id == original.id
+    assert stored.status == FindingStatus.OPEN
+
+
 def test_verified_finding_that_reappears_becomes_open():
     original = make_finding(status=FindingStatus.VERIFIED)
     db.save_finding(original)
