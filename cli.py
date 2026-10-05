@@ -245,6 +245,16 @@ def _run_pipeline(
         update_finding_risk_score,
     )
 
+    # Track successful persistence operations by internal Finding identity.
+    # Several pipeline stages save the same session, so counting only the final
+    # scored collection would omit Findings saved by earlier stages.
+    persisted_by_id = {}
+
+    def persist_findings(items: List[Finding]) -> None:
+        save_findings(items)
+        for item in items:
+            persisted_by_id[item.id] = item
+
     # ── Step 1 — Session ──────────────────────────────────────────────────
     try:
         session_id = session or f"session-{uuid.uuid4().hex[:8]}"
@@ -273,7 +283,7 @@ def _run_pipeline(
             host_findings = fingerprint(target, session_id, auto_confirm=auto_confirm)
             if host_findings:
                 discover_status = "OK"
-                save_findings(host_findings)
+                persist_findings(host_findings)
                 active_ips = list({f.target_ip for f in host_findings if f.target_ip})
                 result.add("discover", "ok", f"{len(active_ips)} host(s) found")
             else:
@@ -330,7 +340,7 @@ def _run_pipeline(
                 tcp_status = "partial"
             result.add("tcp_scan", tcp_status, tcp_detail, failed_hosts=tcp_failed_hosts)
             if all_tcp_findings:
-                save_findings(all_tcp_findings)
+                persist_findings(all_tcp_findings)
 
         # ── Step 4 — UDP scan ─────────────────────────────────────────────────
         all_udp_findings = []
@@ -367,7 +377,7 @@ def _run_pipeline(
                 udp_status = "partial"
             result.add("udp_scan", udp_status, udp_detail, failed_hosts=udp_failed_hosts)
             if all_udp_findings:
-                save_findings(all_udp_findings)
+                persist_findings(all_udp_findings)
 
         # ── Step 5 — CVE enrichment ───────────────────────────────────────────
         all_port_findings = all_tcp_findings + all_udp_findings
@@ -447,17 +457,18 @@ def _run_pipeline(
             result.add("risk_scoring", "failed", str(exc))
 
         # ── Step 9 — Persist final findings ───────────────────────────────────
-        result.findings_count = len(scored)
         try:
-            save_findings(scored)
+            persist_findings(scored)
             for f in scored:
                 if f.risk_score is not None:
                     update_finding_risk_score(session_id, f.id, f.risk_score)
-            result.add("persist", "ok", f"{len(scored)} finding(s) saved")
+            result.findings_count = len(persisted_by_id)
+            result.add("persist", "ok", f"{result.findings_count} finding(s) saved")
         except Exception as exc:
+            result.findings_count = len(persisted_by_id)
             result.add("persist", "failed", str(exc))
 
-        return scored
+        return list(persisted_by_id.values())
 
     except Exception:
         session_close_status = "failed"

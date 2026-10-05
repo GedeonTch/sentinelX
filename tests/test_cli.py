@@ -281,7 +281,8 @@ class TestScan:
             tcp_outcomes=[[], []], udp_outcomes=[[], []]
         )
 
-        assert produced == []
+        assert len(produced) == 2
+        assert result.findings_count == 2
         close_session.assert_called_once_with(
             close_session.call_args.args[0], status="completed", discover_status="OK"
         )
@@ -405,7 +406,9 @@ class TestScan:
             )
 
         assert result.overall_status == "SUCCESS"
-        assert produced == [finding]
+        assert result.findings_count == 3
+        assert len(produced) == 3
+        assert finding.id in {item.id for item in produced}
         assert "session_close" not in {step.name for step in result.steps}
         close_session.assert_called_once()
         assert any(
@@ -449,7 +452,8 @@ class TestScan:
         )
 
         explanation_step = next(s for s in result.steps if s.name == "explanation")
-        assert produced == []
+        assert len(produced) == 2
+        assert result.findings_count == 2
         assert explanation_step.status == "ok"
         assert result.overall_status == "SUCCESS"
         close_session.assert_called_once_with(
@@ -593,6 +597,51 @@ class TestScan:
         """A positive confirmation runs the complete pipeline without network I/O."""
         result, _, _ = self._run_scan_with_stubbed_pipeline("192.168.1.1", "normal")
         assert "Session:" in result.output
+
+    def test_scan_counter_matches_successfully_persisted_findings(self):
+        result, produced, _, _, _ = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[], []],
+            udp_outcomes=[[], []],
+        )
+
+        # Two discovery Findings were persisted even though no port Finding
+        # existed. The displayed counter must reflect both persisted rows.
+        assert result.findings_count == 2
+        assert len(produced) == 2
+
+    def test_scan_counter_for_single_finding(self):
+        finding = make_finding(module="device_fingerprint", target_ip="192.168.1.10")
+        result = self._run_scan_with_discovery_outcome(return_value=[finding])
+
+        assert result.exit_code == 0
+        # This scan produced and persisted exactly one Finding.
+        assert "Findings: 1" in result.output
+
+    def test_scan_counter_for_multiple_modules(self):
+        tcp_finding = make_finding(
+            module="tcp_scan", target_ip="192.168.1.10", target_port=9999,
+            target_service="custom-tcp",
+        )
+        udp_finding = make_finding(
+            module="udp_scan", target_ip="192.168.1.20", target_port=9998,
+            target_service="custom-udp",
+        )
+        result, produced, _, _, _ = self._run_pipeline_with_port_outcomes(
+            tcp_outcomes=[[tcp_finding], [tcp_finding]],
+            udp_outcomes=[[udp_finding], [udp_finding]],
+            scored_findings=[tcp_finding, udp_finding],
+        )
+
+        assert result.findings_count == 4  # 2 discovery + TCP + UDP
+        assert len({finding.id for finding in produced}) == 4
+
+    def test_scan_with_empty_discovery_reports_zero_persisted_findings(self):
+        result, _, _, close_session = self._run_scan_with_discovery_outcome(
+            return_value=[], expose_mocks=True
+        )
+
+        assert "Findings: 0" in result.output
+        close_session.assert_called_once()
 
     def test_scan_stealth_profile_accepted(self):
         """The stealth profile is accepted and reaches the stubbed pipeline."""
@@ -797,8 +846,9 @@ class TestScanSummary:
 
             produced = _run_pipeline("192.168.1.1", "normal", None, False, result)
 
-        assert produced == [finding]
-        assert result.findings_count == 1
+        assert len(produced) == 2
+        assert finding.id in {item.id for item in produced}
+        assert result.findings_count == 2
         assert result.overall_status == "PARTIAL"
 
         with patch("cli.display") as display:
@@ -812,7 +862,7 @@ class TestScanSummary:
         output = StringIO()
         Console(file=output, width=80).print(table)
         rendered_table = output.getvalue()
-        assert "HIGH" in rendered_table and "1" in rendered_table
+        assert "HIGH" in rendered_table and "2" in rendered_table
 
 
 # ---------------------------------------------------------------------------
