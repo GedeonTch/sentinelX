@@ -249,22 +249,99 @@ Finding created
 | 0.85 Probable | Strong deduction, banner grabbing | Version inferred from HTTP/SSH banner |
 | 0.60 Possible | Estimation, behavioral fingerprint | OS estimated by TTL and TCP behavior |
 
-If `confidence < 0.7` → Finding displayed in grey, marked "unconfirmed", excluded from global score calculation.
+If `confidence < 0.7` → Finding displayed in grey and marked "unconfirmed". Its Finding-level `risk_score` remains determined by the documented model; V1 has no Global Risk Score from which to exclude it.
 
 ---
 
-## H. Scoring Formula — Never a Black Box
+## H. V1 Finding Risk and Network Summary — Never a Black Box
+
+### Finding-level risk
+
+The `risk_score` belongs to one Finding and remains deterministic:
 
 ```text
 risk_score = min(100, base_severity × confidence_factor × exposure_factor)
 ```
 
-- **Base**: CVSS × 10 if known — otherwise Critical=90, High=70, Medium=45, Low=20, Info=5
-- **Confidence**: Confirmed ×1.00 · Probable ×0.85 · Possible ×0.60
-- **Exposure**: External ×1.15 · Internal ×1.00
-- **Global network score** = worst open Finding — never an average
-- **Coefficients** stored in `config.yaml` — modifiable, tested on 5+ real cases before release
-- **Formula** always appears in every generated report
+V1 configuration:
+
+```text
+Critical = 90    High = 70    Medium = 45    Low = 20    Info = 5
+Confirmed = 1.00    Probable = 0.85    Possible = 0.60
+External = 1.15    Internal = 1.00
+```
+
+- `risk_score` represents the current risk of **this Finding according to SentinelX policy**.
+- It is not a probability, a universal risk measure, or a universal CVSS score.
+- CVSS/Severity and SentinelX `risk_score` remain distinct concepts.
+- `base_severity` uses the configured SentinelX severity values above. CVSS remains separate metadata/concept and does not become a universal score or replace the SentinelX policy values.
+- Coefficients are stored in `config.yaml`, tested on at least 5 real cases, and the formula appears in every generated report.
+
+### No Global Risk Score in V1
+
+V1 does **not** define a single `Global Risk Score`, `Network Risk Score`, or `Overall Network Health` value intended to represent the complete posture of a network. Do not replace the maximum with an average or another arbitrary composite formula.
+
+The maximum may be shown only as: **Worst Current Threat**.
+
+> **Worst Current Threat** is the highest current `risk_score` among currently observed OPEN Findings. It answers: “What is the worst problem currently observed?” It is not a complete network posture score.
+
+### V1 network summary
+
+A session summary may expose these concepts separately:
+
+```text
+Worst Current Threat
+Highest Severity
+Targets with open findings
+Assessment Completeness
+Discovery / Assessment State
+Priority Target
+Main Open Problems
+```
+
+- **Highest Severity** is the maximum severity among OPEN Findings and remains visible separately from the numeric score. Example: `Highest Severity: Critical (potential)` and `Worst Current Threat: 54`.
+- **Targets with open findings** is the number of distinct observed IPs in the session with at least one OPEN Finding, for example `3 / 4`. Do not call them infected machines or affected assets; an OPEN Finding is an observed problem/exposure, not proof of compromise.
+- **Assessment Completeness** describes observed targets actually assessed, for example `20 targets observed`, `19 assessed`, `Assessment Completeness: 95%`. Do not automatically call this Network Coverage: SentinelX may not know every host actually present.
+- **Discovery / Assessment State** must remain explicit: `OK`, `PARTIAL`, `DEGRADED`, `NO_HOSTS_OBSERVED`, or `UNKNOWN`. `0 findings` never means clean, and `DISCOVER = EMPTY` never means `risk = 0` or network clean. `NOT_OBSERVED ≠ ABSENT`.
+- **Priority Target** is the currently observed target carrying the OPEN Finding with the highest current `risk_score`. It may include the Finding reason, but must not be described as compromised solely on this basis.
+- **Main Open Problems** may list OPEN Findings for prioritization and allow detail by target. This is informative and is not a new risk aggregation formula.
+
+### Finding identity, duplication, and accumulation
+
+Do not invent a universal deduplication key. `Finding` has no `instance_id`, no uniform root-cause ID, `target_service` has module-dependent semantics, and VERIFY fingerprinting is session-scoped. Therefore, same service does not imply same problem; multiple evidence items do not imply multiple risks; and multiple instances do not imply multiple causes. A reliable “same vulnerability on N targets” blast-radius indicator is out of scope until robust vulnerability identity exists.
+
+The number of Findings on a target must never multiply risk. It may be displayed as **Open observations**, but not as the number of distinct vulnerabilities without reliable identity. Duplicating one observation must not artificially increase risk.
+
+### VERIFY and lifecycle
+
+`OPEN → VERIFIED` means the problem is currently fixed. The Finding keeps its history and metadata: `severity`, `cvss`, `cve_refs`, `evidence`, `explanation`, `remediation`, and identity metadata. VERIFIED Findings are excluded from current risk. `VERIFIED → OPEN` restores the current risk calculated by the Finding-level model.
+
+`PARTIAL` and `FAILED` are VERIFY result states, not persisted `FindingStatus` values, and must never be treated as “fixed”.
+
+### Scoring and aggregation invariants
+
+The future scoring and summary implementation must be:
+
+```text
+- deterministic / idempotent
+- adding a real problem never decreases risk
+- decreasing confidence cannot increase risk
+- removing a false positive cannot increase risk
+- duplicating one observation does not multiply risk artificially
+- adding a clean target does not artificially decrease Worst Current Threat
+- OPEN → VERIFIED decreases current risk
+- VERIFIED → OPEN restores current risk
+- insufficient assessment is never presented as clean
+- NOT_OBSERVED ≠ ABSENT
+```
+
+### V1+ / V2 scope
+
+The following are explicitly out of V1 scope: persistent asset identity for classic scans; stable Finding identity across sessions; inter-session trends; recurrence; freshness / `last_seen` / `last_scanned`; reliable vulnerability blast radius; Asset Criticality; threat intelligence / EPSS / KEV; temporal scoring; a single composite posture + coverage formula; and a proprietary complex model such as Tenable/Qualys.
+
+### T05 gate
+
+**T05 is suspended until this contract is implemented.** T05 must address current Finding risk and VERIFY transitions; it must not recreate a Global Risk Score for the network.
 
 ---
 
@@ -344,7 +421,7 @@ netlab findings show 1
 netlab findings explain 1
 netlab findings rescan --session S001
 netlab sentinel start --target 192.168.1.0/24
-netlab sentinel status --session <id>
+netlab sentinel status [--network <network_id>]
 netlab sentinel stop --session <id>
 netlab report generate --session S001 --format html
 netlab report generate --session S001 --format json
