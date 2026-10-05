@@ -107,6 +107,7 @@ def enrich_findings(findings: List[Finding]) -> List[Finding]:
             service=finding.target_service,
             product=product_context,
             version=_extract_version(finding.service_version),
+            raw_version=finding.service_version,
         )
 
         if cve_entry:
@@ -132,6 +133,7 @@ def _lookup_cve(
     product: str,
     version: Optional[str],
     kb_entries: Optional[List[Dict]] = None,
+    raw_version: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Find the best matching CVE entry for a service/product/version.
 
@@ -154,13 +156,35 @@ def _lookup_cve(
     """
     entries = kb_entries if kb_entries is not None else _KB_ENTRIES
     candidates = []
+    detected_version = raw_version if raw_version is not None else product
+    qualification = _qualify_version(detected_version, version)
 
     for entry in entries:
         if not _service_matches(service, entry.get("service", "")):
             continue
         if not _product_matches(product, entry.get("product", "")):
             continue
-        if not _version_in_range(
+
+        requires_confirmation = entry.get("requires_version_confirmation", False)
+        if requires_confirmation:
+            if qualification == "exact":
+                if _matches_version_labels(
+                    detected_version,
+                    entry.get("not_affected_versions", []),
+                ):
+                    continue
+                affected = entry.get("affected_versions")
+                if affected and not _matches_version_labels(detected_version, affected):
+                    continue
+                if not _version_in_range(
+                    version,
+                    entry.get("version_gte"),
+                    entry.get("version_lte"),
+                ):
+                    continue
+            # Missing, ambiguous, or incomplete versions remain candidates:
+            # _apply_cve() will mark them POSSIBLE rather than CONFIRMED.
+        elif not _version_in_range(
             version,
             entry.get("version_gte"),
             entry.get("version_lte"),
@@ -207,6 +231,40 @@ def _product_matches(detected_version_str: str, entry_product: str) -> bool:
     if not entry_product:
         return True  # no product constraint — match any
     return entry_product.lower() in detected_version_str.lower()
+
+
+def _qualify_version(raw_version: str, parsed_version: Optional[str]) -> str:
+    """Classify a banner as exact, ambiguous, or incomplete.
+
+    This deliberately does not decide CVE applicability. It only determines
+    whether the banner is precise enough for a KB entry requiring confirmation.
+    """
+    import re
+
+    text = (raw_version or "").strip()
+    if not text:
+        return "missing"
+    if re.search(r"\s(?:-|–|—|to)\s|\d\s*/\s*\d|\b(?:or|and)\b|[0-9][+*]", text, re.IGNORECASE):
+        return "ambiguous"
+    if parsed_version:
+        if re.search(r"\b\d+(?:\.\d+)*\.(?:x|X|\*)\b|\b\d+(?:\.x|\.X|\.\*)", text):
+            return "incomplete"
+        return "exact"
+    # Windows banners often identify an exact release without semver syntax.
+    if re.search(
+        r"\b(?:windows\s+(?:server\s+)?(?:xp|vista|7|8(?:\.1)?|10|11)|"
+        r"windows\s+server\s+\d{4}(?:\s+r\d)?)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "exact"
+    return "incomplete"
+
+
+def _matches_version_labels(raw_version: str, labels: List[str]) -> bool:
+    """Return whether one exact banner contains one KB OS/version label."""
+    normalized = " ".join((raw_version or "").lower().split())
+    return any(" ".join(str(label).lower().split()) in normalized for label in labels)
 
 
 def _version_in_range(
@@ -302,8 +360,14 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
     new_cve_refs = cve_entry.get("cve_refs", [])
     requires_version = cve_entry.get("requires_version_confirmation", False)
 
-    if requires_version and not finding.service_version:
-        # Version required but not detected — preserve severity, lower confidence
+    version_qualification = _qualify_version(
+        finding.service_version,
+        _extract_version(finding.service_version),
+    )
+
+    if requires_version and version_qualification != "exact":
+        # Version required but missing, ambiguous, or incomplete — preserve
+        # severity but lower confidence because applicability is unconfirmed.
         new_confidence = Confidence.POSSIBLE
         version_note = (
             "\n[service_detection] Version not confirmed. "

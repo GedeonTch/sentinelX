@@ -29,6 +29,7 @@ from detect.service_detection import (
     _version_in_range,
     _extract_version,
     _apply_cve,
+    _load_kb,
 )
 
 
@@ -409,6 +410,21 @@ class TestEnrichFindings:
 # A1 — requires_version_confirmation tests
 # ---------------------------------------------------------------------------
 
+KB_SMB_VERSION_SCOPED = {
+    "service": "microsoft-ds",
+    "product": "",
+    "version_gte": None,
+    "version_lte": None,
+    "requires_version_confirmation": True,
+    "affected_versions": ["Windows 7", "Windows Server 2008"],
+    "not_affected_versions": ["Windows Server 2016", "Windows Server 2019"],
+    "cve_refs": ["CVE-2017-0144"],
+    "cvss_score": 9.3,
+    "severity": "critical",
+    "description": "EternalBlue — affected Windows releases only",
+}
+
+
 KB_SMB_NO_VERSION_REQUIRED = {
     "service": "microsoft-ds",
     "product": "",
@@ -452,6 +468,59 @@ def make_finding_no_version(service: str, port: int) -> Finding:
 
 
 class TestRequiresVersionConfirmation:
+
+    def test_exact_affected_version_keeps_normal_confirmation(self):
+        finding = make_finding(
+            service="microsoft-ds",
+            service_version="Windows 7",
+            confidence=Confidence.CONFIRMED,
+        )
+        result = _apply_cve(finding, KB_SMB_VERSION_SCOPED)
+        assert result.confidence == Confidence.CONFIRMED
+        assert result.severity == Severity.CRITICAL
+
+    def test_exact_non_affected_version_is_excluded(self):
+        finding = make_finding(
+            service="microsoft-ds",
+            service_version="Windows Server 2016",
+        )
+        assert _lookup_cve(
+            "microsoft-ds",
+            finding.service_version,
+            None,
+            kb_entries=[KB_SMB_VERSION_SCOPED],
+        ) is None
+
+    def test_real_eternalblue_kb_excludes_windows_server_2016(self):
+        finding = make_finding(
+            service="microsoft-ds",
+            service_version="Microsoft Windows Server 2016",
+        )
+        from unittest.mock import patch
+        import detect.service_detection as sd
+        with patch.object(sd, "_KB_ENTRIES", _load_kb()):
+            result = enrich_findings([finding])
+        assert result[0].cve_refs == []
+        assert result[0].severity == Severity.INFO
+
+    def test_smb_ambiguous_range_is_possible(self):
+        finding = make_finding(
+            service="microsoft-ds",
+            service_version="Windows Server 2008 R2 - 2012",
+            confidence=Confidence.CONFIRMED,
+        )
+        result = _apply_cve(finding, KB_SMB_VERSION_SCOPED)
+        assert result.confidence == Confidence.POSSIBLE
+        assert result.severity == Severity.CRITICAL
+
+    def test_smb_incomplete_banner_is_possible(self):
+        finding = make_finding(
+            service="microsoft-ds",
+            service_version="Microsoft Windows Server",
+            confidence=Confidence.CONFIRMED,
+        )
+        result = _apply_cve(finding, KB_SMB_VERSION_SCOPED)
+        assert result.confidence == Confidence.POSSIBLE
 
     def test_smb_no_version_confidence_is_possible(self):
         """Port 445, version inconnue → confidence forcée à POSSIBLE."""
