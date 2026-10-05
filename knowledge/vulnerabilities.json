@@ -92,6 +92,18 @@
       "what": "Des credentials par défaut ont été acceptés par ce service. Les équipements et logiciels sont souvent livrés avec des comptes administrateurs préconfigurés (admin/admin, admin/password, root/root...) que les administrateurs oublient de changer lors de l'installation.",
       "attack": "Un attaquant qui réussit à s'authentifier avec des credentials par défaut obtient un accès complet au service. Pour les équipements réseau (routeurs, switches), cela signifie le contrôle total du réseau. Pour les services applicatifs (bases de données, interfaces web), cela expose toutes les données.",
       "defense": "Changer tous les mots de passe par défaut immédiatement lors de l'installation. Utiliser un gestionnaire de mots de passe ou un coffre-fort d'entreprise (Vault, CyberArk). Auditer régulièrement les comptes et désactiver ceux inutilisés. Activer l'authentification multi-facteurs partout où c'est possible."
+    },
+
+    "cve_2011_2523": {
+      "what": "vsftpd 2.3.4 contient une backdoor intentionnellement introduite dans le code source le 3 juillet 2011. Lorsqu'un nom d'utilisateur se terminant par le caractère ':)' (smiley) est soumis sur le port 21, le démon ouvre un shell root sans authentification sur le port 6200. Cette backdoor a été retirée le 4 juillet 2011 après découverte, mais les systèmes non mis à jour restent exposés.",
+      "attack": "L'exploitation est triviale : se connecter en FTP avec le login 'user:)' et n'importe quel mot de passe. vsftpd ouvre alors un shell root sur le port 6200/tcp. La connexion à ce port donne un accès root complet au système sans aucune autre action. L'exploit est intégré dans Metasploit (exploit/unix/ftp/vsftpd_234_backdoor) et reproductible en quelques secondes.",
+      "defense": "Mettre à jour vsftpd vers la version 3.0.x ou supérieure immédiatement. Vérifier l'intégrité du binaire installé (md5sum/sha256sum contre les checksums officiels). Bloquer le port 6200/tcp au niveau firewall. Remplacer FTP par SFTP (port 22, intégré à OpenSSH) pour éliminer la surface d'attaque FTP."
+    },
+
+    "cve_2017_0144": {
+      "what": "EternalBlue (CVE-2017-0144) est une vulnérabilité critique dans l'implémentation de SMBv1 de Microsoft. Elle permet une exécution de code à distance sans authentification via un défaut de gestion de la mémoire dans le traitement des transactions SMB. Découverte par la NSA, publiée par le groupe Shadow Brokers en avril 2017, elle a servi de vecteur principal aux ransomwares WannaCry et NotPetya qui ont infecté des centaines de milliers de machines en 2017. Elle n'affecte que Windows XP, Vista, 7, Server 2003 et Server 2008 — les versions antérieures à Windows 8/Server 2012.",
+      "attack": "L'attaque envoie un paquet SMBv1 malformé sur le port 445/tcp. Aucune authentification n'est requise. L'exploit déclenche un buffer overflow dans le driver srv.sys du noyau Windows, permettant l'exécution de shellcode arbitraire en mode kernel. Metasploit dispose d'un module complet (exploit/windows/smb/ms17_010_eternalblue). WannaCry utilisait cet exploit pour se propager de machine en machine de façon autonome (worm) sur les réseaux internes.",
+      "defense": "Appliquer le patch MS17-010 de Microsoft (disponible même pour Windows XP en raison de la gravité). Désactiver SMBv1 : 'Set-SmbServerConfiguration -EnableSMB1Protocol $false' (PowerShell). Bloquer le port 445/tcp sur le périmètre et entre segments réseau. Vérifier l'exposition avec : 'nmap --script smb-vuln-ms17-010 -p 445 <ip>'."
     }
   }
 }

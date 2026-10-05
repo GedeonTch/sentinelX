@@ -20,6 +20,7 @@ from knowledge.knowledge_base import (
     list_rule_ids,
     _lookup,
     _resolution_candidates,
+    _cve_to_rule_key,
 )
 
 
@@ -298,3 +299,223 @@ class TestRealKbFormat:
     def test_get_explanation_returns_none_for_unknown(self):
         result = get_explanation("this_rule_does_not_exist")
         assert result is None
+
+# ---------------------------------------------------------------------------
+# _cve_to_rule_key — normalisation helper
+# ---------------------------------------------------------------------------
+
+class TestCveToRuleKey:
+    def test_uppercase_cve_normalised(self):
+        assert _cve_to_rule_key("CVE-2011-2523") == "cve_2011_2523"
+
+    def test_lowercase_cve_normalised(self):
+        assert _cve_to_rule_key("cve-2017-0144") == "cve_2017_0144"
+
+    def test_mixed_case_normalised(self):
+        assert _cve_to_rule_key("Cve-2019-0708") == "cve_2019_0708"
+
+    def test_strips_surrounding_whitespace(self):
+        assert _cve_to_rule_key("  CVE-2011-2523  ") == "cve_2011_2523"
+
+    def test_empty_string(self):
+        assert _cve_to_rule_key("") == ""
+
+
+# ---------------------------------------------------------------------------
+# get_explanation_for_finding — CVE lookup priority
+# ---------------------------------------------------------------------------
+
+CVE_TEST_RULES: Dict[str, Dict[str, str]] = {
+    "tcp_scan": {
+        "what": "Generic TCP scan explanation.",
+        "attack": "Generic attack.",
+        "defense": "Generic defense.",
+    },
+    "cve_2011_2523": {
+        "what": "vsftpd 2.3.4 backdoor specific explanation.",
+        "attack": "Connect port 6200 after trigger.",
+        "defense": "Upgrade vsftpd.",
+    },
+    "cve_2017_0144": {
+        "what": "EternalBlue SMBv1 specific explanation.",
+        "attack": "Unauthenticated RCE via port 445.",
+        "defense": "Disable SMBv1 and apply MS17-010.",
+    },
+}
+
+
+class TestCveLookupPriority:
+    def test_cve_rule_beats_module_rule(self):
+        """CVE-specific rule must win over the generic module rule."""
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="ftp",
+                cve_refs=["CVE-2011-2523"],
+            )
+        assert result is not None
+        assert "vsftpd" in result.what
+
+    def test_cve_2011_2523_returns_specific_explanation(self):
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="ftp",
+                cve_refs=["CVE-2011-2523"],
+            )
+        assert result is not None
+        assert result.what != ""
+        assert result.attack != ""
+        assert result.defense != ""
+        assert "vsftpd" in result.what
+
+    def test_cve_2017_0144_returns_specific_explanation(self):
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="microsoft-ds",
+                cve_refs=["CVE-2017-0144"],
+            )
+        assert result is not None
+        assert "EternalBlue" in result.what
+
+    def test_what_attack_defense_non_empty_for_cve_2011_2523(self):
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="ftp",
+                cve_refs=["CVE-2011-2523"],
+            )
+        assert result is not None
+        assert len(result.what) > 0
+        assert len(result.attack) > 0
+        assert len(result.defense) > 0
+
+    def test_unknown_cve_falls_back_to_module(self):
+        """Unknown CVE ref must fall back to module/service lookup."""
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="",
+                cve_refs=["CVE-9999-9999"],
+            )
+        assert result is not None
+        assert "Generic" in result.what
+
+    def test_empty_cve_refs_uses_module_fallback(self):
+        """Empty cve_refs list must behave identically to no cve_refs."""
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result_no_cve = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="",
+            )
+            result_empty_cve = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="",
+                cve_refs=[],
+            )
+        assert result_no_cve is not None
+        assert result_empty_cve is not None
+        assert result_no_cve.what == result_empty_cve.what
+
+    def test_none_cve_refs_uses_module_fallback(self):
+        """None cve_refs must behave identically to no cve_refs."""
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="",
+                cve_refs=None,
+            )
+        assert result is not None
+        assert "Generic" in result.what
+
+    def test_first_matching_cve_wins(self):
+        """When multiple CVE refs are passed, first match wins."""
+        with patch.object(kb, "_RULES", CVE_TEST_RULES):
+            result = get_explanation_for_finding(
+                module="tcp_scan",
+                target_service="ftp",
+                cve_refs=["CVE-9999-0000", "CVE-2011-2523", "CVE-2017-0144"],
+            )
+        assert result is not None
+        assert "vsftpd" in result.what  # CVE-2011-2523 found before CVE-2017-0144
+
+
+# ---------------------------------------------------------------------------
+# Real KB — CVE rules present and complete
+# ---------------------------------------------------------------------------
+
+class TestRealKbCveRules:
+    """Validate that the new CVE rules in vulnerabilities.json are complete."""
+
+    def test_cve_2011_2523_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "cve_2011_2523" in rules, "cve_2011_2523 missing from vulnerabilities.json"
+
+    def test_cve_2017_0144_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "cve_2017_0144" in rules, "cve_2017_0144 missing from vulnerabilities.json"
+
+    def test_ssh_weak_version_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "ssh_weak_version" in rules, "ssh_weak_version missing from vulnerabilities.json"
+
+    def test_cve_2011_2523_what_non_empty(self):
+        result = get_explanation("cve_2011_2523")
+        assert result is not None
+        assert len(result.what) > 10
+
+    def test_cve_2011_2523_attack_non_empty(self):
+        result = get_explanation("cve_2011_2523")
+        assert result is not None
+        assert len(result.attack) > 10
+
+    def test_cve_2011_2523_defense_non_empty(self):
+        result = get_explanation("cve_2011_2523")
+        assert result is not None
+        assert len(result.defense) > 10
+
+    def test_cve_2017_0144_what_non_empty(self):
+        result = get_explanation("cve_2017_0144")
+        assert result is not None
+        assert len(result.what) > 10
+
+    def test_cve_2017_0144_attack_non_empty(self):
+        result = get_explanation("cve_2017_0144")
+        assert result is not None
+        assert len(result.attack) > 10
+
+    def test_cve_2017_0144_defense_non_empty(self):
+        result = get_explanation("cve_2017_0144")
+        assert result is not None
+        assert len(result.defense) > 10
+
+    def test_cve_lookup_end_to_end_vsftpd(self):
+        """End-to-end: real KB returns vsftpd-specific explanation for CVE-2011-2523."""
+        result = get_explanation_for_finding(
+            module="tcp_scan",
+            target_service="ftp",
+            cve_refs=["CVE-2011-2523"],
+        )
+        assert result is not None
+        assert len(result.what) > 10
+        assert len(result.attack) > 10
+        assert len(result.defense) > 10
+        # Must be the CVE-specific entry, not the generic tcp_scan rule
+        assert "vsftpd" in result.what.lower() or "backdoor" in result.what.lower()
+
+    def test_cve_lookup_end_to_end_eternalblue(self):
+        """End-to-end: real KB returns EternalBlue explanation for CVE-2017-0144."""
+        result = get_explanation_for_finding(
+            module="tcp_scan",
+            target_service="microsoft-ds",
+            cve_refs=["CVE-2017-0144"],
+        )
+        assert result is not None
+        assert len(result.what) > 10
+        assert len(result.attack) > 10
+        assert len(result.defense) > 10
+        assert "eternal" in result.what.lower() or "smb" in result.what.lower()

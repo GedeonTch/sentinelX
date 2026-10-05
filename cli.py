@@ -428,7 +428,9 @@ def _run_pipeline(
         for f in all_findings:
             if get_explanation_for_finding is not None and f.explanation is None:
                 try:
-                    exp = get_explanation_for_finding(f.module, f.target_service)
+                    exp = get_explanation_for_finding(
+                        f.module, f.target_service, cve_refs=f.cve_refs
+                    )
                     if exp:
                         f = dataclasses.replace(f, explanation=exp)
                 except Exception:
@@ -608,6 +610,19 @@ def findings_explain(
     """Display the 3-angle explanation for a finding (what / attack / defense)."""
     try:
         finding = _resolve_cli_finding(session, finding_id)
+        if finding.explanation is None:
+            # Attempt a live KB lookup (covers findings stored before the KB
+            # was enriched, and findings whose explanation was not set at scan
+            # time). Pass cve_refs so CVE-specific rules take priority.
+            try:
+                from knowledge.knowledge_base import get_explanation_for_finding
+                exp = get_explanation_for_finding(
+                    finding.module, finding.target_service, cve_refs=finding.cve_refs
+                )
+                if exp:
+                    finding = dataclasses.replace(finding, explanation=exp)
+            except Exception:
+                pass
         if finding.explanation is None:
             display(
                 "[yellow]No explanation available for this finding.[/yellow]\n"

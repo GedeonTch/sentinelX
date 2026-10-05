@@ -695,7 +695,7 @@ class TestScan:
         )
 
         assert result.exit_code == 0
-        knowledge_base.assert_called_once_with("tcp_scan", "smb")
+        knowledge_base.assert_called_once_with("tcp_scan", "smb", cve_refs=[])
         explained = score_findings.call_args.args[0]
         assert explained[0].explanation == explanation
 
@@ -711,7 +711,7 @@ class TestScan:
             defense="Restrict DNS exposure.",
         )
 
-        def knowledge_base_side_effect(module, target_service):
+        def knowledge_base_side_effect(module, target_service, cve_refs=None):
             if module == "tcp_scan":
                 raise RuntimeError("KB unavailable")
             return second_explanation
@@ -1037,7 +1037,7 @@ class TestFindingsExplain:
         assert "SMBv1" in result.output
 
     def test_explain_no_explanation(self, tmp_path):
-        """explanation=None must show a clear message, not crash."""
+        """explanation=None and no matching KB rule must show a clear message."""
         import core.database as db
 
         def mock_db_path(session_id: str) -> Path:
@@ -1045,7 +1045,12 @@ class TestFindingsExplain:
             d.mkdir(parents=True, exist_ok=True)
             return d / f"{session_id}.db"
 
-        f = make_finding(explanation=None)
+        # Use a module and service with no KB entry to guarantee no explanation.
+        f = make_finding(
+            module="unknown_module_xyz",
+            target_service="unknown_service_xyz",
+            explanation=None,
+        )
         with patch.object(db, "get_db_path", side_effect=mock_db_path):
             db.init_db("session-001")
             db.save_session("session-001", target="192.168.1.1")

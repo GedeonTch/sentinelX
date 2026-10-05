@@ -30,7 +30,7 @@ Rules enforced here:
 
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from core.finding import Explanation
 
@@ -90,10 +90,16 @@ def get_explanation(rule_id: str) -> Optional[Explanation]:
     return _lookup(rule_id, _RULES)
 
 
-def get_explanation_for_finding(module: str, target_service: str) -> Optional[Explanation]:
-    """Convenience function: resolve explanation using both module and target_service.
+def get_explanation_for_finding(
+    module: str,
+    target_service: str,
+    cve_refs: Optional[List[str]] = None,
+) -> Optional[Explanation]:
+    """Convenience function: resolve explanation using CVE refs, module and target_service.
 
     Tries resolution in this order:
+        0. cve_refs — each CVE normalised to a rule key (e.g. "CVE-2011-2523"
+           → "cve_2011_2523"). First hit wins.
         1. target_service (e.g. "telnet_exposed", "smb_enum")
         2. module (e.g. "tcp_scan", "misconfig_detection.telnet_exposed")
         3. module prefix stripped (e.g. "telnet_exposed" from "misconfig_detection.telnet_exposed")
@@ -101,10 +107,21 @@ def get_explanation_for_finding(module: str, target_service: str) -> Optional[Ex
     Args:
         module:         Finding.module value.
         target_service: Finding.target_service value.
+        cve_refs:       Optional list of CVE identifiers from the Finding
+                        (e.g. ["CVE-2017-0144"]). When provided, CVE-specific
+                        rules are tried before the generic module/service lookup.
 
     Returns:
         Optional[Explanation]: First match found, or None.
     """
+    # Step 0 — CVE-specific lookup (highest priority)
+    for cve in (cve_refs or []):
+        key = _cve_to_rule_key(cve)
+        result = _lookup(key, _RULES)
+        if result is not None:
+            return result
+
+    # Steps 1-3 — existing module/service resolution
     for candidate in _resolution_candidates(module, target_service):
         result = _lookup(candidate, _RULES)
         if result is not None:
@@ -126,6 +143,21 @@ def list_rule_ids() -> list:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _cve_to_rule_key(cve_id: str) -> str:
+    """Normalise a CVE identifier to the rule key format used in vulnerabilities.json.
+
+    "CVE-2011-2523" → "cve_2011_2523"
+    "cve-2017-0144" → "cve_2017_0144"
+
+    Args:
+        cve_id: Raw CVE string from Finding.cve_refs.
+
+    Returns:
+        str: Lower-case, hyphen-replaced-by-underscore key.
+    """
+    return cve_id.strip().lower().replace("-", "_")
+
 
 def _lookup(rule_id: str, rules: Dict[str, Dict[str, str]]) -> Optional[Explanation]:
     """Perform the actual dict lookup and build an Explanation.
