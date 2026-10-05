@@ -1375,6 +1375,28 @@ def sentinel_get_state(network_id: str) -> dict:
         conn.close()
 
 
+def sentinel_get_assets(network_id: str) -> List[dict]:
+    """Return assets stored in the persistent Sentinel DB for a network."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        rows = conn.execute("SELECT * FROM assets ORDER BY ip").fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def list_sentinel_network_ids() -> List[str]:
+    """List network IDs with an existing persistent Sentinel DB.
+
+    This only inspects the existing per-network storage directory; it does not
+    create a database or derive a new network identity.
+    """
+    directory = _real_user_home() / ".netlab" / "sentinel"
+    if not directory.is_dir():
+        return []
+    return sorted(path.stem for path in directory.glob("*.db") if path.is_file())
+
+
 def sentinel_has_conflicting_baseline(
     network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
 ) -> bool:

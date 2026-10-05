@@ -42,6 +42,10 @@ def patch_db_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db, "get_db_path", mock_get_db_path)
     monkeypatch.setattr(db, "get_sentinel_db_path", mock_get_sentinel_db_path)
+    monkeypatch.setattr(
+        "sentinel.sentinel_manager.list_sentinel_network_ids",
+        lambda: [SESSION],
+    )
     db.init_db(SESSION)
     db.init_sentinel_db(SESSION)
     db.save_session(SESSION, target="192.168.1.0/24")
@@ -82,10 +86,9 @@ class TestComputeDisplayState:
 # ---------------------------------------------------------------------------
 
 class TestStatus:
-    def test_returns_inactive_when_no_sentinel_data(self):
-        result = status(SESSION)
-        # Session exists but no sentinel state set → inactive
-        assert result.get("display_state") in ("INACTIF", "DÉGRADÉ")
+    def test_missing_sentinel_state_is_controlled_error(self):
+        with pytest.raises(ValueError, match="No Sentinel state exists"):
+            status(SESSION)
 
     def test_returns_active_when_recently_checked(self):
         now = datetime.datetime.now(timezone.utc).isoformat()
@@ -111,6 +114,7 @@ class TestStatus:
         assert result["display_state"] == "DÉGRADÉ"
 
     def test_unresolved_alerts_counted(self):
+        db.sentinel_update_state(SESSION, "inactive")
         import uuid
         db.sentinel_save_event(
             network_id=SESSION,
@@ -123,6 +127,38 @@ class TestStatus:
         )
         result = status(SESSION)
         assert result["unresolved_alerts"] >= 1
+
+    def test_unknown_network_is_controlled_error(self):
+        with pytest.raises(ValueError, match="Unknown Sentinel network"):
+            status("unknown-network")
+
+    def test_no_known_network_is_controlled_error(self, monkeypatch):
+        monkeypatch.setattr(
+            "sentinel.sentinel_manager.list_sentinel_network_ids", lambda: []
+        )
+        with pytest.raises(ValueError, match="No known Sentinel network"):
+            status()
+
+    def test_status_reads_only_network_context(self):
+        db.sentinel_update_state(
+            SESSION,
+            "active",
+            last_check_time=datetime.datetime.now(timezone.utc).isoformat(),
+            target_network="192.168.1.0/24",
+        )
+        with patch("sentinel.sentinel_manager.sentinel_get_state", return_value={
+            "sentinel_status": "active",
+            "last_check_time": None,
+            "target_network": "192.168.1.0/24",
+            "gateway_ip": "",
+            "gateway_mac": "",
+        }) as get_state, patch(
+            "sentinel.sentinel_manager.sentinel_get_assets", return_value=[]
+        ) as get_assets:
+            result = status(SESSION)
+        get_state.assert_called_once_with(SESSION)
+        get_assets.assert_called_once_with(SESSION)
+        assert result["network_id"] == SESSION
 
 
 # ---------------------------------------------------------------------------

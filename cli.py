@@ -871,11 +871,16 @@ def sentinel_start(
 
 @sentinel_app.command("status")
 def sentinel_status(
-    session: str = typer.Option(..., "--session", "-s", help="Session or network ID."),
+    network: Optional[str] = typer.Option(
+        None, "--network", "-n", help="Sentinel network ID."
+    ),
 ) -> None:
-    """Show current Sentinel monitoring status and recent alerts."""
+    """Show current Sentinel monitoring status for a network."""
     from sentinel.sentinel_manager import display_status
-    display_status(session)
+    try:
+        display_status(network)
+    except ValueError as exc:
+        display(f"[yellow]Sentinel status unavailable: {exc}[/yellow]")
 
 
 @sentinel_app.command("stop")

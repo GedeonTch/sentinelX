@@ -994,18 +994,29 @@ class TestSentinel:
             force_relearn=True,
         )
 
-    def test_sentinel_status_requires_session(self):
-        result = runner.invoke(app, ["sentinel", "status"])
-        assert result.exit_code != 0
+    def test_sentinel_status_does_not_require_session(self):
+        with patch("sentinel.sentinel_manager.display_status") as mock_status:
+            result = runner.invoke(app, ["sentinel", "status"])
+        assert result.exit_code == 0
+        mock_status.assert_called_once_with(None)
 
-    def test_sentinel_status_calls_display_status(self):
+    def test_sentinel_status_accepts_network(self):
         with patch("sentinel.sentinel_manager.display_status") as mock_status:
             result = runner.invoke(
                 app,
-                ["sentinel", "status", "--session", "net-abc"],
+                ["sentinel", "status", "--network", "net-abc"],
             )
         assert result.exit_code == 0
         mock_status.assert_called_once_with("net-abc")
+
+    def test_sentinel_status_renders_controlled_missing_network_error(self):
+        with patch(
+            "sentinel.sentinel_manager.display_status",
+            side_effect=ValueError("No known Sentinel network is available."),
+        ):
+            result = runner.invoke(app, ["sentinel", "status"])
+        assert result.exit_code == 0
+        assert "Sentinel status unavailable" in result.output
 
     def test_sentinel_stop_requires_session(self):
         result = runner.invoke(app, ["sentinel", "stop"])

@@ -36,13 +36,12 @@ from typing import Optional
 import typer
 
 from core.database import (
-    count_unresolved_events,
-    get_assets,
-    get_sentinel_state,
     init_db,
     init_sentinel_db,
     save_session,
+    list_sentinel_network_ids,
     sentinel_count_unresolved_events,
+    sentinel_get_assets,
     sentinel_get_state,
     sentinel_has_conflicting_baseline,
     sentinel_update_state,
@@ -296,37 +295,44 @@ def _do_check(
 # status
 # ---------------------------------------------------------------------------
 
-def status(session_id: str) -> dict:
-    """Return current Sentinel status.
+def _resolve_status_network_id(network_id: Optional[str] = None) -> str:
+    """Resolve the network context for the network-oriented status command."""
+    if network_id:
+        if network_id not in list_sentinel_network_ids():
+            raise ValueError(f"Unknown Sentinel network '{network_id}'.")
+        return network_id
 
-    Accepts session_id for backward compatibility but also checks network_id
-    derived from sentinel DB. Falls back gracefully if no sentinel state found.
-    """
+    known = list_sentinel_network_ids()
+    if not known:
+        raise ValueError("No known Sentinel network is available.")
+    if len(known) > 1:
+        raise ValueError(
+            "Multiple Sentinel networks are available; use --network <network_id>."
+        )
+    return known[0]
+
+
+def status(network_id: Optional[str] = None) -> dict:
+    """Return Sentinel status for a network, never for an audit session."""
+    network_id = _resolve_status_network_id(network_id)
     interval = _load_interval()
-    # Try sentinel state DB first (new path)
-    # Since we don't have network_id here, we scan sentinel DBs by session target
-    # Fallback: use old session-based state
-    state = sentinel_get_state(session_id)
-    if state:
-        sentinel_state = state.get("sentinel_status", "inactive")
-        last_check = state.get("last_check_time")
-        target_network = state.get("target_network", "")
-        gateway_ip = state.get("gateway_ip", "")
-        gateway_mac = state.get("gateway_mac", "")
-    else:
-        sentinel_state = "inactive"
-        last_check = None
-        target_network = ""
-        gateway_ip = ""
-        gateway_mac = ""
+    state = sentinel_get_state(network_id)
+    if not state:
+        raise ValueError(f"No Sentinel state exists for network '{network_id}'.")
+
+    sentinel_state = state.get("sentinel_status", "inactive")
+    last_check = state.get("last_check_time")
+    target_network = state.get("target_network", "")
+    gateway_ip = state.get("gateway_ip", "")
+    gateway_mac = state.get("gateway_mac", "")
 
     display_state = _compute_display_state(sentinel_state, last_check, interval)
-    assets = get_assets(session_id)
+    assets = sentinel_get_assets(network_id)
     known_hosts = len(assets)
     active_hosts = sum(1 for a in assets if a.get("active", 1))
 
     try:
-        unresolved = sentinel_count_unresolved_events(session_id)
+        unresolved = sentinel_count_unresolved_events(network_id)
     except Exception:
         unresolved = 0
 
@@ -342,6 +348,7 @@ def status(session_id: str) -> dict:
             pass
 
     return {
+        "network_id": network_id,
         "sentinel_state": sentinel_state,
         "display_state": display_state,
         "target_network": target_network,
@@ -356,9 +363,9 @@ def status(session_id: str) -> dict:
     }
 
 
-def display_status(session_id: str) -> None:
-    """Display the compact two-line Sentinel status in the terminal."""
-    s = status(session_id)
+def display_status(network_id: Optional[str] = None) -> None:
+    """Display compact Sentinel status for a resolved network."""
+    s = status(network_id)
     state = s["display_state"]
 
     state_icon = {"ACTIF": "[●]", "DÉGRADÉ": "[!]", "INACTIF": "[○]"}.get(state, "[?]")
