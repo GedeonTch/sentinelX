@@ -427,9 +427,24 @@ def test_global_verify_keeps_unsupported_finding_unchanged():
     with patch("detect.tcp_scan.tcp_scan", return_value=[make_finding()]):
         result = _run_verify(SESSION)
 
-    assert result["status"] == "PARTIAL"
+    assert result["status"] == "SUCCESS"
+    assert result["inconclusive"] == []
+    assert [item.id for item in result["skipped"]] == [unsupported.id]
     assert db.get_finding_by_id(SESSION, unsupported.id).status == FindingStatus.OPEN
     assert db.get_finding_by_id(SESSION, supported.id).status == FindingStatus.OPEN
+
+
+def test_inventory_only_session_is_not_a_verify_failure():
+    inventory = make_finding(module="device_fingerprint", port=None, service="host")
+    db.save_finding(inventory)
+
+    result = _run_verify(SESSION)
+
+    assert result["status"] == "SUCCESS"
+    assert result["inconclusive"] == []
+    assert result["verified"] == []
+    assert result["skipped"] == [inventory]
+    assert db.get_finding_by_id(SESSION, inventory.id).status == FindingStatus.OPEN
 
 
 def test_duplicate_current_fingerprint_is_persisted_once():

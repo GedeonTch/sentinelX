@@ -790,11 +790,18 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
     else:
         findings = get_findings(session_id)
 
+    inventory_observations = [
+        item for item in findings if item.module == "device_fingerprint"
+    ]
     eligible = [
         item for item in findings
-        if item.status in (FindingStatus.OPEN, FindingStatus.VERIFIED)
+        if item.module != "device_fingerprint"
+        and item.status in (FindingStatus.OPEN, FindingStatus.VERIFIED)
     ]
-    excluded = [item for item in findings if item not in eligible]
+    excluded = [
+        item for item in findings
+        if item not in eligible and item not in inventory_observations
+    ]
     outcomes = []
     current_by_fingerprint = {}
     old_by_fingerprint = {
@@ -863,7 +870,9 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
         save_findings([current])
 
     if not outcomes:
-        status = "PARTIAL"
+        # Inventory-only sessions have no VERIFY control to fail. Other
+        # sessions with no eligible control remain inconclusive as before.
+        status = "SUCCESS" if inventory_observations and not excluded else "PARTIAL"
     elif failed == len(outcomes):
         status = "FAILED"
     elif failed or partial or excluded:
@@ -878,6 +887,7 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
         "new": persisted_new,
         "inconclusive": inconclusive,
         "excluded": excluded,
+        "skipped": inventory_observations,
     }
 
 
@@ -888,6 +898,7 @@ def _render_verify_summary(outcome: dict) -> None:
     display(f"Findings VERIFIED: {len(outcome['verified'])}")
     display(f"Nouvelles Findings: {len(outcome['new'])}")
     display(f"Findings non concluantes: {len(outcome['inconclusive'])}")
+    display(f"Observations hors VERIFY: {len(outcome.get('skipped', []))}")
 
 
 # ---------------------------------------------------------------------------
