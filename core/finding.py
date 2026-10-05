@@ -16,6 +16,7 @@ from enum import Enum
 from typing import List, Optional
 import uuid
 import datetime
+import hashlib
 from datetime import timezone
 import json
 
@@ -95,6 +96,20 @@ class FindingStatus(str, Enum):
     VERIFIED = "verified"
     REMEDIATED = "remediated"
     ACCEPTED = "accepted"
+
+
+def format_finding_id(internal_id: str) -> str:
+    """Return the stable, user-facing identifier for an internal Finding ID.
+
+    The database keeps the existing internal ID unchanged. UUIDs use their
+    first eight hexadecimal characters; non-UUID IDs use a deterministic hash
+    so test/imported records still receive the same display format.
+    """
+    try:
+        token = uuid.UUID(internal_id).hex[:8]
+    except (ValueError, AttributeError, TypeError):
+        token = hashlib.sha256(str(internal_id).encode("utf-8")).hexdigest()[:8]
+    return f"FD-{token.upper()}"
 
 
 # ---------------------------------------------------------------------------

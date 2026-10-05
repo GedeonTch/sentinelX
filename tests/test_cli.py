@@ -33,6 +33,7 @@ from detect.tcp_scan import TcpScanCancelled, TcpScanFailed
 from detect.udp_scan import UdpScanCancelled, UdpScanFailed
 from core.finding import (
     Finding,
+    format_finding_id,
     Evidence,
     Explanation,
     Severity,
@@ -842,14 +843,17 @@ class TestFindingsList:
             d.mkdir(parents=True, exist_ok=True)
             return d / f"{session_id}.db"
 
+        f = make_finding()
         with patch.object(db, "get_db_path", side_effect=mock_db_path):
             db.init_db("session-001")
             db.save_session("session-001", target="192.168.1.1")
-            db.save_finding(make_finding())
+            db.save_finding(f)
             result = runner.invoke(app, ["findings", "list", "--session", "session-001"])
 
         assert result.exit_code == 0
         assert "tcp_scan" in result.output
+        assert format_finding_id(f.id) in result.output
+        assert f.id not in result.output
 
     def test_findings_list_requires_session(self):
         result = runner.invoke(app, ["findings", "list"])
@@ -873,7 +877,7 @@ class TestFindingsShow:
             db.init_db("session-001")
             result = runner.invoke(
                 app,
-                ["findings", "show", "nonexistent-id", "--session", "session-001"],
+                ["findings", "show", "FD-XXXXXXXX", "--session", "session-001"],
             )
 
         assert result.exit_code == 1
@@ -900,6 +904,57 @@ class TestFindingsShow:
         assert result.exit_code == 0
         assert "192.168.1.1" in result.output
 
+    def test_findings_show_accepts_user_facing_id(self, tmp_path):
+        import core.database as db
+
+        def mock_db_path(session_id: str) -> Path:
+            d = tmp_path / ".netlab" / "sessions"
+            d.mkdir(parents=True, exist_ok=True)
+            return d / f"{session_id}.db"
+
+        f = make_finding()
+        with patch.object(db, "get_db_path", side_effect=mock_db_path):
+            db.init_db("session-001")
+            db.save_session("session-001", target="192.168.1.1")
+            db.save_finding(f)
+            result = runner.invoke(
+                app,
+                ["findings", "show", format_finding_id(f.id), "--session", "session-001"],
+            )
+
+        assert result.exit_code == 0
+        assert "192.168.1.1" in result.output
+        assert format_finding_id(f.id) in result.output
+
+    def test_findings_show_reports_ambiguous_user_facing_id(self, tmp_path):
+        import core.database as db
+
+        def mock_db_path(session_id: str) -> Path:
+            d = tmp_path / ".netlab" / "sessions"
+            d.mkdir(parents=True, exist_ok=True)
+            return d / f"{session_id}.db"
+
+        first = make_finding(target_ip="192.168.1.10")
+        second = make_finding(target_ip="192.168.1.11")
+        with patch.object(db, "get_db_path", side_effect=mock_db_path), \
+             patch.object(db, "format_finding_id", return_value="FD-1234ABCD"), \
+             patch("core.finding.format_finding_id", return_value="FD-1234ABCD"):
+            db.init_db("session-001")
+            db.save_session("session-001", target="192.168.1.0/24")
+            db.save_finding(first)
+            db.save_finding(second)
+            result = runner.invoke(
+                app,
+                ["findings", "show", "FD-1234ABCD", "--session", "session-001"],
+            )
+
+        assert result.exit_code == 1
+        assert "ambiguous" in result.output.lower()
+        assert first.id in result.output
+        assert second.id in result.output
+        assert "internal" in result.output.lower()
+        assert "ID" in result.output
+
 
 # ---------------------------------------------------------------------------
 # findings explain
@@ -925,7 +980,7 @@ class TestFindingsExplain:
             db.save_finding(f)
             result = runner.invoke(
                 app,
-                ["findings", "explain", f.id, "--session", "session-001"],
+                ["findings", "explain", format_finding_id(f.id), "--session", "session-001"],
             )
 
         assert result.exit_code == 0
@@ -947,7 +1002,7 @@ class TestFindingsExplain:
             db.save_finding(f)
             result = runner.invoke(
                 app,
-                ["findings", "explain", f.id, "--session", "session-001"],
+                ["findings", "explain", format_finding_id(f.id), "--session", "session-001"],
             )
 
         assert result.exit_code == 0

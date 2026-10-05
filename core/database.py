@@ -42,6 +42,7 @@ from core.finding import (
     Confidence,
     Exposure,
     FindingStatus,
+    format_finding_id,
 )
 
 
@@ -567,8 +568,27 @@ def get_findings(session_id: str) -> List[Finding]:
         conn.close()
 
 
+def resolve_finding_id(session_id: str, identifier: str) -> List[Finding]:
+    """Resolve an internal or user-facing Finding ID within one session.
+
+    A full internal ID is matched exactly. An ``FD-`` identifier is resolved
+    against the stable display ID of every Finding, so short-ID collisions are
+    returned to the caller instead of being selected arbitrarily.
+    """
+    if identifier.upper().startswith("FD-"):
+        requested = identifier.upper()
+        return [
+            finding
+            for finding in get_findings(session_id)
+            if format_finding_id(finding.id) == requested
+        ]
+
+    finding = get_finding_by_id(session_id, identifier)
+    return [finding] if finding is not None else []
+
+
 def get_finding_by_id(session_id: str, finding_id: str) -> Optional[Finding]:
-    """Return a single Finding by its ID within a session, or None.
+    """Return a single Finding by its internal ID within a session, or None.
 
     Args:
         session_id: Session the Finding belongs to.

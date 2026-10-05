@@ -17,6 +17,7 @@ from core.finding import (
     Finding,
     FindingStatus,
     Severity,
+    format_finding_id,
 )
 from core.risk_scorer import score_findings
 from detect.tcp_scan import TcpPortScanResult, _parse_tcp_xml_with_states
@@ -133,7 +134,9 @@ def test_still_present_recalculates_current_risk_and_preserves_metadata():
 
 def test_verified_finding_keeps_history_and_reopening_recalculates_risk():
     original = score_findings([_rich_finding()])[0]
+    user_id = format_finding_id(original.id)
     db.save_finding(original)
+    assert format_finding_id(db.get_finding_by_id(SESSION, original.id).id) == user_id
 
     with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "closed"})):
         result = _run_verify(SESSION, original.id)

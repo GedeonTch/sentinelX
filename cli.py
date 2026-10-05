@@ -554,6 +554,25 @@ def findings_list(
         raise typer.Exit(code=1)
 
 
+def _resolve_cli_finding(session_id: str, identifier: str):
+    """Resolve a Finding ID without silently accepting a short-ID collision."""
+    from core.database import resolve_finding_id
+    from core.finding import format_finding_id
+
+    matches = resolve_finding_id(session_id, identifier)
+    if not matches:
+        raise ValueError(f"Finding '{identifier}' not found in session {session_id}.")
+    if len(matches) > 1:
+        candidates = ", ".join(
+            f"{format_finding_id(item.id)} (internal: {item.id})" for item in matches
+        )
+        raise ValueError(
+            f"Ambiguous Finding ID '{identifier}': {len(matches)} Findings match. "
+            f"Use the full internal ID. Matches: {candidates}"
+        )
+    return matches[0]
+
+
 @findings_app.command("show")
 def findings_show(
     finding_id: str = typer.Argument(..., help="Finding ID."),
@@ -561,11 +580,7 @@ def findings_show(
 ) -> None:
     """Show full details of a single finding."""
     try:
-        from core.database import get_finding_by_id
-        finding = get_finding_by_id(session, finding_id)
-        if finding is None:
-            display(f"[red]Finding {finding_id} not found in session {session}.[/red]")
-            raise typer.Exit(code=1)
+        finding = _resolve_cli_finding(session, finding_id)
         _render_finding_detail(finding)
     except typer.Exit:
         raise
@@ -581,11 +596,7 @@ def findings_explain(
 ) -> None:
     """Display the 3-angle explanation for a finding (what / attack / defense)."""
     try:
-        from core.database import get_finding_by_id
-        finding = get_finding_by_id(session, finding_id)
-        if finding is None:
-            display(f"[red]Finding {finding_id} not found in session {session}.[/red]")
-            raise typer.Exit(code=1)
+        finding = _resolve_cli_finding(session, finding_id)
         if finding.explanation is None:
             display(
                 "[yellow]No explanation available for this finding.[/yellow]\n"
@@ -752,7 +763,7 @@ def _verify_control(finding: Finding, session: dict) -> dict:
 def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
     """Verify eligible Findings in the existing session and persist the diff."""
     from core.database import (
-        get_finding_by_id, get_findings, get_session,
+        get_findings, get_session,
         save_findings, update_finding_status,
     )
     from core.finding import FindingStatus
@@ -763,9 +774,7 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
         raise ValueError(f"Session '{session_id}' not found")
 
     if finding_id is not None:
-        selected = get_finding_by_id(session_id, finding_id)
-        if selected is None:
-            raise ValueError(f"Finding '{finding_id}' not found in session '{session_id}'")
+        selected = _resolve_cli_finding(session_id, finding_id)
         findings = [selected]
     else:
         findings = get_findings(session_id)
@@ -1029,6 +1038,8 @@ def config_show() -> None:
 # ---------------------------------------------------------------------------
 
 def _render_findings_table(findings: list) -> None:
+    from core.finding import format_finding_id
+
     table = Table(title=f"Findings ({len(findings)} total)", box=box.ROUNDED)
     table.add_column("ID", style="dim", max_width=12)
     table.add_column("Severity")
@@ -1040,7 +1051,7 @@ def _render_findings_table(findings: list) -> None:
     for f in findings:
         color = {"critical":"red","high":"orange3","medium":"yellow","low":"cyan","info":"dim"}.get(f.severity.value,"white")
         table.add_row(
-            f.id[:8],
+            format_finding_id(f.id),
             f"[{color}]{f.severity.value}[/{color}]",
             f.module,
             f"{f.target_ip}:{f.target_port}" if f.target_port else f.target_ip,
@@ -1052,10 +1063,10 @@ def _render_findings_table(findings: list) -> None:
 
 
 def _render_finding_detail(finding: object) -> None:
-    from core.finding import Finding
+    from core.finding import Finding, format_finding_id
     f: Finding = finding  # type: ignore
     lines = [
-        f"[bold]ID:[/bold]         {f.id}",
+        f"[bold]ID:[/bold]         {format_finding_id(f.id)}",
         f"[bold]Module:[/bold]     {f.module}",
         f"[bold]Target:[/bold]     {f.target_ip}" + (f":{f.target_port}" if f.target_port else ""),
         f"[bold]Service:[/bold]    {f.target_service or '—'} {f.service_version or ''}".strip(),
