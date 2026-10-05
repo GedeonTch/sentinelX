@@ -20,10 +20,12 @@ Rules enforced here:
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
 
 import typer
 
@@ -52,6 +54,39 @@ _DOMAIN_PATTERNS = (
     re.compile(r"\[.\]\s+Got domain name:\s*(\S+)", re.IGNORECASE),
     re.compile(r"Workgroup:\s*(\S+)", re.IGNORECASE),
 )
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+@dataclass(frozen=True)
+class SmbShare:
+    """Normalized description of one SMB share."""
+    name: str
+    share_type: Optional[str] = None
+    comment: Optional[str] = None
+    accessible: Optional[bool] = None
+    permissions: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SmbEnumerationResult:
+    """Tool-independent SMB observations with None meaning unknown."""
+    target: str
+    os: Optional[str] = None
+    hostname: Optional[str] = None
+    domain: Optional[str] = None
+    sid: Optional[str] = None
+    mac: Optional[str] = None
+    dialects: Tuple[str, ...] = ()
+    signing_required: Optional[bool] = None
+    shares: Tuple[SmbShare, ...] = ()
+    users: Tuple[str, ...] = ()
+    groups: Tuple[str, ...] = ()
+    anonymous_session: Optional[bool] = None
+    anonymous_share_access: Optional[bool] = None
+    raw_output: str = ""
+    source_format: str = "text"
 
 
 def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
@@ -138,53 +173,206 @@ def _parse_enum4linux_output(
     target_ip: str,
     session_id: str,
 ) -> List[Finding]:
-    """Build Findings from raw enum4linux output.
-
-    Args:
-        raw_output: Full stdout/stderr from enum4linux.
-        target_ip: Host that was enumerated.
-        session_id: Current audit session ID.
-
-    Returns:
-        List[Finding]: Share findings, then an optional domain finding.
-    """
+    """Normalize tool output, then convert justified observations to Findings."""
+    result = normalize_smb_output(raw_output, target_ip)
     command = f"enum4linux -a {target_ip}"
     findings: List[Finding] = []
-    seen_shares: set[str] = set()
+    seen_services: set[str] = set()
 
-    for share_name in _extract_share_names(raw_output):
-        key = share_name.upper()
-        if key in seen_shares:
-            continue
-        seen_shares.add(key)
-        category, severity = _classify_share(share_name)
-        findings.append(
-            _make_finding(
-                session_id=session_id,
-                target_ip=target_ip,
-                target_service=share_name,
-                category=category,
-                severity=severity,
-                raw_output=raw_output,
-                command=command,
-            )
-        )
+    def add_finding(service: str, category: Category, severity: Severity) -> None:
+        key = service.lower()
+        if key in seen_services:
+            return
+        seen_services.add(key)
+        findings.append(_make_finding(
+            session_id=session_id,
+            target_ip=target_ip,
+            target_service=service,
+            category=category,
+            severity=severity,
+            raw_output=result.raw_output,
+            command=command,
+        ))
 
-    domain_name = _extract_domain_name(raw_output)
-    if domain_name is not None:
-        findings.append(
-            _make_finding(
-                session_id=session_id,
-                target_ip=target_ip,
-                target_service=domain_name,
-                category=Category.NETWORK,
-                severity=Severity.INFO,
-                raw_output=raw_output,
-                command=command,
-            )
-        )
+    for share in result.shares:
+        category, severity = _classify_share(share.name)
+        add_finding(share.name, category, severity)
+
+    if result.domain is not None:
+        add_finding(result.domain, Category.NETWORK, Severity.INFO)
+
+    # Anonymous authentication alone is an observation. Only confirmed share
+    # access creates a stronger Finding with the raw proof attached.
+    if result.anonymous_session is True and result.anonymous_share_access is True:
+        add_finding("smb_anonymous_share_access", Category.SERVICE, Severity.MEDIUM)
+
+    if "NT1" in result.dialects or "SMBv1" in result.dialects:
+        add_finding("SMBv1", Category.SERVICE, Severity.HIGH)
+
+    if result.signing_required is False:
+        add_finding("smb_signing_not_required", Category.CONFIG, Severity.MEDIUM)
 
     return findings
+
+
+def normalize_smb_output(raw_output: str, target_ip: str) -> SmbEnumerationResult:
+    """Convert JSON or noisy text into one stable internal SMB structure."""
+    clean = _strip_ansi(raw_output or "")
+    try:
+        document = json.loads(clean)
+    except (TypeError, json.JSONDecodeError):
+        return _normalize_text_output(clean, target_ip)
+    if not isinstance(document, dict):
+        return _normalize_text_output(clean, target_ip)
+    return _normalize_json_output(document, clean, target_ip)
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE.sub("", value).replace("\r", "")
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _find_value(document: Any, aliases: set[str]) -> Any:
+    if isinstance(document, dict):
+        for key, value in document.items():
+            if _normalize_key(str(key)) in aliases:
+                return value
+        for value in document.values():
+            found = _find_value(value, aliases)
+            if found is not None:
+                return found
+    elif isinstance(document, list):
+        for value in document:
+            found = _find_value(value, aliases)
+            if found is not None:
+                return found
+    return None
+
+
+def _as_text(value: Any) -> Optional[str]:
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _as_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "accepted", "enabled", "required", "open"}:
+            return True
+        if normalized in {"false", "no", "refused", "disabled", "not required", "closed"}:
+            return False
+    return None
+
+
+def _as_strings(value: Any) -> Tuple[str, ...]:
+    if isinstance(value, dict):
+        value = list(value.keys())
+    if not isinstance(value, list):
+        return () if value is None else (_as_text(value) or "",)
+    return tuple(text for item in value if (text := _as_text(item)))
+
+
+def _normalize_shares(value: Any) -> Tuple[SmbShare, ...]:
+    if isinstance(value, dict):
+        value = [dict(item, name=name) if isinstance(item, dict) else {"name": name, "comment": item}
+                 for name, item in value.items()]
+    if not isinstance(value, list):
+        return ()
+    shares = []
+    for item in value:
+        if isinstance(item, str):
+            name = item.strip()
+            details = {}
+        elif isinstance(item, dict):
+            name = _as_text(_find_value(item, {"name", "sharename", "share"}))
+            details = item
+        else:
+            continue
+        if not name:
+            continue
+        shares.append(SmbShare(
+            name=name,
+            share_type=_as_text(_find_value(details, {"type", "sharetype"})),
+            comment=_as_text(_find_value(details, {"comment", "description"})),
+            accessible=_as_bool(_find_value(details, {"accessible", "access", "readable"})),
+            permissions=_as_text(_find_value(details, {"permissions", "perms", "accessrights"})),
+        ))
+    return tuple(shares)
+
+
+def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnumerationResult:
+    """Read common enum4linux-ng-style aliases without leaking them outward."""
+    shares = _normalize_shares(_find_value(document, {"shares", "sharelist", "shareenum"}))
+    anonymous = _as_bool(_find_value(document, {"anonymoussession", "anonymous", "nullsession"}))
+    accessible = _as_bool(_find_value(document, {"anonymousshareaccess", "shareaccessible"}))
+    if accessible is None and shares:
+        accessible = any(share.accessible is True for share in shares)
+    signing = _as_bool(_find_value(document, {"signingrequired", "smbsigningrequired", "signing"}))
+    dialect_value = _find_value(document, {"dialects", "smbdialects", "protocol", "smbprotocol"})
+    return SmbEnumerationResult(
+        target=target_ip,
+        os=_as_text(_find_value(document, {"os", "operatingsystem", "targetos"})),
+        hostname=_as_text(_find_value(document, {"hostname", "host"})),
+        domain=_as_text(_find_value(document, {"domain", "workgroup", "domainname"})),
+        sid=_as_text(_find_value(document, {"sid", "domainsid"})),
+        mac=_as_text(_find_value(document, {"mac", "macaddress"})),
+        dialects=_as_strings(dialect_value),
+        signing_required=signing,
+        shares=shares,
+        users=_as_strings(_find_value(document, {"users", "userlist"})),
+        groups=_as_strings(_find_value(document, {"groups", "grouplist"})),
+        anonymous_session=anonymous,
+        anonymous_share_access=accessible,
+        raw_output=raw,
+        source_format="json",
+    )
+
+
+def _normalize_text_output(raw: str, target_ip: str) -> SmbEnumerationResult:
+    """Best-effort parser for legacy text; absent values remain unknown."""
+    lower = raw.lower()
+    anonymous = True if re.search(r"anonymous.*(accepted|success|allowed)", lower) else None
+    if re.search(r"anonymous.*(refused|denied|rejected)", lower):
+        anonymous = False
+    signing = None
+    if re.search(r"signing.*(required|mandatory)", lower):
+        signing = True
+    elif re.search(r"signing.*(not required|disabled|not mandatory)", lower):
+        signing = False
+    dialects = tuple(re.findall(r"\b(SMBv?1|SMB[23](?:\.\d+)?)\b", raw, re.IGNORECASE))
+    access = True if re.search(r"anonymous.*(?:share|resource).*(accessible|read|write)", lower) else None
+    return SmbEnumerationResult(
+        target=target_ip,
+        os=_text_field(raw, (r"OS(?: version)?[:.]\s*(.+)", r"OS:\s*(.+)")),
+        hostname=_text_field(raw, (r"(?:NetBIOS )?Name[:.]\s*(\S+)",)),
+        domain=_extract_domain_name(raw),
+        sid=_text_field(raw, (r"Domain SID[:.]\s*(S-\d-[0-9-]+)",)),
+        mac=_text_field(raw, (r"MAC(?: address)?[:.]\s*([0-9a-f:.-]+)",)),
+        dialects=tuple(dict.fromkeys(dialects)),
+        signing_required=signing,
+        shares=tuple(SmbShare(name=name) for name in _extract_share_names(raw)),
+        users=tuple(re.findall(r"Account:\\s*(\\S+)", raw, re.IGNORECASE)),
+        groups=(),
+        anonymous_session=anonymous,
+        anonymous_share_access=access,
+        raw_output=raw,
+        source_format="text",
+    )
+
+
+def _text_field(raw: str, patterns: Tuple[str, ...]) -> Optional[str]:
+    for pattern in patterns:
+        match = re.search(pattern, raw, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 def _extract_share_names(raw_output: str) -> List[str]:

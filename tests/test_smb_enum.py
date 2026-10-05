@@ -11,12 +11,16 @@ Covers:
 - Invariants: explanation is None, risk_score is None, evidence.raw is raw output
 """
 
+import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from core.finding import Category, Confidence, FindingStatus, Severity
 
 from detect.smb_enum import (
+    SmbEnumerationResult,
     _parse_enum4linux_output,
+    normalize_smb_output,
     smb_enum,
 )
 
@@ -184,3 +188,130 @@ class TestSmbEnumNominalRun:
         assert result[0].severity == Severity.MEDIUM
         assert result[0].confidence == Confidence.CONFIRMED
         assert result[0].target_service == "ADMIN$"
+
+
+class TestNormalizedSmbResult:
+    def _json(self, **overrides):
+        document = {
+            "target": "192.168.56.10",
+            "hostname": "WIN2016",
+            "os": "Windows Server 2016",
+            "domain": "LAB",
+            "sid": "S-1-5-21-1-2-3",
+            "mac": "00:11:22:33:44:55",
+            "dialects": ["SMB2", "SMB3"],
+            "signing_required": True,
+            "anonymous_session": False,
+            "shares": [{"name": "Public", "accessible": True, "permissions": "READ"}],
+            "users": ["Administrator"],
+            "groups": ["Users"],
+        }
+        document.update(overrides)
+        return json.dumps(document)
+
+    def test_complete_json_is_normalized(self):
+        result = normalize_smb_output(self._json(), "192.168.56.10")
+        assert isinstance(result, SmbEnumerationResult)
+        assert result.os == "Windows Server 2016"
+        assert result.hostname == "WIN2016"
+        assert result.domain == "LAB"
+        assert result.sid == "S-1-5-21-1-2-3"
+        assert result.mac == "00:11:22:33:44:55"
+        assert result.dialects == ("SMB2", "SMB3")
+        assert result.signing_required is True
+        assert result.anonymous_session is False
+        assert result.shares[0].accessible is True
+        assert result.users == ("Administrator",)
+
+    def test_partial_json_keeps_unknown_values_as_none(self):
+        result = normalize_smb_output(json.dumps({"hostname": "metasploitable"}), "10.0.0.5")
+        assert result.hostname == "metasploitable"
+        assert result.os is None
+        assert result.domain is None
+        assert result.signing_required is None
+        assert result.anonymous_session is None
+        assert result.shares == ()
+
+    def test_absent_and_explicit_unknown_values_are_not_invented(self):
+        result = normalize_smb_output(
+            json.dumps({"os": None, "signing": "unknown", "anonymous": "unknown"}),
+            "10.0.0.5",
+        )
+        assert result.os is None
+        assert result.signing_required is None
+        assert result.anonymous_session is None
+
+    def test_ansi_text_is_parsed_without_control_codes(self):
+        raw = "\x1b[31mSharename       Type\x1b[0m\nPublic          Disk\n"
+        result = normalize_smb_output(raw, "10.0.0.5")
+        assert [share.name for share in result.shares] == ["Public"]
+        assert "\\x1b" not in result.raw_output
+
+    def test_invalid_json_falls_back_to_text(self):
+        result = normalize_smb_output(ENUM4LINUX_NO_DOMAIN, "192.168.1.26")
+        assert result.source_format == "text"
+        assert result.shares[0].name == "Public"
+
+    def test_metasploitable2_fixture(self):
+        raw = json.dumps({
+            "hostname": "metasploitable2",
+            "os": "Linux Metasploitable 2",
+            "workgroup": "WORKGROUP",
+            "dialects": ["SMBv1"],
+            "anonymous_session": True,
+            "shares": [{"name": "tmp", "accessible": True, "permissions": "READ_WRITE"}],
+            "signing_required": False,
+        })
+        result = normalize_smb_output(raw, "192.168.56.101")
+        assert result.os == "Linux Metasploitable 2"
+        assert result.domain == "WORKGROUP"
+        assert result.anonymous_session is True
+        assert result.anonymous_share_access is True
+        assert result.dialects == ("SMBv1",)
+        assert result.signing_required is False
+
+    def test_windows_server_2016_fixture(self):
+        result = normalize_smb_output(
+            self._json(anonymous_session=False, signing_required=True),
+            "192.168.56.10",
+        )
+        assert result.os == "Windows Server 2016"
+        assert result.anonymous_session is False
+        assert result.signing_required is True
+
+
+class TestNormalizedFindings:
+    def test_anonymous_refused_creates_no_anonymous_finding(self):
+        raw = json.dumps({"anonymous_session": False})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert not any("anonymous" in finding.target_service for finding in findings)
+
+    def test_anonymous_session_alone_is_observation_only(self):
+        raw = json.dumps({"anonymous_session": True})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert not any("anonymous" in finding.target_service for finding in findings)
+
+    def test_anonymous_session_and_access_creates_stronger_finding(self):
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "Public", "accessible": True}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert any(f.target_service == "smb_anonymous_share_access" for f in findings)
+
+    def test_smbv1_enabled_and_signing_not_required_are_distinct_findings(self):
+        raw = json.dumps({"dialects": ["SMBv1"], "signing_required": False})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        services = {finding.target_service for finding in findings}
+        assert "SMBv1" in services
+        assert "smb_signing_not_required" in services
+
+    def test_smbv1_disabled_and_signing_required_create_no_security_finding(self):
+        raw = json.dumps({"dialects": ["SMB2", "SMB3"], "signing_required": True})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert not any(f.target_service in {"SMBv1", "smb_signing_not_required"} for f in findings)
+
+    def test_unknown_protocol_and_signing_create_no_finding(self):
+        raw = json.dumps({"dialects": ["unknown"], "signing_required": "unknown"})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert findings == []
