@@ -47,7 +47,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 | EXPLAIN | Produire une explication en 3 angles | Base de connaissances locale (IA en V2 uniquement) |
 | LEARN | Former l'utilisateur de façon interactive | Zone Apprentissage — V2 uniquement |
 | REMEDIATE | Appliquer les corrections | Manuel en V1 / scripts automatisés en V2+ |
-| VERIFY | Rescanner et confirmer le correctif | `netlab rescan --session <id>` |
+| VERIFY | Rescanner et confirmer le correctif | `netlab findings rescan --session <id>` |
 
 ## Statut actuel — V1 NetLab
 
