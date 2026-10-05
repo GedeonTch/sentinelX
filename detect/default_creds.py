@@ -23,7 +23,9 @@ Rules enforced here:
 from __future__ import annotations
 
 import ftplib
+import json
 import socket
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import typer
@@ -46,10 +48,9 @@ PROBE_TIMEOUT_SECONDS = 5
 # Local dictionary — known factory defaults only (not a wordlist dump)
 # ---------------------------------------------------------------------------
 
-# FTP: (username, password)
+# FTP: (username, password). Anonymous access is intentionally not part of
+# this default-credential dictionary; it is a separate observation.
 FTP_DEFAULTS: Sequence[Tuple[str, str]] = (
-    ("anonymous", ""),
-    ("anonymous", "anonymous"),
     ("ftp", "ftp"),
     ("admin", "admin"),
     ("admin", "password"),
@@ -60,6 +61,21 @@ SNMP_DEFAULT_COMMUNITIES: Sequence[str] = (
     "public",
     "private",
 )
+
+NO_MATCH = "NO_MATCH"
+ERROR = "ERROR"
+TIMEOUT = "TIMEOUT"
+INACCESSIBLE = "INACCESSIBLE"
+SUCCESS = "SUCCESS"
+
+
+@dataclass(frozen=True)
+class CredentialProbeResult:
+    """Normalized outcome; secrets are never stored in this structure."""
+    protocol: str
+    status: str
+    successful_usernames: Tuple[str, ...] = ()
+    detail: str = ""
 
 
 def check_default_creds(target_ip: str, session_id: str) -> List[Finding]:
@@ -85,20 +101,20 @@ def check_default_creds(target_ip: str, session_id: str) -> List[Finding]:
         return []
 
     display(f"[cyan]Checking default credentials on {target_ip}...[/cyan]")
-    findings: List[Finding] = []
-
-    findings.extend(_check_ftp_defaults(target_ip, session_id))
-    findings.extend(_check_snmp_defaults(target_ip, session_id))
+    ftp_result, ftp_findings = _check_ftp_defaults_result(target_ip, session_id)
+    snmp_result, snmp_findings = _check_snmp_defaults_result(target_ip, session_id)
+    findings = ftp_findings + snmp_findings
 
     if findings:
         display(
-            f"[green]Default credentials: {len(findings)} success(es) "
-            f"on {target_ip}.[/green]"
+            f"[green]Default credentials: {len(findings)} service finding(s) "
+            f"with accepted defaults on {target_ip}.[/green]"
         )
     else:
+        status = _summarize_status((ftp_result, snmp_result))
         display(
-            f"[yellow]Default credentials: no known defaults accepted "
-            f"on {target_ip}.[/yellow]"
+            f"[yellow]Default credentials: {status} on {target_ip}. "
+            "No default credential was accepted.[/yellow]"
         )
     return findings
 
@@ -108,70 +124,60 @@ def check_default_creds(target_ip: str, session_id: str) -> List[Finding]:
 # ---------------------------------------------------------------------------
 
 def _check_ftp_defaults(target_ip: str, session_id: str) -> List[Finding]:
-    """Try FTP_DEFAULTS against port 21. Stops after first success per pair.
+    """Return one Finding for FTP when one or more defaults are accepted."""
+    return _check_ftp_defaults_result(target_ip, session_id)[1]
 
-    Args:
-        target_ip: Host to probe.
-        session_id: Audit session ID.
 
-    Returns:
-        List[Finding]: Findings for accepted FTP logins.
-    """
-    findings: List[Finding] = []
-    for username, password in FTP_DEFAULTS:
-        accepted = _try_ftp_login(target_ip, username, password)
-        if accepted is True:
-            findings.append(
-                _make_finding(
-                    session_id=session_id,
-                    target_ip=target_ip,
-                    target_port=21,
-                    target_service=RULE_ID,
-                    evidence_raw=(
-                        f"FTP login accepted on {target_ip}:21\n"
-                        f"username={username}\n"
-                        f"password=(redacted — known factory default)\n"
-                        f"credential_type=known_default\n"
-                        f"Dictionary entry matched a factory default."
-                    ),
-                    evidence_command=(
-                        f"ftp_login {target_ip} user={username} "
-                        f"(default dictionary)"
-                    ),
-                )
-            )
-            # One Finding per accepted pair; continue to report other pairs
-        # accepted is False or None (port closed / error) → skip that pair
-    return findings
+def _check_ftp_defaults_result(
+    target_ip: str, session_id: str
+) -> Tuple[CredentialProbeResult, List[Finding]]:
+    outcomes = [_try_ftp_login(target_ip, username, password) for username, password in FTP_DEFAULTS]
+    usernames = tuple(
+        username for (username, _password), outcome in zip(FTP_DEFAULTS, outcomes)
+        if outcome == SUCCESS
+    )
+    status = _summarize_status(tuple(
+        CredentialProbeResult("ftp", outcome) for outcome in outcomes
+    ))
+    if not usernames:
+        return CredentialProbeResult("ftp", status), []
+    evidence = json.dumps({
+        "service": "ftp",
+        "authentication": "successful",
+        "successful_usernames": list(usernames),
+        "tested_default_count": len(FTP_DEFAULTS),
+    }, sort_keys=True)
+    finding = _make_finding(
+        session_id=session_id,
+        target_ip=target_ip,
+        target_port=21,
+        target_service=RULE_ID,
+        evidence_raw=evidence,
+        evidence_command=f"FTP default-credential probe on {target_ip}:21 (passwords redacted)",
+    )
+    return CredentialProbeResult("ftp", SUCCESS, usernames), [finding]
 
 
 def _try_ftp_login(
     target_ip: str,
     username: str,
     password: str,
-) -> Optional[bool]:
-    """Attempt one FTP login. Returns True if accepted, False if rejected.
-
-    Returns None when the service is unreachable (not a credential result).
-
-    Args:
-        target_ip: Host to probe.
-        username: FTP username.
-        password: FTP password.
-
-    Returns:
-        Optional[bool]: True accepted, False rejected, None unreachable.
-    """
+) -> str:
+    """Attempt one FTP login and return a normalized probe status."""
     ftp: Optional[ftplib.FTP] = None
     try:
         ftp = ftplib.FTP()
         ftp.connect(target_ip, 21, timeout=PROBE_TIMEOUT_SECONDS)
         ftp.login(username, password)
-        return True
+        return SUCCESS
     except ftplib.error_perm:
-        return False
+        return NO_MATCH
+    except socket.timeout:
+        return TIMEOUT
+    except (ConnectionRefusedError, ConnectionResetError):
+        return INACCESSIBLE
     except (OSError, EOFError, ftplib.Error):
-        return None
+        return ERROR
     finally:
         if ftp is not None:
             try:
@@ -188,40 +194,42 @@ def _try_ftp_login(
 # ---------------------------------------------------------------------------
 
 def _check_snmp_defaults(target_ip: str, session_id: str) -> List[Finding]:
-    """Try SNMP_DEFAULT_COMMUNITIES against UDP/161.
-
-    Args:
-        target_ip: Host to probe.
-        session_id: Audit session ID.
-
-    Returns:
-        List[Finding]: Findings for communities that returned a response.
-    """
-    findings: List[Finding] = []
-    for community in SNMP_DEFAULT_COMMUNITIES:
-        ok = _try_snmp_community(target_ip, community)
-        if ok is True:
-            findings.append(
-                _make_finding(
-                    session_id=session_id,
-                    target_ip=target_ip,
-                    target_port=161,
-                    target_service=RULE_ID,
-                    evidence_raw=(
-                        f"SNMPv1 GET accepted on {target_ip}:161/udp\n"
-                        f"community={community}\n"
-                        f"Dictionary entry matched a factory default."
-                    ),
-                    evidence_command=(
-                        f"snmpget -v1 -c {community} {target_ip} "
-                        f"sysDescr.0 (default dictionary)"
-                    ),
-                )
-            )
-    return findings
+    """Return one Finding for SNMP when one or more defaults are accepted."""
+    return _check_snmp_defaults_result(target_ip, session_id)[1]
 
 
-def _try_snmp_community(target_ip: str, community: str) -> Optional[bool]:
+def _check_snmp_defaults_result(
+    target_ip: str, session_id: str
+) -> Tuple[CredentialProbeResult, List[Finding]]:
+    outcomes = [_try_snmp_community(target_ip, community) for community in SNMP_DEFAULT_COMMUNITIES]
+    communities = tuple(
+        community for community, outcome in zip(SNMP_DEFAULT_COMMUNITIES, outcomes)
+        if outcome == SUCCESS
+    )
+    status = _summarize_status(tuple(
+        CredentialProbeResult("snmp", outcome) for outcome in outcomes
+    ))
+    if not communities:
+        return CredentialProbeResult("snmp", status), []
+    evidence = json.dumps({
+        "service": "snmp",
+        "authentication": "successful",
+        "successful_communities": ["[redacted]" for _ in communities],
+        "successful_count": len(communities),
+        "tested_default_count": len(SNMP_DEFAULT_COMMUNITIES),
+    }, sort_keys=True)
+    finding = _make_finding(
+        session_id=session_id,
+        target_ip=target_ip,
+        target_port=161,
+        target_service=RULE_ID,
+        evidence_raw=evidence,
+        evidence_command=f"SNMP default-community probe on {target_ip}:161/udp (communities redacted)",
+    )
+    return CredentialProbeResult("snmp", SUCCESS, ("[redacted]",) * len(communities)), [finding]
+
+
+def _try_snmp_community(target_ip: str, community: str) -> str:
     """Send a minimal SNMPv1 GET (sysDescr) and check for a response.
 
     Args:
@@ -249,9 +257,13 @@ def _try_snmp_community(target_ip: str, community: str) -> Optional[bool]:
         # community accepted if the session was established.
         # A hard reject by wrong community returns no response at all (timeout).
         # Any valid SEQUENCE response means the community string was accepted.
-        return True
-    except (OSError, socket.timeout):
-        return None
+        return SUCCESS
+    except socket.timeout:
+        return TIMEOUT
+    except (ConnectionRefusedError, ConnectionResetError):
+        return INACCESSIBLE
+    except OSError:
+        return ERROR
     finally:
         if sock is not None:
             try:
@@ -302,6 +314,20 @@ def _ber_sequence(content: bytes) -> bytes:
         return bytes([0x30, length]) + content
     # Long form (enough for our tiny PDUs)
     return bytes([0x30, 0x81, length]) + content
+
+
+def _summarize_status(results: Tuple[CredentialProbeResult, ...]) -> str:
+    """Summarize probe outcomes without treating transport errors as NO_MATCH."""
+    statuses = {result.status for result in results}
+    if SUCCESS in statuses:
+        return SUCCESS
+    if TIMEOUT in statuses:
+        return TIMEOUT
+    if INACCESSIBLE in statuses:
+        return INACCESSIBLE
+    if ERROR in statuses:
+        return ERROR
+    return NO_MATCH
 
 
 # ---------------------------------------------------------------------------
