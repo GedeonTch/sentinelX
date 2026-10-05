@@ -8,7 +8,17 @@ import pytest
 import core.database as db
 from cli import _finding_fingerprint, _run_verify, app
 from typer.testing import CliRunner
-from core.finding import Category, Confidence, Evidence, Finding, FindingStatus, Severity
+from core.finding import (
+    Category,
+    Confidence,
+    Evidence,
+    Explanation,
+    Exposure,
+    Finding,
+    FindingStatus,
+    Severity,
+)
+from core.risk_scorer import score_findings
 from detect.tcp_scan import TcpPortScanResult, _parse_tcp_xml_with_states
 
 SESSION = "verify-session"
@@ -79,6 +89,94 @@ def test_targeted_tcp_verify_keeps_open_finding_and_session_fields():
     assert after["discover_status"] == before["discover_status"]
 
 
+def _rich_finding(status=FindingStatus.OPEN):
+    return Finding(
+        session_id=SESSION,
+        module="tcp_scan",
+        target_ip="192.168.10.10",
+        target_port=23,
+        target_service="telnet",
+        category=Category.SERVICE,
+        severity=Severity.HIGH,
+        confidence=Confidence.CONFIRMED,
+        exposure=Exposure.EXTERNAL,
+        evidence=Evidence(raw="historical proof", command="nmap -p 23"),
+        explanation=Explanation(what="what", attack="attack", defense="defense"),
+        cve_refs=["CVE-2026-0001"],
+        cvss_score=8.0,
+        remediation_cmd="disable telnet",
+        status=status,
+    )
+
+
+def test_still_present_recalculates_current_risk_and_preserves_metadata():
+    original = score_findings([_rich_finding()])[0]
+    db.save_finding(original)
+    current = make_finding()
+    current.id = "scanner-generated-id"
+
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([current], {23: "open"})):
+        result = _run_verify(SESSION, original.id)
+
+    stored = db.get_finding_by_id(SESSION, original.id)
+    assert result["status"] == "SUCCESS"
+    assert stored.status == FindingStatus.OPEN
+    assert stored.risk_score == 92.0
+    assert stored.id == original.id
+    assert stored.severity == original.severity
+    assert stored.cvss_score == original.cvss_score
+    assert stored.cve_refs == original.cve_refs
+    assert stored.evidence == original.evidence
+    assert stored.explanation == original.explanation
+    assert stored.remediation_cmd == original.remediation_cmd
+
+
+def test_verified_finding_keeps_history_and_reopening_recalculates_risk():
+    original = score_findings([_rich_finding()])[0]
+    db.save_finding(original)
+
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "closed"})):
+        result = _run_verify(SESSION, original.id)
+
+    verified = db.get_finding_by_id(SESSION, original.id)
+    assert result["status"] == "SUCCESS"
+    assert verified.status == FindingStatus.VERIFIED
+    assert verified.risk_score == original.risk_score
+    assert verified.cvss_score == 8.0
+    assert verified.cve_refs == ["CVE-2026-0001"]
+    assert verified.evidence == original.evidence
+    assert verified.explanation == original.explanation
+    assert verified.remediation_cmd == "disable telnet"
+
+    reappeared = make_finding()
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([reappeared], {23: "open"})):
+        reopened = _run_verify(SESSION, original.id)
+
+    reopened_finding = db.get_finding_by_id(SESSION, original.id)
+    assert reopened["status"] == "SUCCESS"
+    assert reopened_finding.status == FindingStatus.OPEN
+    assert reopened_finding.risk_score == 92.0
+    assert reopened_finding.id == original.id
+    assert reopened_finding.cve_refs == ["CVE-2026-0001"]
+
+
+def test_verify_with_identical_data_is_idempotent():
+    original = score_findings([_rich_finding()])[0]
+    db.save_finding(original)
+    current = make_finding()
+
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([current], {23: "open"})):
+        first = _run_verify(SESSION, original.id)
+    first_stored = db.get_finding_by_id(SESSION, original.id)
+
+    with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([current], {23: "open"})):
+        second = _run_verify(SESSION, original.id)
+    second_stored = db.get_finding_by_id(SESSION, original.id)
+
+    assert first["status"] == second["status"] == "SUCCESS"
+    assert first_stored.to_dict() == second_stored.to_dict()
+
+
 def test_successful_absence_marks_open_finding_verified():
     original = make_finding()
     db.save_finding(original)
@@ -93,7 +191,7 @@ def test_successful_absence_marks_open_finding_verified():
 
 
 def test_filtered_port_is_partial_and_never_verified():
-    original = make_finding()
+    original = score_findings([make_finding()])[0]
     db.save_finding(original)
 
     with patch("detect.tcp_scan.tcp_scan_port_state", return_value=_tcp_result([], {23: "filtered"})):
@@ -103,6 +201,7 @@ def test_filtered_port_is_partial_and_never_verified():
     assert result["status"] == "PARTIAL"
     assert result["inconclusive"][0].id == original.id
     assert stored.status == FindingStatus.OPEN
+    assert stored.risk_score == original.risk_score
 
 
 def test_legacy_empty_tcp_list_is_unknown_not_closed():
@@ -130,16 +229,18 @@ def test_verified_finding_that_reappears_becomes_open():
     assert db.get_finding_by_id(SESSION, original.id).status == FindingStatus.OPEN
 
 
-def test_failed_control_preserves_status_and_is_failed():
-    original = make_finding()
+def test_failed_control_preserves_status_and_current_risk():
+    original = score_findings([make_finding()])[0]
     db.save_finding(original)
 
     from detect.tcp_scan import TcpScanFailed
     with patch("detect.tcp_scan.tcp_scan", side_effect=TcpScanFailed("nmap failed")):
         result = _run_verify(SESSION, original.id)
 
+    stored = db.get_finding_by_id(SESSION, original.id)
     assert result["status"] == "FAILED"
-    assert db.get_finding_by_id(SESSION, original.id).status == FindingStatus.OPEN
+    assert stored.status == FindingStatus.OPEN
+    assert stored.risk_score == original.risk_score
     assert result["inconclusive"][0].id == original.id
 
 

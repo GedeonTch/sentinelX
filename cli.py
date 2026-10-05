@@ -756,6 +756,7 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
         save_findings, update_finding_status,
     )
     from core.finding import FindingStatus
+    from core.risk_scorer import score_findings
 
     session = get_session(session_id)
     if session is None:
@@ -807,16 +808,37 @@ def _run_verify(session_id: str, finding_id: Optional[str] = None) -> dict:
             update_finding_status(session_id, original.id, FindingStatus.VERIFIED)
             verified.append(original)
 
-    persisted_new = []
+    current_to_persist = []
+    original_by_current_id = {}
     for fingerprint, current in current_by_fingerprint.items():
         original = old_by_fingerprint.get(fingerprint)
         if original is not None:
+            # The scanner result is the current observation, while the Finding
+            # retains its identity and historical metadata across VERIFY.
             current = dataclasses.replace(
                 current,
                 id=original.id,
+                session_id=original.session_id,
+                created_at=original.created_at,
+                severity=original.severity,
+                confidence=original.confidence,
+                exposure=original.exposure,
+                cvss_score=original.cvss_score,
+                cve_refs=list(original.cve_refs),
+                evidence=original.evidence,
+                explanation=original.explanation,
+                remediation_cmd=original.remediation_cmd,
                 status=FindingStatus.OPEN,
             )
-        else:
+            original_by_current_id[current.id] = original
+        current_to_persist.append(current)
+
+    # VERIFY produces current Findings just like the scan pipeline does: all
+    # persisted OPEN observations must pass through the single risk scorer.
+    scored_current = score_findings(current_to_persist)
+    persisted_new = []
+    for current in scored_current:
+        if current.id not in original_by_current_id:
             persisted_new.append(current)
         save_findings([current])
 
