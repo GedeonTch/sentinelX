@@ -173,9 +173,11 @@ def _run_nmap_udp(target: str, profile: str, ports: str) -> Optional[str]:
             text=True,
             timeout=600,  # UDP scans are slower
         )
-        if result.returncode not in (0, 1):
-            display(f"[yellow]nmap warning (exit {result.returncode}): "
-                    f"{result.stderr.strip()[:200]}[/yellow]")
+        if result.returncode != 0:
+            display(f"[red]nmap UDP scan failed (exit {result.returncode}): "
+                    f"{result.stderr.strip()[:200]}[/red]")
+            # Never turn a privilege/error exit into a successful empty scan.
+            return None
         return result.stdout if result.stdout.strip() else None
     except FileNotFoundError:
         display("[red]nmap not found. Run 'netlab doctor'.[/red]")

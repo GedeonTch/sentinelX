@@ -129,6 +129,16 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
         for ip in active_ips:
             progress.update(task, description=f"Pass 2/2 — OS detection → {ip}")
             os_xml = _run_nmap_os(ip)
+            if os_xml is None:
+                display(
+                    f"[yellow]OS detection unavailable for {ip}; "
+                    "host retained without an OS fingerprint (no OS inferred).[/yellow]"
+                )
+            elif not _has_os_match(os_xml):
+                display(
+                    f"[yellow]OS detection returned no usable fingerprint for {ip}; "
+                    "no OS inferred.[/yellow]"
+                )
             host_findings = _parse_host(
                 ip=ip,
                 ping_xml=ping_xml,
@@ -198,9 +208,11 @@ def _run_nmap(cmd: List[str], timeout: int = 300) -> Optional[str]:
         )
         if result.returncode != 0:
             display(
-                f"[yellow]nmap warning (exit {result.returncode}): "
+                f"[yellow]nmap command failed (exit {result.returncode}): "
                 f"{result.stderr.strip()[:200]}[/yellow]"
             )
+            # A non-zero exit is an unavailable scan result, not an empty one.
+            return None
         return result.stdout if result.stdout.strip() else None
     except FileNotFoundError as exc:
         display("[red]nmap not found. Run 'netlab doctor' to check dependencies.[/red]")
@@ -347,6 +359,25 @@ def _extract_mac_hostname(ip: str, xml_output: str) -> Tuple[str, str]:
         return mac, hostname
 
     return "", ""
+
+
+def _has_os_match(os_xml: str) -> bool:
+    """Return whether Nmap produced at least one usable OS match.
+
+    An XML document can be valid while OS detection was skipped, for example
+    when raw-packet privileges are unavailable.  Keeping this check separate
+    prevents that case from being confused with a successful fingerprint.
+    """
+    try:
+        root = ET.fromstring(os_xml)
+    except ET.ParseError:
+        return False
+    return any(
+        match.get("name", "")
+        for host in root.findall("host")
+        for os_elem in host.findall("os")
+        for match in os_elem.findall("osmatch")
+    )
 
 
 def _detect_os(os_xml: str) -> Tuple[str, Confidence]:

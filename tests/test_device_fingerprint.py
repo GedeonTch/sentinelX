@@ -11,6 +11,7 @@ No lab test here — lab validation (real scan on authorized VM) is
 a separate manual step required before marking the ticket DONE.
 """
 
+import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -27,6 +28,8 @@ from recon.device_fingerprint import (
     _parse_host,
     _extract_mac_hostname,
     _detect_os,
+    _has_os_match,
+    _run_nmap_os,
     DiscoveryCancelled,
     DiscoveryFailed,
     fingerprint,
@@ -160,6 +163,34 @@ class TestExtractMacHostname:
         mac, hostname = _extract_mac_hostname("192.168.1.10", MALFORMED_XML)
         assert mac == ""
         assert hostname == ""
+
+
+# ---------------------------------------------------------------------------
+# Privilege-aware OS detection
+# ---------------------------------------------------------------------------
+
+class TestOsPrivilegeHandling:
+    def test_os_command_does_not_escalate_the_application(self):
+        completed = subprocess.CompletedProcess(
+            args=["nmap"], returncode=0, stdout=OS_XML_HIGH_ACCURACY, stderr=""
+        )
+        with patch("recon.device_fingerprint.subprocess.run", return_value=completed) as run:
+            assert _run_nmap_os("192.0.2.10") == OS_XML_HIGH_ACCURACY
+        command = run.call_args.args[0]
+        assert "-O" in command
+        assert "sudo" not in command
+
+    def test_os_nonzero_exit_is_unavailable(self):
+        completed = subprocess.CompletedProcess(
+            args=["nmap"], returncode=1, stdout="<nmaprun/>",
+            stderr="TCP/IP fingerprinting requires root privileges"
+        )
+        with patch("recon.device_fingerprint.subprocess.run", return_value=completed):
+            assert _run_nmap_os("192.0.2.10") is None
+
+    def test_valid_xml_without_os_match_is_not_successful_fingerprint(self):
+        assert _has_os_match(OS_XML_NO_MATCH) is False
+        assert _has_os_match(OS_XML_HIGH_ACCURACY) is True
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +348,16 @@ class TestFingerprint:
             result = fingerprint("192.168.1.10", "session-test")
         assert len(result) == 1
         assert isinstance(result[0], Finding)
+
+    def test_unavailable_os_is_reported_as_partial_without_inventing_os(self):
+        with patch("recon.device_fingerprint.typer.confirm", return_value=True), \
+             patch("recon.device_fingerprint._run_nmap_ping", return_value=PING_XML_ONE_HOST), \
+             patch("recon.device_fingerprint._run_nmap_os", return_value=None), \
+             patch("recon.device_fingerprint.display") as display_mock:
+            result = fingerprint("192.168.1.10", "session-test")
+        assert len(result) == 1
+        assert result[0].service_version == ""
+        assert any("OS detection unavailable" in str(call) for call in display_mock.call_args_list)
 
     def test_two_active_hosts_returns_two_findings(self):
         with patch("recon.device_fingerprint.typer.confirm", return_value=True), \

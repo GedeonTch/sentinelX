@@ -22,6 +22,7 @@ from detect.udp_scan import (
     udp_scan,
     _parse_udp_xml,
     _extract_udp_service,
+    _run_nmap_udp,
 )
 import xml.etree.ElementTree as ET
 
@@ -29,6 +30,27 @@ import xml.etree.ElementTree as ET
 # ---------------------------------------------------------------------------
 # Fixed XML fixtures
 # ---------------------------------------------------------------------------
+
+
+class TestUdpPrivilegeHandling:
+    def test_udp_command_keeps_privileged_operation_explicit(self):
+        completed = subprocess.CompletedProcess(
+            args=["nmap"], returncode=0, stdout=UDP_XML_EMPTY, stderr=""
+        )
+        with patch("detect.udp_scan.subprocess.run", return_value=completed) as run:
+            _run_nmap_udp("192.0.2.10", "normal", "161")
+        command = run.call_args.args[0]
+        assert "-sU" in command
+        assert "sudo" not in command
+
+    def test_udp_nonzero_exit_is_failure_not_empty_success(self):
+        completed = subprocess.CompletedProcess(
+            args=["nmap"], returncode=1, stdout="<nmaprun/>",
+            stderr="UDP scan requires root privileges"
+        )
+        with patch("detect.udp_scan.subprocess.run", return_value=completed):
+            assert _run_nmap_udp("192.0.2.10", "normal", "161") is None
+
 
 UDP_XML_ONE_OPEN = """<?xml version="1.0"?>
 <nmaprun>
