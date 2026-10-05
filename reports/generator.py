@@ -113,9 +113,10 @@ def _generate_json(
         payload = {
             "report_generated_at": datetime.now(timezone.utc).isoformat(),
             "session": session,
-            "scoring_formula": FORMULA_DESCRIPTION,
+            "scoring_formula": _report_formula_description(),
             "findings_count": len(findings),
-            "findings": [f.to_dict() for f in findings],
+            "summary": _build_summary(findings),
+            "findings": [_finding_payload(f) for f in findings],
         }
         output.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
@@ -157,18 +158,23 @@ def _generate_html(
         )
         template = env.get_template("report.html")
 
-        # Compute summary stats
+        # Compute summary stats from persisted current Finding state.
         severity_counts = _count_by_severity(findings)
-        global_score = _compute_global_score(findings)
-        open_findings = [f for f in findings if f.status.value == "open"]
-        critical_high = [
+        summary = _build_summary(findings)
+        worst_current_threat = summary["worst_current_threat"]
+        open_findings = [
             f for f in findings
-            if f.severity.value in ("critical", "high") and f.status.value == "open"
+            if f.status.value == "open" and not _is_inventory_observation(f)
+        ]
+        critical_high = [
+            f for f in open_findings
+            if f.severity.value in ("critical", "high")
         ]
         host_map = _build_host_map(findings)
         has_recommendations = any(
             f.explanation and f.explanation.defense
             for f in findings
+            if not _is_inventory_observation(f)
         )
 
         rendered = template.render(
@@ -177,8 +183,9 @@ def _generate_html(
             open_findings=open_findings,
             critical_high=critical_high,
             severity_counts=severity_counts,
-            global_score=global_score,
-            formula=FORMULA_DESCRIPTION,
+            summary=summary,
+            worst_current_threat=worst_current_threat,
+            formula=_report_formula_description(),
             generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             logo_filename=_LOGO_FILENAME,
             host_map=host_map,
@@ -208,21 +215,68 @@ def _count_by_severity(findings: List[Finding]) -> dict:
     """Return a count dict by severity for open findings."""
     counts = {s.value: 0 for s in Severity}
     for f in findings:
-        if f.status.value == "open":
+        if f.status.value == "open" and not _is_inventory_observation(f):
             counts[f.severity.value] = counts.get(f.severity.value, 0) + 1
     return counts
 
 
-def _compute_global_score(findings: List[Finding]) -> Optional[float]:
-    """Return the highest risk_score among open findings with confidence >= 0.7."""
+def _compute_worst_current_threat(findings: List[Finding]) -> Optional[float]:
+    """Return the highest current risk among persisted OPEN Findings."""
     scores = [
         f.risk_score
         for f in findings
         if f.status.value == "open"
+        and not _is_inventory_observation(f)
         and f.risk_score is not None
-        and float(f.confidence) >= 0.7
     ]
     return max(scores) if scores else None
+
+
+def _report_formula_description() -> str:
+    """Describe scoring without reviving the retired network-score label."""
+    lines = [
+        line for line in FORMULA_DESCRIPTION.splitlines()
+        if not line.strip().lower().startswith("global")
+    ]
+    lines.append("  Worst Current Threat : highest current risk_score among OPEN Findings")
+    return "\n".join(lines)
+
+
+def _is_inventory_observation(finding: Finding) -> bool:
+    """Return whether a persisted record is inventory, not a vulnerability."""
+    return finding.module == "device_fingerprint"
+
+
+def _finding_payload(finding: Finding) -> dict:
+    """Serialize a Finding with explicit current-versus-historical semantics."""
+    payload = finding.to_dict()
+    is_open = finding.status.value == "open"
+    payload["current_risk_score"] = finding.risk_score if is_open else None
+    payload["risk_scope"] = "current" if is_open else "historical_only"
+    payload["kind"] = (
+        "observation" if finding.module == "device_fingerprint" else "finding"
+    )
+    return payload
+
+
+def _build_summary(findings: List[Finding]) -> dict:
+    """Build report counters from the persisted Finding collection."""
+    open_findings = [
+        f for f in findings
+        if f.status.value == "open" and not _is_inventory_observation(f)
+    ]
+    verified_findings = [
+        f for f in findings
+        if f.status.value == "verified" and not _is_inventory_observation(f)
+    ]
+    observations = [f for f in findings if _is_inventory_observation(f)]
+    return {
+        "total_findings": len(findings),
+        "open_findings": len(open_findings),
+        "verified_findings": len(verified_findings),
+        "inventory_observations": len(observations),
+        "worst_current_threat": _compute_worst_current_threat(findings),
+    }
 
 
 def _build_host_map(findings: List[Finding]) -> dict:

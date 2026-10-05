@@ -21,7 +21,7 @@ from core.finding import (
     Severity, Category, Confidence, Exposure, FindingStatus,
 )
 from core.risk_scorer import FORMULA_DESCRIPTION
-from reports.generator import generate_report, _count_by_severity, _compute_global_score
+from reports.generator import generate_report, _count_by_severity, _compute_worst_current_threat
 
 
 SESSION = "session-report-test"
@@ -112,6 +112,37 @@ class TestJsonReport:
         data = json.loads(output.read_text())
         assert "scoring_formula" in data
         assert "risk_score" in data["scoring_formula"]
+        assert "Global Risk Score" not in data["scoring_formula"]
+
+    def test_json_distinguishes_current_and_historical_state(self, tmp_path):
+        open_finding = make_finding(risk_score=80.0)
+        verified = make_finding(risk_score=90.0, target_ip="192.168.1.27")
+        verified.status = FindingStatus.VERIFIED
+        observation = make_finding(
+            module="device_fingerprint", target_ip="192.168.1.28", target_port=None,
+        )
+        db.save_finding(open_finding)
+        db.save_finding(verified)
+        db.save_finding(observation)
+
+        output = tmp_path / "report.json"
+        assert generate_report(SESSION, "json", str(output)) is True
+        data = json.loads(output.read_text())
+
+        assert data["findings_count"] == 3
+        assert data["summary"] == {
+            "total_findings": 3,
+            "open_findings": 1,
+            "verified_findings": 1,
+            "inventory_observations": 1,
+            "worst_current_threat": 80.0,
+        }
+        by_ip = {item["target_ip"]: item for item in data["findings"]}
+        assert by_ip["192.168.1.26"]["current_risk_score"] == 80.0
+        assert by_ip["192.168.1.27"]["current_risk_score"] is None
+        assert by_ip["192.168.1.27"]["risk_scope"] == "historical_only"
+        assert by_ip["192.168.1.27"]["cvss_score"] == 9.3
+        assert by_ip["192.168.1.28"]["kind"] == "observation"
 
     def test_json_contains_session_info(self, tmp_path):
         db.close_session(SESSION, status="completed", discover_status="EMPTY")
@@ -266,7 +297,30 @@ class TestHtmlReport:
         output = tmp_path / "report.html"
         generate_report(SESSION, "html", str(output))
         content = output.read_text()
-        assert "87" in content  # score displayed
+        assert "87" in content  # current score displayed
+        assert "Worst Current Threat" in content
+        assert "Global Network Risk Score" not in content
+
+    def test_html_distinguishes_open_verified_and_inventory(self, tmp_path):
+        open_finding = make_finding(risk_score=80.0)
+        verified = make_finding(risk_score=90.0, target_ip="192.168.1.27")
+        verified.status = FindingStatus.VERIFIED
+        observation = make_finding(
+            module="device_fingerprint", target_ip="192.168.1.28", target_port=None,
+        )
+        db.save_finding(open_finding)
+        db.save_finding(verified)
+        db.save_finding(observation)
+
+        output = tmp_path / "report.html"
+        assert generate_report(SESSION, "html", str(output)) is True
+        content = output.read_text()
+
+        assert "open" in content
+        assert "verified" in content
+        assert "not current" in content
+        assert "inventory observation" in content
+        assert "Global Network Risk Score" not in content
 
     def test_html_no_findings_shows_empty_state(self, tmp_path):
         output = tmp_path / "report.html"
@@ -316,29 +370,29 @@ class TestHelpers:
         assert counts["high"] == 1
         assert counts["info"] == 1
 
-    def test_compute_global_score_returns_highest(self):
+    def test_compute_worst_current_threat_returns_highest(self):
         f1 = make_finding(risk_score=45.0)
         f2 = make_finding(risk_score=87.5)
         f3 = make_finding(risk_score=30.0)
-        score = _compute_global_score([f1, f2, f3])
+        score = _compute_worst_current_threat([f1, f2, f3])
         assert score == 87.5
 
-    def test_compute_global_score_excludes_possible_confidence(self):
+    def test_compute_worst_current_threat_keeps_current_possible_score(self):
         f = make_finding(risk_score=90.0)
         f.confidence = Confidence.POSSIBLE
-        score = _compute_global_score([f])
-        assert score is None
+        score = _compute_worst_current_threat([f])
+        assert score == 90.0
 
-    def test_compute_global_score_excludes_non_open(self):
+    def test_compute_worst_current_threat_excludes_non_open(self):
         f = make_finding(risk_score=90.0)
         f.status = FindingStatus.REMEDIATED
-        score = _compute_global_score([f])
+        score = _compute_worst_current_threat([f])
         assert score is None
 
-    def test_compute_global_score_none_when_no_scored_findings(self):
+    def test_compute_worst_current_threat_none_when_no_scored_findings(self):
         f = make_finding(risk_score=None)
-        score = _compute_global_score([f])
+        score = _compute_worst_current_threat([f])
         assert score is None
 
-    def test_compute_global_score_empty_list(self):
-        assert _compute_global_score([]) is None
+    def test_compute_worst_current_threat_empty_list(self):
+        assert _compute_worst_current_threat([]) is None
