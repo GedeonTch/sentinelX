@@ -6,6 +6,7 @@ Covers: NetworkIdentity, detect_network_identity (mocked),
         --relearn atomicity, MAC="" never matches known MAC.
 """
 
+import subprocess
 import uuid
 import pytest
 from pathlib import Path
@@ -69,6 +70,47 @@ class TestNetworkIdentity:
     def test_frozen(self):
         with pytest.raises(Exception):
             IDENTITY_A.gateway_mac = "changed"
+
+
+class TestGatewayDetection:
+    def test_specific_route_gateway_is_used(self):
+        def run(command, **kwargs):
+            if command[-2:] == ["show", "192.168.1.0/24"]:
+                return subprocess.CompletedProcess(command, 0, "192.168.1.0/24 via 192.168.1.1 dev eth0 src 192.168.1.20\n", "")
+            return subprocess.CompletedProcess(command, 0, "default via 10.0.0.1 dev eth0 src 10.0.0.20\n", "")
+
+        with patch("sentinel.baseline.subprocess.run", side_effect=run):
+            assert _get_gateway_ip("192.168.1.0/24") == "192.168.1.1"
+
+    def test_host_only_connected_route_does_not_fallback_to_default_gateway(self):
+        def run(command, **kwargs):
+            if command[-2:] == ["show", "192.168.56.0/24"]:
+                return subprocess.CompletedProcess(command, 0, "192.168.56.0/24 dev vboxnet0 scope link src 192.168.56.1\n", "")
+            return subprocess.CompletedProcess(command, 0, "default via 10.0.0.1 dev eth0 src 10.0.0.20\n", "")
+
+        with patch("sentinel.baseline.subprocess.run", side_effect=run):
+            assert _get_gateway_ip("192.168.56.0/24") == ""
+
+    def test_unavailable_route_keeps_gateway_unknown(self):
+        with patch(
+            "sentinel.baseline.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 1, "", "route unavailable"),
+        ):
+            assert detect_network_identity("192.168.56.0/24") == NetworkIdentity(
+                "192.168.56.0/24", "", ""
+            )
+
+    def test_local_interface_source_is_not_a_gateway(self):
+        def run(command, **kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "192.168.56.0/24 via 192.168.56.1 dev vboxnet0 src 192.168.56.1\n",
+                "",
+            )
+
+        with patch("sentinel.baseline.subprocess.run", side_effect=run):
+            assert _get_gateway_ip("192.168.56.0/24") == ""
 
 
 # ---------------------------------------------------------------------------

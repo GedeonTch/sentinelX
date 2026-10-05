@@ -128,6 +128,19 @@ class TestStatus:
         result = status(SESSION)
         assert result["unresolved_alerts"] >= 1
 
+    def test_status_preserves_unknown_gateway_for_host_only_network(self):
+        db.sentinel_update_state(
+            network_id=SESSION,
+            sentinel_status="active",
+            target_network="192.168.56.0/24",
+            gateway_ip="",
+            gateway_mac="",
+        )
+        result = status(SESSION)
+        assert result["target_network"] == "192.168.56.0/24"
+        assert result["gateway_ip"] == ""
+        assert result["gateway_mac"] == ""
+
     def test_unknown_network_is_controlled_error(self):
         with pytest.raises(ValueError, match="Unknown Sentinel network"):
             status("unknown-network")

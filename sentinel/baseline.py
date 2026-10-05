@@ -119,7 +119,8 @@ class NetworkIdentity:
 
     def __str__(self) -> str:
         mac_display = self.gateway_mac if self.gateway_mac else "unknown"
-        return f"{self.target_network} via {self.gateway_ip} [{mac_display}]"
+        gateway_display = self.gateway_ip if self.gateway_ip else "unknown"
+        return f"{self.target_network} via {gateway_display} [{mac_display}]"
 
 
 # ---------------------------------------------------------------------------
@@ -191,21 +192,39 @@ def _get_gateway_ip(target_network: str) -> str:
             ["ip", "route", "show", target_network],
             capture_output=True, text=True, timeout=10,
         )
-        for line in result.stdout.splitlines():
-            if "via" in line:
-                parts = line.split()
+        route_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        for line in route_lines:
+            parts = line.split()
+            if "via" in parts:
                 via_idx = parts.index("via")
-                return parts[via_idx + 1]
-        # Fallback: default route
+                gateway = parts[via_idx + 1]
+                # A route must never identify the local interface as its
+                # gateway. The connected-route form (dev ... src ...) has no
+                # real gateway and is handled below.
+                src = parts[parts.index("src") + 1] if "src" in parts else ""
+                if gateway != src:
+                    return gateway
+                return ""
+
+        # A matching connected route is host-only/local-link evidence: do not
+        # fall back to an unrelated default route on another interface.
+        if route_lines:
+            return ""
+
+        # Fallback: default route only when no route exists for the target.
         result2 = subprocess.run(
             ["ip", "route", "show", "default"],
             capture_output=True, text=True, timeout=10,
         )
         for line in result2.stdout.splitlines():
-            if "via" in line:
-                parts = line.split()
+            parts = line.split()
+            if "via" in parts:
                 via_idx = parts.index("via")
-                return parts[via_idx + 1]
+                gateway = parts[via_idx + 1]
+                src = parts[parts.index("src") + 1] if "src" in parts else ""
+                if gateway != src:
+                    return gateway
+                return ""
     except Exception:
         pass
     return ""
