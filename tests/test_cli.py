@@ -25,9 +25,16 @@ from contextlib import ExitStack
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
-from cli import app, PipelineResult, _render_scan_summary, _run_pipeline
+from cli import (
+    app,
+    PipelineResult,
+    _render_contextual_suggestions,
+    _render_scan_summary,
+    _run_pipeline,
+)
 from recon.device_fingerprint import DiscoveryCancelled, DiscoveryFailed
 from detect.tcp_scan import TcpScanCancelled, TcpScanFailed
 from detect.udp_scan import UdpScanCancelled, UdpScanFailed
@@ -1294,6 +1301,155 @@ class TestCleanup:
         result = runner.invoke(app, ["cleanup"])
         assert result.exit_code == 0
         assert "Usage" in result.output
+
+
+# ---------------------------------------------------------------------------
+# standalone commands (P2-3)
+# ---------------------------------------------------------------------------
+
+class TestStandaloneCommands:
+    def test_whois_calls_dns_enum_and_renders(self):
+        finding = make_finding(module="dns_enum", target_port=None, target_service="ptr")
+        with patch("recon.dns_enum.dns_enum", return_value=[finding]) as dns_enum, \
+             patch("cli._render_findings_table") as render:
+            result = runner.invoke(app, ["whois", "192.168.1.1"])
+        assert result.exit_code == 0
+        dns_enum.assert_called_once()
+        assert dns_enum.call_args.args[0] == "192.168.1.1"
+        assert str(dns_enum.call_args.args[1]).startswith("standalone-")
+        render.assert_called_once_with([finding])
+
+    def test_whois_empty_shows_message(self):
+        with patch("recon.dns_enum.dns_enum", return_value=[]):
+            result = runner.invoke(app, ["whois", "10.0.0.1"])
+        assert result.exit_code == 0
+        assert "No DNS/WHOIS data" in result.output
+
+    def test_smb_enum_calls_module_without_db_persist(self):
+        finding = make_finding(module="smb_enum", target_port=445, target_service="smb")
+        with patch("detect.smb_enum.smb_enum", return_value=[finding]) as smb, \
+             patch("cli._render_findings_table") as render, \
+             patch("core.database.save_findings") as save:
+            result = runner.invoke(
+                app,
+                ["smb_enum", "--target", "192.168.1.50"],
+            )
+        assert result.exit_code == 0
+        smb.assert_called_once()
+        assert smb.call_args.args[0] == "192.168.1.50"
+        assert str(smb.call_args.args[1]).startswith("standalone-")
+        render.assert_called_once_with([finding])
+        save.assert_not_called()
+
+    def test_creds_check_calls_module_without_db_persist(self):
+        finding = make_finding(module="default_creds", target_port=21, target_service="ftp")
+        with patch(
+            "detect.default_creds.check_default_creds",
+            return_value=[finding],
+        ) as check, \
+             patch("cli._render_findings_table") as render, \
+             patch("core.database.save_findings") as save:
+            result = runner.invoke(
+                app,
+                ["creds_check", "--target", "192.168.1.60"],
+            )
+        assert result.exit_code == 0
+        check.assert_called_once()
+        assert check.call_args.args[0] == "192.168.1.60"
+        assert str(check.call_args.args[1]).startswith("standalone-")
+        render.assert_called_once_with([finding])
+        save.assert_not_called()
+
+    def test_smb_enum_requires_target(self):
+        result = runner.invoke(app, ["smb_enum"])
+        assert result.exit_code != 0
+
+    def test_creds_check_requires_target(self):
+        result = runner.invoke(app, ["creds_check"])
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# contextual suggestions (T12)
+# ---------------------------------------------------------------------------
+
+class TestContextualSuggestions:
+    @staticmethod
+    def _render_display_calls(display) -> str:
+        chunks = []
+        for call in display.call_args_list:
+            obj = call.args[0]
+            if isinstance(obj, Panel):
+                buf = StringIO()
+                Console(file=buf, width=100).print(obj)
+                chunks.append(buf.getvalue())
+            else:
+                chunks.append(str(obj))
+        return "\n".join(chunks)
+
+    def test_suggests_smb_enum_for_port_445(self):
+        findings = [make_finding(target_ip="192.168.1.10", target_port=445)]
+        result = PipelineResult(session_id="session-sug")
+        with patch("cli.display") as display:
+            _render_contextual_suggestions(findings, result)
+        rendered = self._render_display_calls(display)
+        assert "netlab smb_enum --target 192.168.1.10" in rendered
+        assert "Contextual suggestions" in rendered
+
+    def test_suggests_creds_check_for_ports_21_and_161(self):
+        findings = [
+            make_finding(target_ip="192.168.1.20", target_port=21, target_service="ftp"),
+            make_finding(target_ip="192.168.1.30", target_port=161, target_service="snmp"),
+        ]
+        result = PipelineResult(session_id="session-sug")
+        with patch("cli.display") as display:
+            _render_contextual_suggestions(findings, result)
+        rendered = self._render_display_calls(display)
+        assert "netlab creds_check --target 192.168.1.20" in rendered
+        assert "netlab creds_check --target 192.168.1.30" in rendered
+
+    def test_no_panel_when_no_relevant_ports(self):
+        findings = [make_finding(target_ip="192.168.1.10", target_port=22, target_service="ssh")]
+        result = PipelineResult(session_id="session-sug")
+        with patch("cli.display") as display:
+            _render_contextual_suggestions(findings, result)
+        display.assert_not_called()
+
+    def test_skips_smb_suggestion_when_smb_enum_already_ran(self):
+        findings = [
+            make_finding(module="smb_enum", target_ip="192.168.1.10", target_port=445),
+            make_finding(module="tcp_scan", target_ip="192.168.1.10", target_port=445),
+        ]
+        result = PipelineResult(session_id="session-sug")
+        with patch("cli.display") as display:
+            _render_contextual_suggestions(findings, result)
+        display.assert_not_called()
+
+    def test_skips_creds_when_default_creds_findings_present(self):
+        findings = [
+            make_finding(module="default_creds", target_ip="192.168.1.20", target_port=21),
+            make_finding(module="tcp_scan", target_ip="192.168.1.20", target_port=21),
+        ]
+        result = PipelineResult(session_id="session-sug")
+        with patch("cli.display") as display:
+            _render_contextual_suggestions(findings, result)
+        display.assert_not_called()
+
+    def test_summary_includes_suggestions_without_running_commands(self):
+        findings = [make_finding(target_ip="192.168.1.10", target_port=445)]
+        result = PipelineResult(
+            session_id="session-summary",
+            findings_count=1,
+            global_score=10.0,
+        )
+        with patch("cli.display") as display, \
+             patch("detect.smb_enum.smb_enum") as smb, \
+             patch("detect.default_creds.check_default_creds") as creds:
+            _render_scan_summary(result, findings)
+        rendered = self._render_display_calls(display)
+        assert "netlab smb_enum --target 192.168.1.10" in rendered
+        smb.assert_not_called()
+        creds.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

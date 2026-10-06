@@ -193,6 +193,57 @@ def _status_markup(status: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Standalone specialized commands (not called by netlab scan)
+# ---------------------------------------------------------------------------
+
+def _standalone_session_id() -> str:
+    """Ephemeral session id for standalone commands — findings are not persisted."""
+    return f"standalone-{uuid.uuid4().hex[:8]}"
+
+
+@app.command()
+def whois(
+    ip: str = typer.Argument(..., help="IP address or domain to enumerate via DNS/WHOIS."),
+) -> None:
+    """Passive DNS/WHOIS enumeration (dns_enum). Findings are displayed, not saved."""
+    from recon.dns_enum import dns_enum
+
+    findings = dns_enum(ip, _standalone_session_id())
+    if findings:
+        _render_findings_table(findings)
+    else:
+        display(f"[yellow]No DNS/WHOIS data for {ip}.[/yellow]")
+
+
+@app.command("smb_enum")
+def smb_enum_cmd(
+    target: str = typer.Option(..., "--target", "-t", help="IPv4 address of the Windows host."),
+) -> None:
+    """Enumerate SMB shares/domain via enum4linux. Findings are displayed, not saved."""
+    from detect.smb_enum import smb_enum
+
+    findings = smb_enum(target, _standalone_session_id())
+    if findings:
+        _render_findings_table(findings)
+    else:
+        display(f"[yellow]No SMB findings for {target}.[/yellow]")
+
+
+@app.command("creds_check")
+def creds_check_cmd(
+    target: str = typer.Option(..., "--target", "-t", help="IPv4 address to probe for default credentials."),
+) -> None:
+    """Probe known default FTP/SNMP credentials. Findings are displayed, not saved."""
+    from detect.default_creds import check_default_creds
+
+    findings = check_default_creds(target, _standalone_session_id())
+    if findings:
+        _render_findings_table(findings)
+    else:
+        display(f"[yellow]No default-credential findings for {target}.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # netlab scan — full pipeline
 # ---------------------------------------------------------------------------
 
@@ -538,6 +589,52 @@ def _render_scan_summary(
 
     if result.failure_count:
         display(f"\n[yellow]⚠ {result.failure_count} opération(s) ont échoué.[/yellow]")
+
+    _render_contextual_suggestions(findings, result)
+
+
+def _render_contextual_suggestions(
+    findings: List[Finding],
+    result: PipelineResult,
+) -> None:
+    """Suggest standalone follow-up commands based on open ports (never auto-run)."""
+    executed_steps = {step.name for step in result.steps}
+    finding_modules = {f.module for f in findings}
+
+    skip_smb = "smb_enum" in executed_steps or "smb_enum" in finding_modules
+    skip_creds = (
+        "creds_check" in executed_steps
+        or "default_creds" in executed_steps
+        or "default_creds" in finding_modules
+    )
+
+    suggestions: List[str] = []
+    seen: set[str] = set()
+
+    for finding in findings:
+        ip = finding.target_ip
+        port = finding.target_port
+        if not ip or port is None:
+            continue
+
+        if port == 445 and not skip_smb:
+            cmd = f"netlab smb_enum --target {ip}"
+            if cmd not in seen:
+                seen.add(cmd)
+                suggestions.append(f"Port 445 open on {ip} → {cmd}")
+        elif port in (21, 161) and not skip_creds:
+            cmd = f"netlab creds_check --target {ip}"
+            if cmd not in seen:
+                seen.add(cmd)
+                suggestions.append(f"Port {port} open on {ip} → {cmd}")
+
+    if not suggestions:
+        return
+
+    body = "Suggested follow-up (optional — you decide):\n" + "\n".join(
+        f"  • {line}" for line in suggestions
+    )
+    display(Panel(body, title="Contextual suggestions", border_style="cyan"))
 
 
 # ---------------------------------------------------------------------------
