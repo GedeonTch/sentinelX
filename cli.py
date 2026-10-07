@@ -514,7 +514,7 @@ def _run_pipeline(
             scored = score_findings(explained)
             result.global_score = get_global_score(scored)
             result.add("risk_scoring", "ok",
-                       f"global score: {result.global_score:.1f}" if result.global_score else "no qualifying findings")
+                       f"worst current threat: {result.global_score:.1f}" if result.global_score else "no qualifying findings")
         except Exception as exc:
             result.add("risk_scoring", "failed", str(exc))
 
@@ -592,7 +592,7 @@ def _render_scan_summary(
     display(f"[dim]Session:[/dim] {result.session_id}")
     display(f"[dim]Findings:[/dim] {result.findings_count}")
     if result.global_score is not None:
-        display(f"[dim]Global score:[/dim] {result.global_score:.1f}/100")
+        display(f"[dim]Worst Current Threat:[/dim] {result.global_score:.1f}/100")
     display(f"\n[dim]› netlab findings list --session {result.session_id}[/dim]")
     display(f"[dim]› netlab report generate --session {result.session_id} --format html[/dim]")
 
