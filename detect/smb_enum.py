@@ -1,10 +1,11 @@
 """
-detect/smb_enum.py — SMB share / user / domain enumeration via enum4linux
+detect/smb_enum.py — SMB share / user / domain enumeration via enum4linux-ng
 
 Pipeline step: DETECT
 Role: Enumerate SMB shares, users, and domain information on a Windows host.
       One Finding per detected share, plus one Finding for domain info
       when a domain or workgroup name is present in the output.
+      Uses enum4linux-ng (external tool, own venv) for structured JSON output.
 
 Does not calculate risk_score. Does not write to SQLite. Does not print().
 
@@ -14,21 +15,21 @@ Rules enforced here:
 - ZERO risk_score calculation
 - ALWAYS return List[Finding]
 - ALWAYS ask (y/n) confirmation before sending traffic
-- explanation stays None (no knowledge-base rule wired here)
-- evidence.raw is the raw enum4linux stdout
+- explanation stays None (KB lookup done by pipeline/CLI)
+- evidence.raw is the raw enum4linux-ng JSON output
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import typer
 
+from core.dependencies import ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, _resolve_tool_path
 from core.finding import (
     Category,
     Confidence,
@@ -92,7 +93,7 @@ class SmbEnumerationResult:
 def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
     """Enumerate SMB shares and domain info on a Windows host.
 
-    Asks for (y/n) confirmation before running enum4linux. Returns an
+    Asks for (y/n) confirmation before running enum4linux-ng. Returns an
     empty list when the tool is missing, the user cancels, or output is
     empty — never raises for those cases.
 
@@ -104,8 +105,8 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
         List[Finding]: One Finding per detected share, plus one domain
         Finding when domain information is available.
     """
-    if shutil.which("enum4linux") is None:
-        display("[red]enum4linux not found. Run 'netlab doctor'.[/red]")
+    if _resolve_tool_path("enum4linux-ng") is None:
+        display("[red]enum4linux-ng not found. Run 'netlab doctor'.[/red]")
         return []
 
     confirmed = typer.confirm(
@@ -115,10 +116,10 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
         display("[yellow]SMB enumeration cancelled.[/yellow]")
         return []
 
-    display(f"[cyan]Starting enum4linux on {target_ip}...[/cyan]")
-    raw_output = _run_enum4linux(target_ip)
+    display(f"[cyan]Starting enum4linux-ng on {target_ip}...[/cyan]")
+    raw_output = _run_enum4linux_ng(target_ip)
     if not raw_output:
-        display(f"[yellow]No output from enum4linux on {target_ip}.[/yellow]")
+        display(f"[yellow]No output from enum4linux-ng on {target_ip}.[/yellow]")
         return []
 
     findings = _parse_enum4linux_output(raw_output, target_ip, session_id)
@@ -133,16 +134,19 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
     return findings
 
 
-def _run_enum4linux(target_ip: str) -> Optional[str]:
-    """Run enum4linux and return stdout, or None on error / empty output.
+def _run_enum4linux_ng(target_ip: str) -> Optional[str]:
+    """Run enum4linux-ng with JSON output and return stdout, or None on error.
+
+    Invokes ``ENUM4LINUX_NG_PYTHON ENUM4LINUX_NG_SCRIPT -A --json <ip>``
+    so that the tool runs in its own venv with its own dependencies.
 
     Args:
         target_ip: IPv4 address of the Windows host.
 
     Returns:
-        Optional[str]: Raw stdout, or None.
+        Optional[str]: Raw JSON stdout, or None on error/empty output.
     """
-    command = ["enum4linux", "-a", target_ip]
+    command = [ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, "-A", "--json", target_ip]
     try:
         result = subprocess.run(
             command,
@@ -152,13 +156,13 @@ def _run_enum4linux(target_ip: str) -> Optional[str]:
             check=False,
         )
     except FileNotFoundError:
-        display("[red]enum4linux not found. Run 'netlab doctor'.[/red]")
+        display("[red]enum4linux-ng not found. Run 'netlab doctor'.[/red]")
         return None
     except subprocess.TimeoutExpired:
-        display("[yellow]enum4linux timed out.[/yellow]")
+        display("[yellow]enum4linux-ng timed out.[/yellow]")
         return None
     except OSError as exc:
-        display(f"[red]enum4linux error: {exc}[/red]")
+        display(f"[red]enum4linux-ng error: {exc}[/red]")
         return None
 
     combined = f"{result.stdout or ''}{result.stderr or ''}"
@@ -175,7 +179,7 @@ def _parse_enum4linux_output(
 ) -> List[Finding]:
     """Normalize tool output, then convert justified observations to Findings."""
     result = normalize_smb_output(raw_output, target_ip)
-    command = f"enum4linux -a {target_ip}"
+    command = f"enum4linux-ng -A --json {target_ip}"
     findings: List[Finding] = []
     seen_services: set[str] = set()
 
@@ -200,6 +204,11 @@ def _parse_enum4linux_output(
 
     if result.domain is not None:
         add_finding(result.domain, Category.NETWORK, Severity.INFO)
+
+    # Null session explicitly refused → document the attempt as INFO.
+    # This is an observation, not a vulnerability: the server is hardened.
+    if result.anonymous_session is False:
+        add_finding("smb_access_refused", Category.NETWORK, Severity.INFO)
 
     # Anonymous authentication alone is an observation. Only confirmed share
     # access creates a stronger Finding with the raw proof attached.

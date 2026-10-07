@@ -2,7 +2,7 @@
 tests/test_dependencies.py — Unit tests for core/dependencies.py
 
 Covers:
-- Nominal: python + nmap + enum4linux all usable
+- Nominal: python + nmap + enum4linux-ng all usable
 - Edge: one external tool missing
 - Error: version detection fails (OSError / timeout) without crashing
 - Python below 3.10 is not ready
@@ -28,7 +28,7 @@ def _nmap_ok() -> DependencyCheck:
 
 
 def _enum_ok() -> DependencyCheck:
-    return DependencyCheck(name="enum4linux", present=True, version="0.8.9")
+    return DependencyCheck(name="enum4linux-ng", present=True, version="0.8.9")
 
 
 def _python_ok() -> DependencyCheck:
@@ -64,7 +64,7 @@ class TestNominalEnvironment:
         mock_external.side_effect = [_nmap_ok(), _enum_ok()]
         mock_netlab.return_value = _netlab_ok()
         checks = check_environment()
-        assert [c.name for c in checks] == ["python", "nmap", "enum4linux", ".netlab"]
+        assert [c.name for c in checks] == ["python", "nmap", "enum4linux-ng", ".netlab"]
         assert all(isinstance(c, DependencyCheck) for c in checks)
         assert environment_ready(checks) is True
 
@@ -91,7 +91,7 @@ class TestMissingTool:
         checks = [
             _python_ok(),
             _nmap_ok(),
-            DependencyCheck(name="enum4linux", present=False, version=None),
+            DependencyCheck(name="enum4linux-ng", present=False, version=None),
         ]
         assert environment_ready(checks) is False
 

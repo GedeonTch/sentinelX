@@ -119,7 +119,7 @@ class TestParseInvariants:
             ENUM4LINUX_ADMIN_ONLY, "192.168.1.26", "session-test"
         )
         assert findings[0].evidence.raw == ENUM4LINUX_ADMIN_ONLY
-        assert "enum4linux -a 192.168.1.26" == findings[0].evidence.command
+        assert "enum4linux-ng -A --json 192.168.1.26" == findings[0].evidence.command
 
     def test_status_is_open(self):
         findings = _parse_enum4linux_output(
@@ -133,41 +133,41 @@ class TestParseInvariants:
 
 class TestSmbEnumEdges:
     def test_enum4linux_absent_returns_empty_without_crash(self):
-        with patch("detect.smb_enum.shutil.which", return_value=None):
+        with patch("detect.smb_enum._resolve_tool_path", return_value=None):
             result = smb_enum("192.168.1.26", "session-test")
         assert result == []
 
     def test_user_cancel_returns_empty(self):
-        with patch("detect.smb_enum.shutil.which", return_value="/usr/bin/enum4linux"), \
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
              patch("detect.smb_enum.typer.confirm", return_value=False), \
-             patch("detect.smb_enum._run_enum4linux") as mock_run:
+             patch("detect.smb_enum._run_enum4linux_ng") as mock_run:
             result = smb_enum("192.168.1.26", "session-test")
         assert result == []
         mock_run.assert_not_called()
 
     def test_empty_tool_output_returns_empty(self):
-        with patch("detect.smb_enum.shutil.which", return_value="/usr/bin/enum4linux"), \
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
              patch("detect.smb_enum.typer.confirm", return_value=True), \
-             patch("detect.smb_enum._run_enum4linux", return_value=None):
+             patch("detect.smb_enum._run_enum4linux_ng", return_value=None):
             result = smb_enum("192.168.1.26", "session-test")
         assert result == []
 
 
 class TestSmbEnumErrors:
     def test_timeout_returns_empty_without_crash(self):
-        with patch("detect.smb_enum.shutil.which", return_value="/usr/bin/enum4linux"), \
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
              patch("detect.smb_enum.typer.confirm", return_value=True), \
              patch(
                  "detect.smb_enum.subprocess.run",
                  side_effect=__import__("subprocess").TimeoutExpired(
-                     cmd="enum4linux", timeout=120
+                     cmd="enum4linux-ng", timeout=120
                  ),
              ):
             result = smb_enum("192.168.1.26", "session-test")
         assert result == []
 
     def test_oserror_returns_empty_without_crash(self):
-        with patch("detect.smb_enum.shutil.which", return_value="/usr/bin/enum4linux"), \
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
              patch("detect.smb_enum.typer.confirm", return_value=True), \
              patch("detect.smb_enum.subprocess.run", side_effect=OSError("denied")):
             result = smb_enum("192.168.1.26", "session-test")
@@ -179,7 +179,7 @@ class TestSmbEnumNominalRun:
         completed = MagicMock()
         completed.stdout = ENUM4LINUX_ADMIN_ONLY
         completed.stderr = ""
-        with patch("detect.smb_enum.shutil.which", return_value="/usr/bin/enum4linux"), \
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
              patch("detect.smb_enum.typer.confirm", return_value=True), \
              patch("detect.smb_enum.subprocess.run", return_value=completed):
             result = smb_enum("192.168.1.26", "session-test")
@@ -315,3 +315,87 @@ class TestNormalizedFindings:
         raw = json.dumps({"dialects": ["unknown"], "signing_required": "unknown"})
         findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
         assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# smb_access_refused — null session explicitly refused (T14-c)
+# ---------------------------------------------------------------------------
+
+class TestSmbAccessRefused:
+    def test_null_session_refused_creates_access_refused_finding(self):
+        """anonymous_session=False must produce a smb_access_refused finding."""
+        raw = json.dumps({"anonymous_session": False})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        refused = [f for f in findings if f.target_service == "smb_access_refused"]
+        assert len(refused) == 1
+
+    def test_access_refused_is_info_network_confirmed(self):
+        raw = json.dumps({"anonymous_session": False})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        f = next(f for f in findings if f.target_service == "smb_access_refused")
+        assert f.category == Category.NETWORK
+        assert f.severity == Severity.INFO
+        assert f.confidence == Confidence.CONFIRMED
+
+    def test_null_session_unknown_does_not_create_refused_finding(self):
+        """anonymous_session=None (unknown) must not produce smb_access_refused."""
+        raw = json.dumps({"hostname": "somehost"})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert not any(f.target_service == "smb_access_refused" for f in findings)
+
+    def test_null_session_accepted_does_not_create_refused_finding(self):
+        """anonymous_session=True must not produce smb_access_refused."""
+        raw = json.dumps({"anonymous_session": True})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        assert not any(f.target_service == "smb_access_refused" for f in findings)
+
+    def test_access_refused_and_shares_coexist(self):
+        """Refused session + detected shares must both produce findings."""
+        raw = json.dumps({
+            "anonymous_session": False,
+            "shares": [{"name": "ADMIN$", "accessible": False}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-test")
+        services = {f.target_service for f in findings}
+        assert "smb_access_refused" in services
+        assert "ADMIN$" in services
+
+    def test_ng_json_fixture_windows_server_2016(self):
+        """Simulate a real enum4linux-ng JSON output for Windows Server 2016."""
+        raw = json.dumps({
+            "target": "192.168.57.10",
+            "hostname": "WIN-RJDEKLL104D",
+            "os": "Windows Server 2016",
+            "domain": "ULBU",
+            "dialects": ["SMB2", "SMB3"],
+            "signing_required": True,
+            "sessions": {"null_session": False},
+            "shares": [],
+        })
+        # normalize_smb_output must read null_session from sessions sub-dict
+        result = normalize_smb_output(raw, "192.168.57.10")
+        assert result.os == "Windows Server 2016"
+        assert result.domain == "ULBU"
+        assert result.signing_required is True
+
+    def test_ng_json_fixture_metasploitable2(self):
+        """Simulate a real enum4linux-ng JSON output for Metasploitable2."""
+        raw = json.dumps({
+            "target": "192.168.57.3",
+            "hostname": "metasploitable",
+            "os": "Unix",
+            "workgroup": "WORKGROUP",
+            "dialects": ["SMBv1"],
+            "signing_required": False,
+            "sessions": {"null_session": True},
+            "shares": [
+                {"name": "tmp", "accessible": True, "permissions": "READ_WRITE"},
+                {"name": "IPC$", "type": "IPC"},
+            ],
+        })
+        result = normalize_smb_output(raw, "192.168.57.3")
+        assert result.domain == "WORKGROUP"
+        assert result.anonymous_session is True
+        assert result.signing_required is False
+        share_names = [s.name for s in result.shares]
+        assert "tmp" in share_names

@@ -4,7 +4,7 @@ core/dependencies.py — Environment checks for SentinelX NetLab V1
 Verifies that the host is ready before any real scan:
 - Python >= 3.10 (running interpreter)
 - nmap on PATH
-- enum4linux on PATH
+- enum4linux-ng (external tool, own venv at ENUM4LINUX_NG_BIN)
 - ~/.netlab/ exists (or can be created) and is writable
 
 Returns one typed DependencyCheck per item. Never a single global bool
@@ -19,6 +19,7 @@ Rules enforced here:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -28,11 +29,23 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 REQUIRED_PYTHON: Tuple[int, int] = (3, 10)
-EXTERNAL_TOOLS: Tuple[str, ...] = ("nmap", "enum4linux")
+EXTERNAL_TOOLS: Tuple[str, ...] = ("nmap", "enum4linux-ng")
 NETLAB_HOME_NAME: str = ".netlab"
 _WRITE_PROBE_NAME: str = ".doctor_write_probe"
 _VERSION_TIMEOUT_SECONDS: int = 5
 _VERSION_PATTERN = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+
+# enum4linux-ng is an external tool with its own venv — not installed inside
+# the SentinelX venv. SentinelX calls it as a subprocess via its own Python.
+# Override via environment variables if installed elsewhere.
+_ENUM4LINUX_NG_DEFAULT_PYTHON = "/home/anonymous/enum4linux-ng/venv/bin/python"
+_ENUM4LINUX_NG_DEFAULT_SCRIPT = "/home/anonymous/enum4linux-ng/enum4linux-ng"
+ENUM4LINUX_NG_PYTHON: str = os.environ.get(
+    "ENUM4LINUX_NG_PYTHON", _ENUM4LINUX_NG_DEFAULT_PYTHON
+)
+ENUM4LINUX_NG_SCRIPT: str = os.environ.get(
+    "ENUM4LINUX_NG_SCRIPT", _ENUM4LINUX_NG_DEFAULT_SCRIPT
+)
 
 
 @dataclass
@@ -67,6 +80,30 @@ def check_python() -> DependencyCheck:
     return DependencyCheck(name="python", present=True, version=version)
 
 
+def _resolve_tool_path(name: str) -> Optional[str]:
+    """Return the absolute path for an external tool, or None if not found.
+
+    For ``enum4linux-ng``, checks ``ENUM4LINUX_NG_SCRIPT`` (env override or
+    default path) because it lives outside the SentinelX venv and is invoked
+    via ``ENUM4LINUX_NG_PYTHON ENUM4LINUX_NG_SCRIPT``.
+
+    For all other tools, uses ``shutil.which`` against the system PATH.
+
+    Args:
+        name: Executable name (e.g. "enum4linux-ng", "nmap").
+
+    Returns:
+        Optional[str]: Absolute path of the script/binary, or None.
+    """
+    if name == "enum4linux-ng":
+        script = Path(ENUM4LINUX_NG_SCRIPT)
+        python = Path(ENUM4LINUX_NG_PYTHON)
+        if script.is_file() and python.is_file():
+            return str(script)
+        return None
+    return shutil.which(name)
+
+
 def check_external_tool(name: str) -> DependencyCheck:
     """Look up an external tool on PATH and try to read its version.
 
@@ -74,17 +111,51 @@ def check_external_tool(name: str) -> DependencyCheck:
     detection still returns present=True with version=None. Never raises
     for a missing or broken tool.
 
+    For ``enum4linux-ng``, the tool is invoked via its own Python interpreter
+    (``ENUM4LINUX_NG_PYTHON ENUM4LINUX_NG_SCRIPT --help``) because it lives
+    in a separate venv with its own dependencies.
+
     Args:
         name: Executable name as it appears on PATH (e.g. "nmap").
 
     Returns:
         DependencyCheck: Presence and optional version for this tool.
     """
-    executable_path = shutil.which(name)
+    executable_path = _resolve_tool_path(name)
     if executable_path is None:
         return DependencyCheck(name=name, present=False, version=None)
-    version = _detect_version(executable_path)
+    if name == "enum4linux-ng":
+        version = _detect_ng_version()
+    else:
+        version = _detect_version(executable_path)
     return DependencyCheck(name=name, present=True, version=version)
+
+
+def _detect_ng_version() -> Optional[str]:
+    """Run enum4linux-ng via its own Python and extract the version.
+
+    enum4linux-ng prints its version in the first line of --help output:
+    ``ENUM4LINUX - next generation (v1.3.10)``
+
+    Returns:
+        Optional[str]: Version string (e.g. "1.3.10"), or None.
+    """
+    try:
+        result = subprocess.run(
+            [ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = f"{result.stdout or ''}{result.stderr or ''}".strip()
+    if not output:
+        return None
+    first_line = output.splitlines()[0].strip()
+    match = _VERSION_PATTERN.search(first_line)
+    return match.group(1) if match else None
 
 
 def netlab_home_path() -> Path:
