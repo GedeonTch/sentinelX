@@ -86,6 +86,7 @@ class SmbEnumerationResult:
     groups: Tuple[str, ...] = ()
     anonymous_session: Optional[bool] = None
     anonymous_share_access: Optional[bool] = None
+    password_policy: Optional[dict] = None   # {"min_password_length": int, "lockout_threshold": int}
     raw_output: str = ""
     source_format: str = "text"
 
@@ -198,6 +199,29 @@ def _parse_enum4linux_output(
             command=command,
         ))
 
+    def add_finding_ex(
+        service: str,
+        category: Category,
+        severity: Severity,
+        confidence: Confidence,
+        evidence_raw: str,
+    ) -> None:
+        """Like add_finding but with explicit confidence and evidence text."""
+        key = service.lower()
+        if key in seen_services:
+            return
+        seen_services.add(key)
+        findings.append(_make_finding(
+            session_id=session_id,
+            target_ip=target_ip,
+            target_service=service,
+            category=category,
+            severity=severity,
+            raw_output=evidence_raw,
+            command=command,
+            confidence=confidence,
+        ))
+
     for share in result.shares:
         category, severity = _classify_share(share.name)
         add_finding(share.name, category, severity)
@@ -220,6 +244,88 @@ def _parse_enum4linux_output(
 
     if result.signing_required is False:
         add_finding("smb_signing_not_required", Category.CONFIG, Severity.MEDIUM)
+
+    # ── T19 — Writable shares ─────────────────────────────────────────────────
+    # Confidence is PROBABLE because enum4linux-ng uses smbclient "dir" to test
+    # listing access — it does NOT perform an actual write. Writable status is
+    # inferred from the permissions field, not confirmed by a write attempt.
+    for share in result.shares:
+        perms = (share.permissions or "").upper()
+        is_writable = bool(perms) and any(
+            token in perms for token in ("WRITE", "READ_WRITE", "CHANGE", "FULL")
+        )
+        if not is_writable:
+            continue
+        # Anonymous session + writable = higher risk (no credentials required)
+        severity = (
+            Severity.HIGH
+            if result.anonymous_session is True
+            else Severity.MEDIUM
+        )
+        evidence_raw = json.dumps({
+            "share": share.name,
+            "permissions": share.permissions,
+            "anonymous_session": result.anonymous_session,
+            "source": "enum4linux-ng permissions field",
+        }, sort_keys=True)
+        # Use share name as key to allow one finding per writable share
+        svc_key = f"smb_share_writable:{share.name.lower()}"
+        if svc_key not in seen_services:
+            seen_services.add(svc_key)
+            findings.append(_make_finding(
+                session_id=session_id,
+                target_ip=target_ip,
+                target_service="smb_share_writable",
+                category=Category.CONFIG,
+                severity=severity,
+                raw_output=evidence_raw,
+                command=command,
+                confidence=Confidence.PROBABLE,
+            ))
+
+    # ── T19 — Users enumerated ────────────────────────────────────────────────
+    # One finding regardless of user count. List stored in evidence.raw as JSON.
+    if result.users:
+        evidence_raw = json.dumps({
+            "users": list(result.users),
+            "count": len(result.users),
+            "source": "enum4linux-ng user enumeration",
+        }, sort_keys=True)
+        add_finding_ex(
+            "smb_users_enumerated",
+            Category.NETWORK,
+            Severity.INFO,
+            Confidence.CONFIRMED,
+            evidence_raw,
+        )
+
+    # ── T19 — Weak password policy ────────────────────────────────────────────
+    # Severity: HIGH if lockout_threshold == 0, MEDIUM if min_password_length < 8.
+    # When both conditions hold, HIGH takes precedence (one single finding).
+    if result.password_policy:
+        policy = result.password_policy
+        min_len = policy.get("min_password_length")
+        lockout = policy.get("lockout_threshold")
+
+        weak_min_len = isinstance(min_len, int) and min_len < 8
+        no_lockout = isinstance(lockout, int) and lockout == 0
+
+        if weak_min_len or no_lockout:
+            severity = Severity.HIGH if no_lockout else Severity.MEDIUM
+            evidence_raw = json.dumps({
+                "min_password_length": min_len,
+                "lockout_threshold": lockout,
+                "weak_min_len": weak_min_len,
+                "no_lockout": no_lockout,
+                "source": "enum4linux-ng password policy",
+            }, sort_keys=True)
+            add_finding_ex(
+                "smb_weak_password_policy",
+                Category.CONFIG,
+                severity,
+                Confidence.CONFIRMED,
+                evidence_raw,
+            )
 
     return findings
 
@@ -316,6 +422,36 @@ def _normalize_shares(value: Any) -> Tuple[SmbShare, ...]:
     return tuple(shares)
 
 
+def _extract_password_policy(raw: Any) -> Optional[dict]:
+    """Extract min_password_length and lockout_threshold from a policy dict.
+
+    enum4linux-ng may nest the policy under various keys. Returns None when
+    the data is absent or cannot be parsed as integers.
+
+    Args:
+        raw: Raw value found via _find_value (may be dict, list, or None).
+
+    Returns:
+        Optional[dict]: {"min_password_length": int, "lockout_threshold": int}
+        or None if extraction fails.
+    """
+    if not isinstance(raw, dict):
+        return None
+    min_len = _find_value(raw, {"minpasswdlength", "minimumpasswordlength", "minpasswordlength",
+                                "minlen", "minlength"})
+    lockout = _find_value(raw, {"lockoutthreshold", "accountlockoutthreshold", "lockout",
+                                "badpwdcount", "badpasswordcount"})
+    try:
+        result: dict = {}
+        if min_len is not None:
+            result["min_password_length"] = int(min_len)
+        if lockout is not None:
+            result["lockout_threshold"] = int(lockout)
+        return result if result else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnumerationResult:
     """Read common enum4linux-ng-style aliases without leaking them outward."""
     shares = _normalize_shares(_find_value(document, {"shares", "sharelist", "shareenum"}))
@@ -325,6 +461,8 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
         accessible = any(share.accessible is True for share in shares)
     signing = _as_bool(_find_value(document, {"signingrequired", "smbsigningrequired", "signing"}))
     dialect_value = _find_value(document, {"dialects", "smbdialects", "protocol", "smbprotocol"})
+    policy_raw = _find_value(document, {"passwordpolicy", "passwdpolicy", "passwordpolicies",
+                                        "password_policy", "passpol"})
     return SmbEnumerationResult(
         target=target_ip,
         os=_as_text(_find_value(document, {"os", "operatingsystem", "targetos"})),
@@ -339,6 +477,7 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
         groups=_as_strings(_find_value(document, {"groups", "grouplist"})),
         anonymous_session=anonymous,
         anonymous_share_access=accessible,
+        password_policy=_extract_password_policy(policy_raw),
         raw_output=raw,
         source_format="json",
     )
@@ -371,6 +510,7 @@ def _normalize_text_output(raw: str, target_ip: str) -> SmbEnumerationResult:
         groups=(),
         anonymous_session=anonymous,
         anonymous_share_access=access,
+        password_policy=None,   # not extractable from legacy text output
         raw_output=raw,
         source_format="text",
     )
@@ -449,20 +589,24 @@ def _make_finding(
     severity: Severity,
     raw_output: str,
     command: str,
+    confidence: Confidence = Confidence.CONFIRMED,
 ) -> Finding:
     """Construct a Finding for this module. risk_score and explanation stay None.
 
     Args:
-        session_id: Current audit session ID.
-        target_ip: Host that was enumerated.
-        target_service: Share name or domain name.
-        category: Finding category.
-        severity: Finding severity.
-        raw_output: Full enum4linux stdout (evidence.raw).
-        command: Exact command that produced the output.
+        session_id:     Current audit session ID.
+        target_ip:      Host that was enumerated.
+        target_service: Share name or rule id.
+        category:       Finding category.
+        severity:       Finding severity.
+        raw_output:     Full enum4linux-ng output (evidence.raw).
+        command:        Exact command that produced the output.
+        confidence:     Confidence level (default CONFIRMED; use PROBABLE when
+                        the evidence is indirect, e.g. share writable inferred
+                        from permissions field rather than a real write attempt).
 
     Returns:
-        Finding: Populated Finding with confidence CONFIRMED.
+        Finding: Populated Finding.
     """
     return Finding(
         session_id=session_id,
@@ -472,7 +616,7 @@ def _make_finding(
         target_service=target_service,
         category=category,
         severity=severity,
-        confidence=Confidence.CONFIRMED,
+        confidence=confidence,
         exposure=Exposure.INTERNAL,
         evidence=Evidence(raw=raw_output, command=command),
         explanation=None,

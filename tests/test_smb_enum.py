@@ -399,3 +399,248 @@ class TestSmbAccessRefused:
         assert result.signing_required is False
         share_names = [s.name for s in result.shares]
         assert "tmp" in share_names
+
+
+# ---------------------------------------------------------------------------
+# T19 — smb_share_writable, smb_users_enumerated, smb_weak_password_policy
+# ---------------------------------------------------------------------------
+
+class TestSmbShareWritable:
+    """T19-a : writable share findings."""
+
+    def test_writable_share_anonymous_is_high_probable(self):
+        """READ_WRITE + anonymous session → HIGH / PROBABLE."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "tmp", "accessible": True, "permissions": "READ_WRITE"}],
+        })
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-t19")
+        writable = [f for f in findings if f.target_service == "smb_share_writable"]
+        assert len(writable) == 1
+        assert writable[0].severity == Severity.HIGH
+        assert writable[0].confidence == Confidence.PROBABLE
+
+    def test_writable_share_authenticated_is_medium_probable(self):
+        """READ_WRITE + non-anonymous session → MEDIUM / PROBABLE."""
+        raw = json.dumps({
+            "anonymous_session": False,
+            "shares": [{"name": "shared", "accessible": True, "permissions": "READ_WRITE"}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        writable = [f for f in findings if f.target_service == "smb_share_writable"]
+        assert len(writable) == 1
+        assert writable[0].severity == Severity.MEDIUM
+        assert writable[0].confidence == Confidence.PROBABLE
+
+    def test_readonly_share_produces_no_writable_finding(self):
+        """READ permission only → no smb_share_writable finding."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "Public", "accessible": True, "permissions": "READ"}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_share_writable" for f in findings)
+
+    def test_share_without_permissions_field_produces_no_writable_finding(self):
+        """No permissions field → cannot infer writability → no finding."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "tmp", "accessible": True}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_share_writable" for f in findings)
+
+    def test_multiple_writable_shares_produce_one_finding_each(self):
+        """Two writable shares → two smb_share_writable findings."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [
+                {"name": "tmp", "accessible": True, "permissions": "READ_WRITE"},
+                {"name": "data", "accessible": True, "permissions": "WRITE"},
+            ],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        writable = [f for f in findings if f.target_service == "smb_share_writable"]
+        assert len(writable) == 2
+
+    def test_writable_evidence_contains_share_name(self):
+        """evidence.raw must include the share name for traceability."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "tmp", "accessible": True, "permissions": "READ_WRITE"}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        writable = [f for f in findings if f.target_service == "smb_share_writable"]
+        assert "tmp" in writable[0].evidence.raw
+
+    def test_writable_risk_score_is_none(self):
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [{"name": "tmp", "accessible": True, "permissions": "WRITE"}],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        writable = [f for f in findings if f.target_service == "smb_share_writable"]
+        assert writable[0].risk_score is None
+
+    def test_writable_does_not_interfere_with_existing_share_findings(self):
+        """ADMIN$ and tmp both present → both classified independently."""
+        raw = json.dumps({
+            "anonymous_session": True,
+            "shares": [
+                {"name": "ADMIN$", "accessible": False},
+                {"name": "tmp", "accessible": True, "permissions": "READ_WRITE"},
+            ],
+        })
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        services = {f.target_service for f in findings}
+        assert "ADMIN$" in services
+        assert "smb_share_writable" in services
+
+
+class TestSmbUsersEnumerated:
+    """T19-a : users enumerated finding."""
+
+    def test_users_present_creates_one_finding(self):
+        """Users list non-empty → exactly 1 smb_users_enumerated finding."""
+        raw = json.dumps({"users": ["Administrator", "Guest", "svcBackup"]})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        users_f = [f for f in findings if f.target_service == "smb_users_enumerated"]
+        assert len(users_f) == 1
+
+    def test_users_finding_is_info_confirmed(self):
+        raw = json.dumps({"users": ["Administrator"]})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        f = next(f for f in findings if f.target_service == "smb_users_enumerated")
+        assert f.severity == Severity.INFO
+        assert f.confidence == Confidence.CONFIRMED
+
+    def test_users_evidence_contains_user_list(self):
+        raw = json.dumps({"users": ["Administrator", "Guest"]})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        f = next(f for f in findings if f.target_service == "smb_users_enumerated")
+        assert "Administrator" in f.evidence.raw
+
+    def test_no_users_produces_no_finding(self):
+        raw = json.dumps({"users": []})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_users_enumerated" for f in findings)
+
+    def test_absent_users_key_produces_no_finding(self):
+        raw = json.dumps({"hostname": "server"})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_users_enumerated" for f in findings)
+
+    def test_users_risk_score_is_none(self):
+        raw = json.dumps({"users": ["Administrator"]})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        f = next(f for f in findings if f.target_service == "smb_users_enumerated")
+        assert f.risk_score is None
+
+
+class TestSmbWeakPasswordPolicy:
+    """T19-a : password policy findings."""
+
+    def test_min_len_below_8_is_medium_confirmed(self):
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 6, "lockoutthreshold": 5}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        policy_f = [f for f in findings if f.target_service == "smb_weak_password_policy"]
+        assert len(policy_f) == 1
+        assert policy_f[0].severity == Severity.MEDIUM
+        assert policy_f[0].confidence == Confidence.CONFIRMED
+
+    def test_no_lockout_is_high_confirmed(self):
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 10, "lockoutthreshold": 0}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        policy_f = [f for f in findings if f.target_service == "smb_weak_password_policy"]
+        assert len(policy_f) == 1
+        assert policy_f[0].severity == Severity.HIGH
+        assert policy_f[0].confidence == Confidence.CONFIRMED
+
+    def test_both_conditions_produces_one_high_finding(self):
+        """Both min_len < 8 AND lockout = 0 → one finding HIGH (max severity)."""
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 4, "lockoutthreshold": 0}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        policy_f = [f for f in findings if f.target_service == "smb_weak_password_policy"]
+        assert len(policy_f) == 1
+        assert policy_f[0].severity == Severity.HIGH
+
+    def test_strong_policy_produces_no_finding(self):
+        """min_len=12, lockout=5 → no weakness finding."""
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 12, "lockoutthreshold": 5}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_weak_password_policy" for f in findings)
+
+    def test_exactly_8_chars_produces_no_finding(self):
+        """min_len=8 is the threshold — not weak."""
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 8, "lockoutthreshold": 3}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_weak_password_policy" for f in findings)
+
+    def test_absent_policy_produces_no_finding(self):
+        raw = json.dumps({"hostname": "server"})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        assert not any(f.target_service == "smb_weak_password_policy" for f in findings)
+
+    def test_policy_evidence_contains_values(self):
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 6, "lockoutthreshold": 0}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        f = next(f for f in findings if f.target_service == "smb_weak_password_policy")
+        assert "min_password_length" in f.evidence.raw
+        assert "lockout_threshold" in f.evidence.raw
+
+    def test_policy_risk_score_is_none(self):
+        raw = json.dumps({"passwordpolicy": {"minpasswdlength": 6, "lockoutthreshold": 0}})
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-t19")
+        f = next(f for f in findings if f.target_service == "smb_weak_password_policy")
+        assert f.risk_score is None
+
+
+class TestPasswordPolicyExtraction:
+    """T19-b : _extract_password_policy helper and SmbEnumerationResult.password_policy."""
+
+    def test_policy_extracted_from_json_output(self):
+        raw = json.dumps({
+            "passwordpolicy": {"minpasswdlength": 7, "lockoutthreshold": 0}
+        })
+        result = normalize_smb_output(raw, "10.0.0.5")
+        assert result.password_policy is not None
+        assert result.password_policy["min_password_length"] == 7
+        assert result.password_policy["lockout_threshold"] == 0
+
+    def test_absent_policy_is_none(self):
+        raw = json.dumps({"hostname": "server"})
+        result = normalize_smb_output(raw, "10.0.0.5")
+        assert result.password_policy is None
+
+    def test_text_output_policy_is_none(self):
+        """Text fallback never extracts password_policy."""
+        result = normalize_smb_output("Domain Name: WORKGROUP", "10.0.0.5")
+        assert result.password_policy is None
+
+
+class TestVulnerabilitiesJsonT19:
+    """T19-c : KB rules for new findings are present and complete."""
+
+    def test_smb_share_writable_rule_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "smb_share_writable" in rules
+
+    def test_smb_users_enumerated_rule_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "smb_users_enumerated" in rules
+
+    def test_smb_weak_password_policy_rule_present(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        assert "smb_weak_password_policy" in rules
+
+    def test_all_new_rules_have_what_attack_defense(self):
+        from knowledge.knowledge_base import _load_vulnerabilities
+        rules = _load_vulnerabilities()
+        for rule_id in ["smb_share_writable", "smb_users_enumerated", "smb_weak_password_policy"]:
+            r = rules[rule_id]
+            assert r.get("what"), f"{rule_id} missing 'what'"
+            assert r.get("attack"), f"{rule_id} missing 'attack'"
+            assert r.get("defense"), f"{rule_id} missing 'defense'"

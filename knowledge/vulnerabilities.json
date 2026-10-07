@@ -110,6 +110,24 @@
       "what": "L'accès SMB anonyme (session nulle) a été refusé par ce serveur. Une session nulle est une tentative de connexion au service SMB sans fournir d'identifiants. Certains systèmes l'acceptent par défaut, ce qui permet à un attaquant d'énumérer les partages, utilisateurs et groupes sans authentification. Le refus indique que le serveur est configuré pour rejeter ce type d'accès.",
       "attack": "Bien que le refus soit ici une bonne pratique, les sessions nulles SMB restent une technique d'énumération classique. Sur les systèmes qui les acceptent, un attaquant peut extraire la liste des partages (IPC$, ADMIN$, C$), les noms d'utilisateurs du domaine, les politiques de mots de passe et parfois des informations sur les groupes — sans aucun compte valide. Cela constitue la première étape d'une attaque sur un réseau Windows.",
       "defense": "Ce résultat indique une bonne configuration. Pour maintenir ce niveau de sécurité : s'assurer que la politique 'Network access: Restrict anonymous access to Named Pipes and Shares' est activée (GPO). Vérifier régulièrement avec 'smbclient -L <ip> -N' que les sessions anonymes restent refusées après chaque mise à jour ou changement de configuration."
+    },
+
+    "smb_share_writable": {
+      "what": "Un partage SMB accessible en écriture a été détecté. Les permissions reportées par enum4linux-ng indiquent un accès en écriture (READ_WRITE, WRITE, CHANGE ou FULL). La writabilité a été inférée depuis le champ permissions — aucun fichier n'a été écrit lors de cet audit. Si la session est anonyme, aucune authentification n'est nécessaire pour écrire sur ce partage.",
+      "attack": "Un partage accessible en écriture anonymement est un vecteur d'attaque sérieux. Techniques connues : dépôt d'un fichier .scf ou .lnk piégé pour capturer des hachages NTLM lorsqu'un utilisateur parcourt le partage (Responder), dépôt d'un exécutable ou d'une DLL dans un répertoire chargé automatiquement, staging de payloads pour un mouvement latéral, ou exfiltration de données depuis d'autres partages via un relais SMB.",
+      "defense": "Restreindre les permissions en écriture aux seuls comptes légitimes. Désactiver l'accès anonyme via GPO : 'Network access: Restrict anonymous access to Named Pipes and Shares'. Auditer régulièrement les permissions avec : 'smbclient -L <ip> -U%' et 'net share'. Activer l'audit des accès fichiers sur les partages sensibles. Désactiver les partages inutiles."
+    },
+
+    "smb_users_enumerated": {
+      "what": "Des comptes utilisateurs du système ou du domaine ont été énumérés via SMB sans authentification ou avec des credentials limités. Cette énumération est possible via des appels RPC (SAMR) sur le pipe IPC$. Les noms d'utilisateurs révèlent la structure des comptes du système : administrateurs, comptes de service, comptes actifs et inactifs.",
+      "attack": "La liste d'utilisateurs est la première étape d'une attaque par credential stuffing ou brute-force ciblé. Un attaquant peut identifier les comptes administrateurs (souvent 'Administrator', 'admin', 'svcXxx'), tenter des attaques par mots de passe faibles ou par défaut, ou réaliser une attaque AS-REP Roasting sur les comptes Kerberos ne nécessitant pas de pré-authentification.",
+      "defense": "Configurer GPO : 'Network access: Do not allow anonymous enumeration of SAM accounts' = Enabled. Restreindre l'accès au pipe IPC$ aux seuls systèmes autorisés. Utiliser des noms de comptes non prédictibles pour les comptes de service. Monitorer les requêtes SAMR/LSARPC inhabituelles dans les logs Windows (Event ID 4661)."
+    },
+
+    "smb_weak_password_policy": {
+      "what": "La politique de mots de passe du domaine ou du système local présente une ou plusieurs faiblesses : longueur minimale insuffisante (< 8 caractères) ou seuil de verrouillage de compte absent (lockout_threshold = 0). Une politique faible facilite les attaques par brute-force ou par dictionnaire car les mots de passe courts sont plus faciles à craquer et l'absence de verrouillage permet un nombre illimité de tentatives.",
+      "attack": "Sans verrouillage de compte, un attaquant peut tenter des milliers de combinaisons sans risque de blocage — attaque par dictionnaire avec des outils comme Hydra, Medusa ou CrackMapExec. Une longueur minimale faible augmente la probabilité de mots de passe trivial ('admin', '1234', 'password'). Combiné avec une énumération d'utilisateurs, cela permet une attaque ciblée sur chaque compte identifié.",
+      "defense": "Appliquer une politique de mots de passe forte via GPO : longueur minimale ≥ 12 caractères, seuil de verrouillage ≤ 5 tentatives, durée de verrouillage ≥ 15 minutes. Activer la complexité obligatoire. Vérifier la politique actuelle avec : 'net accounts /domain'. Déployer un gestionnaire de mots de passe d'entreprise et une authentification multi-facteurs sur les comptes privilégiés."
     }
   }
 }
