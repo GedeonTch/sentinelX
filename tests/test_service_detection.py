@@ -557,3 +557,138 @@ class TestRequiresVersionConfirmation:
         result = _apply_cve(f, KB_SMB_NO_VERSION_REQUIRED)
         assert result.confidence != Confidence.POSSIBLE
         assert result.confidence == Confidence.CONFIRMED
+
+
+# ---------------------------------------------------------------------------
+# T18 — asset_context OS qualification
+# Tests: _apply_cve and enrich_findings with asset_context={ip: os_string}
+# ---------------------------------------------------------------------------
+
+# Reuse KB_SMB_VERSION_SCOPED defined above:
+#   affected_versions:     ["Windows 7", "Windows Server 2008"]
+#   not_affected_versions: ["Windows Server 2016", "Windows Server 2019"]
+#   requires_version_confirmation: True
+
+_IP = "192.168.57.10"
+
+
+def _make_smb_finding(service_version: str, confidence: Confidence = Confidence.CONFIRMED) -> Finding:
+    """Helper: SMB Finding with ambiguous banner (simulates nmap output)."""
+    return Finding(
+        session_id="session-t18",
+        module="tcp_scan",
+        target_ip=_IP,
+        target_port=445,
+        target_service="microsoft-ds",
+        service_version=service_version,
+        category=Category.SERVICE,
+        severity=Severity.INFO,
+        confidence=confidence,
+        exposure=Exposure.INTERNAL,
+        evidence=Evidence(raw=f"PORT 445/tcp open {service_version}", command="nmap"),
+    )
+
+
+class TestAssetContextQualification:
+    """T18 — OS from device_fingerprint qualifies CVE applicability."""
+
+    # ── not_affected: CVE excluded entirely ─────────────────────────────────
+
+    def test_not_affected_os_returns_original_finding(self):
+        """Windows Server 2016 in not_affected → original Finding returned, no CVE."""
+        f = _make_smb_finding("Microsoft Windows Server 2008 R2 - 2012 workgroup: TEST")
+        ctx = {_IP: "Windows Server 2016"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert result is f  # same object — not enriched
+
+    def test_not_affected_os_has_no_cve_refs(self):
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {_IP: "Windows Server 2019"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert result.cve_refs == []
+
+    def test_not_affected_os_severity_stays_info(self):
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {_IP: "Windows Server 2016"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert result.severity == Severity.INFO
+
+    # ── affected: CVE applied, confidence NOT upgraded ───────────────────────
+
+    def test_affected_os_enriches_finding(self):
+        """Windows 7 in affected_versions → finding enriched with CVE."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {_IP: "Windows 7"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert "CVE-2017-0144" in result.cve_refs
+        assert result.severity == Severity.CRITICAL
+
+    def test_affected_os_does_not_upgrade_confidence(self):
+        """Safety constraint: asset_context never upgrades confidence."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012", confidence=Confidence.CONFIRMED)
+        ctx = {_IP: "Windows Server 2008"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        # Must not upgrade beyond the finding's original confidence
+        assert result.confidence == Confidence.CONFIRMED
+
+    def test_affected_os_evidence_contains_context_note(self):
+        """When affected via OS context, a note must appear in evidence.raw."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {_IP: "Windows 7"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert "device_fingerprint context" in result.evidence.raw
+
+    # ── OS not in either list: banner-only fallback ──────────────────────────
+
+    def test_unknown_os_falls_back_to_banner_logic(self):
+        """OS present but not in affected/not_affected → POSSIBLE (banner logic)."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {_IP: "Some Unknown OS 3.0"}
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        assert result.confidence == Confidence.POSSIBLE
+
+    # ── No context / empty context: backward compatibility ───────────────────
+
+    def test_no_context_uses_banner_logic(self):
+        """asset_context=None → same behaviour as before T18."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=None)
+        assert result.confidence == Confidence.POSSIBLE
+
+    def test_empty_context_uses_banner_logic(self):
+        """asset_context={} → same behaviour as before T18."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context={})
+        assert result.confidence == Confidence.POSSIBLE
+
+    def test_context_for_different_ip_ignored(self):
+        """OS context for a different IP must not influence this Finding."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        ctx = {"10.0.0.99": "Windows Server 2016"}  # different IP
+        result = _apply_cve(f, KB_SMB_VERSION_SCOPED, asset_context=ctx)
+        # Context not for this IP → falls back to banner logic → POSSIBLE
+        assert result.confidence == Confidence.POSSIBLE
+
+    # ── enrich_findings integration ──────────────────────────────────────────
+
+    def test_enrich_findings_with_context_excludes_not_affected(self):
+        """enrich_findings passes asset_context through to _apply_cve."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        from unittest.mock import patch
+        import detect.service_detection as sd
+        ctx = {_IP: "Windows Server 2016"}
+        with patch.object(sd, "_KB_ENTRIES", [KB_SMB_VERSION_SCOPED]):
+            results = enrich_findings([f], asset_context=ctx)
+        # Not affected → original finding returned, no CVE
+        assert results[0].cve_refs == []
+        assert results[0].severity == Severity.INFO
+
+    def test_enrich_findings_without_context_backward_compatible(self):
+        """enrich_findings() without asset_context behaves as before."""
+        f = _make_smb_finding("Windows Server 2008 R2 - 2012")
+        from unittest.mock import patch
+        import detect.service_detection as sd
+        with patch.object(sd, "_KB_ENTRIES", [KB_SMB_VERSION_SCOPED]):
+            results = enrich_findings([f])
+        # Banner is ambiguous → POSSIBLE
+        assert results[0].confidence == Confidence.POSSIBLE

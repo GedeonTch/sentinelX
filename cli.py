@@ -436,7 +436,16 @@ def _run_pipeline(
         if all_port_findings:
             try:
                 from detect.service_detection import enrich_findings
-                enriched = enrich_findings(all_port_findings)
+                # Build OS context from device_fingerprint findings so that
+                # CVE entries requiring version confirmation (e.g. EternalBlue)
+                # can be qualified against the detected OS instead of relying
+                # solely on the (often ambiguous) nmap banner.
+                _asset_context = {
+                    f.target_ip: f.service_version
+                    for f in host_findings
+                    if f.module == "device_fingerprint" and f.service_version
+                }
+                enriched = enrich_findings(all_port_findings, asset_context=_asset_context or None)
                 result.add("cve_enrichment", "ok", f"{len(enriched)} finding(s) processed")
             except Exception as exc:
                 result.add("cve_enrichment", "failed", str(exc))

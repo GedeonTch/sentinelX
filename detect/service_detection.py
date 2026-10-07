@@ -80,7 +80,10 @@ _KB_ENTRIES: List[Dict[str, Any]] = _load_kb()
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def enrich_findings(findings: List[Finding]) -> List[Finding]:
+def enrich_findings(
+    findings: List[Finding],
+    asset_context: Optional[Dict[str, str]] = None,
+) -> List[Finding]:
     """Enrich a list of Findings with CVE data from the local knowledge base.
 
     For each Finding, looks up matching CVE entries based on service name,
@@ -91,7 +94,14 @@ def enrich_findings(findings: List[Finding]) -> List[Finding]:
     Does NOT calculate risk_score — that is core/risk_scorer.py's job.
 
     Args:
-        findings: List of Finding objects from tcp_scan or udp_scan.
+        findings:      List of Finding objects from tcp_scan or udp_scan.
+        asset_context: Optional mapping of {target_ip: os_string} built from
+                       device_fingerprint findings. When provided, used to
+                       qualify CVE applicability for entries that require
+                       version confirmation (e.g. EternalBlue). The OS string
+                       is checked against not_affected_versions /
+                       affected_versions in the KB entry. Never increases
+                       confidence — can only exclude a CVE or confirm it.
 
     Returns:
         List[Finding]: Enriched copies. Unmatched Findings returned as-is.
@@ -112,7 +122,7 @@ def enrich_findings(findings: List[Finding]) -> List[Finding]:
 
         if cve_entry:
             matched += 1
-            enriched.append(_apply_cve(finding, cve_entry))
+            enriched.append(_apply_cve(finding, cve_entry, asset_context=asset_context))
         else:
             enriched.append(finding)
 
@@ -330,7 +340,11 @@ def _extract_version(service_version: str) -> Optional[str]:
 # Finding enrichment
 # ---------------------------------------------------------------------------
 
-def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
+def _apply_cve(
+    finding: Finding,
+    cve_entry: Dict[str, Any],
+    asset_context: Optional[Dict[str, str]] = None,
+) -> Finding:
     """Return a new Finding enriched with CVE data.
 
     Never mutates the original Finding.
@@ -345,15 +359,29 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
            risk_scorer will automatically exclude this Finding from the
            global score because confidence < 0.7.
 
-        2. Otherwise (version confirmed, or no confirmation required):
+        2. If asset_context provides an OS for this IP and the entry requires
+           version confirmation:
+           - OS in not_affected_versions → return original Finding unchanged
+             (CVE does not apply to this OS; no enrichment).
+           - OS in affected_versions → enrich with original confidence
+             (confirmed affected; no confidence upgrade beyond what banner allows).
+           - OS in neither list → fall through to rule 1 (POSSIBLE).
+
+        3. Otherwise (version confirmed, or no confirmation required):
            POSSIBLE → PROBABLE upgrade if CVE was matched (existing rule).
 
+    Safety constraint: asset_context OS comes from device_fingerprint which has
+    confidence=POSSIBLE (nmap estimation). It can only exclude a CVE (not_affected)
+    or confirm applicability (affected). It never upgrades confidence above the
+    Finding's existing confidence.
+
     Args:
-        finding:   Original Finding from tcp_scan/udp_scan.
-        cve_entry: Matching CVE entry from the knowledge base.
+        finding:       Original Finding from tcp_scan/udp_scan.
+        cve_entry:     Matching CVE entry from the knowledge base.
+        asset_context: Optional {target_ip: os_string} from device_fingerprint.
 
     Returns:
-        Finding: New enriched copy.
+        Finding: New enriched copy, or original Finding if CVE not applicable.
     """
     new_severity = Severity(cve_entry.get("severity", "info"))
     new_cvss = cve_entry.get("cvss_score")
@@ -365,6 +393,41 @@ def _apply_cve(finding: Finding, cve_entry: Dict[str, Any]) -> Finding:
         _extract_version(finding.service_version),
     )
 
+    # ── Asset context qualification ──────────────────────────────────────────
+    # Only applies when the KB entry requires version confirmation AND the
+    # banner alone is not exact enough.
+    if requires_version and version_qualification != "exact" and asset_context:
+        os_name = asset_context.get(finding.target_ip, "")
+        if os_name:
+            not_affected = cve_entry.get("not_affected_versions", [])
+            affected = cve_entry.get("affected_versions", [])
+
+            if _matches_version_labels(os_name, not_affected):
+                # OS is confirmed not affected — skip CVE enrichment entirely.
+                # Return the original Finding without any CVE data.
+                return finding
+
+            if affected and _matches_version_labels(os_name, affected):
+                # OS is confirmed affected — enrich with original confidence.
+                # Do NOT upgrade confidence: the OS came from device_fingerprint
+                # which is itself a POSSIBLE-confidence estimation.
+                return dataclasses.replace(
+                    finding,
+                    severity=new_severity,
+                    cvss_score=new_cvss,
+                    cve_refs=new_cve_refs,
+                    # confidence unchanged — never upgrade via OS context
+                    evidence=Evidence(
+                        raw=finding.evidence.raw + (
+                            "\n[service_detection] OS confirmed in affected versions "
+                            f"({os_name}) via device_fingerprint context."
+                        ),
+                        command=finding.evidence.command,
+                    ),
+                )
+            # OS present but not in either list → fall through to banner-only logic
+
+    # ── Banner-only qualification (original logic) ───────────────────────────
     if requires_version and version_qualification != "exact":
         # Version required but missing, ambiguous, or incomplete — preserve
         # severity but lower confidence because applicability is unconfirmed.
