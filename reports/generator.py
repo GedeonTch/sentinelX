@@ -14,7 +14,7 @@ Rules enforced here:
 - ZERO risk_score calculation
 - Reads Findings from DB via core/database.py
 - Scoring formula ALWAYS appears in every generated report
-- Logo (sentinelXlogo.png) copied alongside the HTML output file
+- Logo (SentinelleX.png) copied alongside the HTML output file
 
 Usage:
     from reports.generator import generate_report
@@ -43,7 +43,7 @@ from core.risk_scorer import FORMULA_DESCRIPTION
 _REPORTS_DIR = Path(__file__).parent
 _TEMPLATE_DIR = _REPORTS_DIR / "templates"
 _ASSETS_DIR = _REPORTS_DIR / "assets"
-_LOGO_FILENAME = "sentinelXlogo.png"
+_LOGO_FILENAME = "SentinelleX.png"
 
 
 # ---------------------------------------------------------------------------

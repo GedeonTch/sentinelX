@@ -211,12 +211,12 @@ class TestHtmlReport:
         output = tmp_path / "report.html"
         generate_report(SESSION, "html", str(output))
         content = output.read_text()
-        assert "sentinelXlogo.png" in content
+        assert "SentinelleX.png" in content
 
     def test_logo_copied_to_output_dir(self, tmp_path):
         output = tmp_path / "report.html"
         generate_report(SESSION, "html", str(output))
-        logo = tmp_path / "sentinelXlogo.png"
+        logo = tmp_path / "SentinelleX.png"
         assert logo.exists()
 
     def test_html_contains_scoring_formula(self, tmp_path):
