@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import hashlib
+import ipaddress
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -23,8 +24,11 @@ from typing import List, Optional
 
 import typer
 from rich import box
+from rich.markup import escape
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 from core.dependencies import (
     DependencyCheck,
@@ -32,7 +36,7 @@ from core.dependencies import (
     check_status,
     environment_ready,
 )
-from core.finding import Finding
+from core.finding import Finding, Severity, format_finding_id
 from core.logger import display
 
 # ---------------------------------------------------------------------------
@@ -660,14 +664,18 @@ def findings_main(ctx: typer.Context) -> None:
 def findings_list(
     session: str = typer.Option(..., "--session", "-s", help="Session ID."),
 ) -> None:
-    """List all findings for a session, ordered by severity."""
+    """List findings for a session, grouped by machine.
+
+    Each machine shows its Security Findings (most severe first) and its
+    Inventory Observations (device_fingerprint) in separate blocks.
+    """
     try:
         from core.database import get_findings
         findings = get_findings(session)
         if not findings:
             display(f"[yellow]No findings for session {session}.[/yellow]")
             return
-        _render_findings_table(findings)
+        _render_grouped_findings(findings)
     except Exception as exc:
         display(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -1192,7 +1200,7 @@ def _render_findings_table(findings: list) -> None:
     table.add_column("Status")
     table.add_column("Score")
     for f in findings:
-        color = {"critical":"red","high":"orange3","medium":"yellow","low":"cyan","info":"dim"}.get(f.severity.value,"white")
+        color = _SEVERITY_COLORS.get(f.severity.value, "white")
         table.add_row(
             format_finding_id(f.id),
             f"[{color}]{f.severity.value}[/{color}]",
@@ -1201,6 +1209,131 @@ def _render_findings_table(findings: list) -> None:
             f.target_service or "—",
             f.status.value,
             f"{f.risk_score:.1f}" if f.risk_score is not None else "—",
+        )
+    display(table)
+
+
+# ---------------------------------------------------------------------------
+# findings list — grouped by machine
+# ---------------------------------------------------------------------------
+
+# Severity colours, shared by the flat findings table and the per-machine view.
+_SEVERITY_COLORS = {
+    "critical": "red",
+    "high": "orange3",
+    "medium": "yellow",
+    "low": "cyan",
+    "info": "dim",
+}
+
+# Sort rank for Security Findings: lower rank is more severe and is shown first.
+_SEVERITY_RANK = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.INFO: 4,
+}
+
+# device_fingerprint Findings describe what exists on the network. They are
+# inventory observations, never security problems (same rule as reports/).
+_INVENTORY_MODULE = "device_fingerprint"
+
+
+def _is_inventory_observation(finding: Finding) -> bool:
+    """Return True when a Finding is an inventory observation, not a security issue."""
+    return finding.module == _INVENTORY_MODULE
+
+
+def _target_sort_key(target: str) -> tuple:
+    """Sort IP addresses numerically (IPv4 before IPv6); other targets go last."""
+    try:
+        address = ipaddress.ip_address(target)
+    except ValueError:
+        return (1, 0, 0, target)
+    return (0, address.version, int(address), target)
+
+
+def _render_grouped_findings(findings: List[Finding]) -> None:
+    """Render findings one machine at a time.
+
+    Each machine gets a Rich rule showing its IP, then two blocks: Security
+    Findings and Inventory Observations. An empty block is still printed so
+    the reader can see that it was checked.
+    """
+    by_target: dict[str, List[Finding]] = {}
+    for finding in findings:
+        by_target.setdefault(finding.target_ip or "", []).append(finding)
+
+    for target in sorted(by_target, key=_target_sort_key):
+        machine = by_target[target]
+        security = [f for f in machine if not _is_inventory_observation(f)]
+        inventory = [f for f in machine if _is_inventory_observation(f)]
+        # Python's sort is stable: equal severities keep the database order
+        # (created_at), which get_findings() already provides.
+        security.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, len(_SEVERITY_RANK)))
+
+        display(Rule(Text(target or "unknown target", style="bold cyan")))
+        _render_security_block(security)
+        _render_inventory_block(inventory)
+        display("")
+
+
+def _render_security_block(findings: List[Finding]) -> None:
+    """Render the Security Findings block for one machine."""
+    display(f"[bold]Security Findings ({len(findings)})[/bold]")
+    if not findings:
+        # Zero findings never means clean: say what this block does not prove.
+        display(
+            "[dim]  No Security Finding recorded for this machine. "
+            "This does not prove that it is clean.[/dim]"
+        )
+        return
+
+    table = Table(box=box.ROUNDED)
+    table.add_column("ID", style="dim", max_width=12)
+    table.add_column("Severity")
+    table.add_column("Module")
+    table.add_column("Port")
+    table.add_column("Service")
+    table.add_column("Status")
+    table.add_column("Score")
+    for f in findings:
+        color = _SEVERITY_COLORS.get(f.severity.value, "white")
+        table.add_row(
+            format_finding_id(f.id),
+            f"[{color}]{f.severity.value}[/{color}]",
+            escape(f.module),
+            str(f.target_port) if f.target_port is not None else "—",
+            escape(f.target_service or "—"),
+            f.status.value,
+            f"{f.risk_score:.1f}" if f.risk_score is not None else "—",
+        )
+    display(table)
+
+
+def _render_inventory_block(findings: List[Finding]) -> None:
+    """Render the Inventory Observations block for one machine.
+
+    Rows carry no severity, score or status on purpose: an observation is
+    not a problem, so it must not look like one.
+    """
+    display(f"[bold]Inventory Observations ({len(findings)})[/bold]")
+    if not findings:
+        display("[dim]  No inventory observation recorded for this machine.[/dim]")
+        return
+
+    table = Table(box=box.ROUNDED)
+    table.add_column("ID", style="dim", max_width=12)
+    table.add_column("Observation")
+    table.add_column("Detail")
+    table.add_column("Confidence")
+    for f in findings:
+        table.add_row(
+            format_finding_id(f.id),
+            escape(f.target_service or "—"),
+            escape(f.service_version or "—"),
+            f.confidence.name,
         )
     display(table)
 

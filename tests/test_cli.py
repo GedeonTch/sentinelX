@@ -918,6 +918,149 @@ class TestFindingsList:
 
 
 # ---------------------------------------------------------------------------
+# findings list — grouped by machine (T21)
+# ---------------------------------------------------------------------------
+
+def _inventory(**kwargs) -> Finding:
+    """A device_fingerprint observation, shaped like recon/device_fingerprint.py output."""
+    defaults = dict(
+        module="device_fingerprint",
+        target_port=None,
+        target_service="host",
+        service_version="Linux 5.15",
+        category=Category.NETWORK,
+        severity=Severity.INFO,
+        confidence=Confidence.CONFIRMED,
+        evidence=Evidence(raw="[ping] host up", command="nmap -sn 10.0.0.10"),
+    )
+    defaults.update(kwargs)
+    return make_finding(**defaults)
+
+
+def _list_saved_findings(tmp_path: Path, findings: list):
+    """Persist findings in a temporary session DB, then run `netlab findings list`."""
+    import core.database as db
+
+    def mock_db_path(session_id: str) -> Path:
+        d = tmp_path / ".netlab" / "sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{session_id}.db"
+
+    with patch.object(db, "get_db_path", side_effect=mock_db_path):
+        db.init_db("session-001")
+        db.save_session("session-001", target="10.0.0.0/24")
+        for finding in findings:
+            db.save_finding(finding)
+        return runner.invoke(app, ["findings", "list", "--session", "session-001"])
+
+
+def _list_findings_in_memory(findings: list):
+    """Run `netlab findings list` with get_findings() returning `findings` as given."""
+    with patch("core.database.get_findings", return_value=findings):
+        return runner.invoke(app, ["findings", "list", "--session", "session-001"])
+
+
+class TestFindingsListGroupedByMachine:
+    def test_machines_are_separated_and_sorted_numerically(self, tmp_path):
+        low_ip = make_finding(target_ip="10.0.0.2", target_port=80, module="tcp_scan")
+        high_ip = make_finding(target_ip="10.0.0.10", target_port=22, module="tcp_scan")
+        result = _list_saved_findings(tmp_path, [high_ip, low_ip])
+
+        assert result.exit_code == 0
+        out = result.output
+        # Numeric order: 10.0.0.2 comes before 10.0.0.10 (a lexical sort would not).
+        assert out.index("10.0.0.2") < out.index("10.0.0.10")
+        # Each finding appears under its own machine heading.
+        assert out.index(format_finding_id(low_ip.id)) < out.index("10.0.0.10")
+        assert out.index(format_finding_id(high_ip.id)) > out.index("10.0.0.10")
+
+    def test_each_machine_has_security_and_inventory_blocks(self, tmp_path):
+        security = make_finding(target_ip="10.0.0.10", target_port=22, module="tcp_scan")
+        inventory = _inventory(target_ip="10.0.0.10")
+        result = _list_saved_findings(tmp_path, [security, inventory])
+
+        assert result.exit_code == 0
+        out = result.output
+        security_heading = out.index("Security Findings (1)")
+        inventory_heading = out.index("Inventory Observations (1)")
+        assert security_heading < out.index(format_finding_id(security.id)) < inventory_heading
+        assert out.index(format_finding_id(inventory.id)) > inventory_heading
+
+    def test_security_findings_are_sorted_by_descending_severity(self):
+        low = make_finding(target_port=21, severity=Severity.LOW)
+        critical = make_finding(target_port=445, severity=Severity.CRITICAL)
+        medium = make_finding(target_port=80, severity=Severity.MEDIUM)
+        high = make_finding(target_port=22, severity=Severity.HIGH)
+        # Deliberately unsorted input: the CLI must not depend on database order.
+        result = _list_findings_in_memory([low, critical, medium, high])
+
+        assert result.exit_code == 0
+        positions = [
+            result.output.index(format_finding_id(f.id))
+            for f in (critical, high, medium, low)
+        ]
+        assert positions == sorted(positions)
+
+    def test_device_fingerprint_is_never_listed_as_security_finding(self):
+        # Even with an alarming severity, an observation stays in the inventory block.
+        inventory = _inventory(target_ip="10.0.0.10", severity=Severity.CRITICAL)
+        result = _list_findings_in_memory([inventory])
+
+        assert result.exit_code == 0
+        out = result.output
+        assert out.index("Security Findings (0)") < out.index("Inventory Observations (1)")
+        assert out.index(format_finding_id(inventory.id)) > out.index("Inventory Observations (1)")
+        # Inventory rows carry no severity, so the word must not appear at all.
+        assert "critical" not in out.lower()
+
+    def test_inventory_is_shown_when_machine_has_no_security_finding(self):
+        inventory = _inventory(target_ip="10.0.0.20")
+        result = _list_findings_in_memory([inventory])
+
+        assert result.exit_code == 0
+        out = result.output
+        assert "No Security Finding recorded" in out
+        assert "Linux 5.15" in out
+        assert "CONFIRMED" in out
+        assert format_finding_id(inventory.id) in out
+
+    def test_machine_without_inventory_shows_empty_inventory_block(self):
+        finding = make_finding(target_ip="10.0.0.5", target_port=21, module="default_creds")
+        result = _list_findings_in_memory([finding])
+
+        assert result.exit_code == 0
+        assert "Security Findings (1)" in result.output
+        assert "Inventory Observations (0)" in result.output
+        assert "No inventory observation recorded" in result.output
+
+    def test_inventory_and_security_counts_are_kept_separate(self):
+        findings = [
+            make_finding(target_ip="10.0.0.10", target_port=22, module="tcp_scan"),
+            _inventory(target_ip="10.0.0.10"),
+            _inventory(target_ip="10.0.0.10", service_version="Windows 10"),
+        ]
+        result = _list_findings_in_memory(findings)
+
+        assert result.exit_code == 0
+        assert "Security Findings (1)" in result.output
+        assert "Inventory Observations (2)" in result.output
+
+    def test_findings_without_target_ip_are_grouped_under_unknown_target(self):
+        finding = make_finding(target_ip="", target_port=None, module="passive_recon")
+        result = _list_findings_in_memory([finding])
+
+        assert result.exit_code == 0
+        assert "unknown target" in result.output
+
+    def test_database_error_still_exits_with_error(self):
+        with patch("core.database.get_findings", side_effect=RuntimeError("database locked")):
+            result = runner.invoke(app, ["findings", "list", "--session", "session-001"])
+
+        assert result.exit_code == 1
+        assert "database locked" in result.output
+
+
+# ---------------------------------------------------------------------------
 # findings show
 # ---------------------------------------------------------------------------
 
