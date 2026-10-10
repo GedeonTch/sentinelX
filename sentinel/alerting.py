@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from typing import List, Optional, Tuple
 
-from core.database import save_event, save_finding
+from core.database import sentinel_save_event, save_finding
 from core.finding import (
     Category,
     Confidence,
@@ -122,6 +122,8 @@ def process_changes(
     session_id: str,
     whitelist: Whitelist,
     counter: AlertCounter,
+    *,
+    network_id: str,
 ) -> List[Finding]:
     """Process detected network changes and produce events + Findings.
 
@@ -134,7 +136,8 @@ def process_changes(
 
     Args:
         changes:    NetworkChange list from monitor.check_network().
-        session_id: Current audit session ID.
+        session_id: Real run session ID, used only for Findings.
+        network_id: Stable network ID, used for Sentinel events and counts.
         whitelist:  Loaded Whitelist for filtering.
         counter:    Session-local AlertCounter (mutated in place).
 
@@ -147,7 +150,7 @@ def process_changes(
     # Check if silent mode has expired before processing
     just_resumed = counter.try_exit_silent()
     if just_resumed:
-        _display_resume_message(session_id, counter)
+        _display_resume_message(network_id, counter)
 
     findings_to_display: List[Finding] = []
     max_alerts = whitelist.sentinel_max_alerts_per_hour
@@ -165,8 +168,8 @@ def process_changes(
         )
 
         # Always write event — whitelisted or not
-        save_event(
-            session_id=session_id,
+        sentinel_save_event(
+            network_id=network_id,
             event_id=event_id,
             event_type=change.change_type,
             timestamp=now,
@@ -292,11 +295,11 @@ def _display_silent_mode_message(counter: AlertCounter) -> None:
     )
 
 
-def _display_resume_message(session_id: str, counter: AlertCounter) -> None:
+def _display_resume_message(network_id: str, counter: AlertCounter) -> None:
     """Display the resume message after silent mode expires."""
-    from core.database import count_unresolved_events
+    from core.database import sentinel_count_unresolved_events
     try:
-        event_count = count_unresolved_events(session_id)
+        event_count = sentinel_count_unresolved_events(network_id)
     except Exception:
         event_count = "?"
 

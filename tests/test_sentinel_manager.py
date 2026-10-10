@@ -261,6 +261,7 @@ class TestDegradedArpCheck:
             _do_check(
                 target_network="192.168.1.0/24",
                 network_id=SESSION,
+                run_session_id="run-manager-distinct",
                 identity=object(),
                 interval=60,
                 whitelist=whitelist,
@@ -292,6 +293,7 @@ class TestDegradedArpCheck:
             _do_check(
                 target_network="192.168.1.0/24",
                 network_id=SESSION,
+                run_session_id="run-manager-distinct",
                 identity=object(),
                 interval=60,
                 whitelist=Whitelist(),

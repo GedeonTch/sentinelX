@@ -202,6 +202,7 @@ def start(
     _run_loop(
         target_network=target_network,
         network_id=network_id,
+        run_session_id=run_session_id,
         identity=identity,
         interval=interval,
         whitelist=whitelist,
@@ -212,6 +213,7 @@ def start(
 def _run_loop(
     target_network: str,
     network_id: str,
+    run_session_id: str,
     identity: NetworkIdentity,
     interval: int,
     whitelist,
@@ -224,6 +226,7 @@ def _run_loop(
             _do_check(
                 target_network=target_network,
                 network_id=network_id,
+                run_session_id=run_session_id,
                 identity=identity,
                 interval=interval,
                 whitelist=whitelist,
@@ -236,6 +239,7 @@ def _run_loop(
 def _do_check(
     target_network: str,
     network_id: str,
+    run_session_id: str,
     identity: NetworkIdentity,
     interval: int,
     whitelist,
@@ -250,7 +254,7 @@ def _do_check(
     try:
         changes = check_network(
             target_network=target_network,
-            session_id=network_id,
+            session_id=run_session_id,
             identity=identity,
             baseline=baseline,
         )
@@ -263,7 +267,8 @@ def _do_check(
         if changes:
             process_changes(
                 changes=changes,
-                session_id=network_id,
+                session_id=run_session_id,
+                network_id=network_id,
                 whitelist=whitelist,
                 counter=counter,
             )
@@ -274,7 +279,8 @@ def _do_check(
         if exc.changes:
             process_changes(
                 changes=exc.changes,
-                session_id=network_id,
+                session_id=run_session_id,
+                network_id=network_id,
                 whitelist=whitelist,
                 counter=counter,
             )
