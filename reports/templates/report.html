@@ -496,6 +496,8 @@ details > summary:hover { background: var(--bg3); }
 .rec-content { flex:1; }
 .rec-target { font-family:monospace; font-size:0.82rem; font-weight:700; color: var(--text); margin-bottom:4px; }
 .rec-action { font-size:0.83rem; color: var(--text2); line-height:1.6; }
+/* Collapsed list: extra items hidden. Declared after .rec-item (display:flex), so it wins in every engine. */
+.rec-list:not(.expanded) .is-extra { display:none; }
 
 /* ═══════════════════════════════════════════════════════
    EMPTY STATES, FORMULA, FOOTER
@@ -548,6 +550,7 @@ footer .highlight { color: var(--text2); }
   .theme-toggle, .nav-bar, .toggle-more { display:none; }
   header { position:static; }
   .top-list .is-extra { display:block !important; }
+  .rec-list .is-extra { display:block !important; }
   details { break-inside:avoid; }
   details > :not(summary) { display:block !important; }
   .scard { animation:none; }
@@ -935,7 +938,7 @@ footer .highlight { color: var(--text2); }
   </section>
 
   <!-- ═══════════════════════════════════════════════════════
-       06 — RECOMMENDATIONS (defense field only — no pedagogy)
+       06 — RECOMMENDATIONS (defense field only — no pedagogy; Top 5 first, Voir plus)
   ═══════════════════════════════════════════════════════ -->
   {% if has_recommendations %}
   <section id="recommendations">
@@ -947,7 +950,7 @@ footer .highlight { color: var(--text2); }
     </div>
     <div class="rec-list">
       {% for f in recommendations %}
-      <div class="rec-item rec-{{ f.severity.value }}">
+      <div class="rec-item rec-{{ f.severity.value }}{% if loop.index > top_limit %} is-extra{% endif %}">
         <div class="rec-badge">
           <span class="badge badge-{{ f.severity.value }}">{{ f.severity.value }}</span>
         </div>
@@ -961,6 +964,11 @@ footer .highlight { color: var(--text2); }
       </div>
       {% endfor %}
     </div>
+    {% if recommendations|length > top_limit %}
+    <button type="button" class="toggle-more" onclick="toggleTop(this)"
+            data-count="{{ recommendations|length - top_limit }}"
+            data-more="Voir plus" data-less="Voir moins">Voir plus ({{ recommendations|length - top_limit }})</button>
+    {% endif %}
   </section>
   {% endif %}
 
@@ -1015,7 +1023,7 @@ function toggleTheme() {
   }
 })();
 
-/* ── Top findings: Voir plus / Voir moins ── */
+/* ── Top lists (findings and recommendations): Voir plus / Voir moins ── */
 function toggleTop(button) {
   const list = button.previousElementSibling;
   const expanded = list.classList.toggle('expanded');

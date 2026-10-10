@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import pytest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -459,6 +460,108 @@ def _device(ip: str, version: str = "Linux 5.x") -> Finding:
     )
 
 
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+
+class _Element:
+    """Element of a parsed fragment, with just enough structure to place markup."""
+
+    def __init__(self, tag: str, attrs: dict, parent=None):
+        self.tag = tag
+        self.attrs = attrs
+        self.parent = parent
+        self.children: list = []
+        self.text_parts: list = []
+
+    @property
+    def classes(self) -> list:
+        return self.attrs.get("class", "").split()
+
+    @property
+    def text(self) -> str:
+        return "".join(self.text_parts).strip()
+
+    def walk(self):
+        for child in self.children:
+            yield child
+            yield from child.walk()
+
+    def previous_element_sibling(self):
+        siblings = self.parent.children
+        index = next(i for i, node in enumerate(siblings) if node is self)
+        return siblings[index - 1] if index > 0 else None
+
+
+def _parse_markup(fragment: str) -> _Element:
+    """Parse a rendered HTML fragment; void elements such as <img> never open a level."""
+    root = _Element("#fragment", {})
+    stack = [root]
+
+    class _Builder(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            node = _Element(tag, dict(attrs), parent=stack[-1])
+            stack[-1].children.append(node)
+            if tag not in _VOID_TAGS:
+                stack.append(node)
+
+        def handle_startendtag(self, tag, attrs):
+            stack[-1].children.append(_Element(tag, dict(attrs), parent=stack[-1]))
+
+        def handle_endtag(self, tag):
+            for depth in range(len(stack) - 1, 0, -1):
+                if stack[depth].tag == tag:
+                    del stack[depth:]
+                    return
+
+        def handle_data(self, data):
+            stack[-1].text_parts.append(data)
+
+    _Builder(convert_charrefs=True).feed(fragment)
+    return root
+
+
+def _save_recommendations(count: int) -> None:
+    """Save open findings that carry defense text: each one is a recommendation.
+
+    With count 0, one finding without explanation is saved instead, so there is
+    no recommendation. Risk scores fall with the index: "Defense step 0." ranks first.
+    """
+    if count == 0:
+        db.save_finding(make_finding(explanation=None))
+        return
+    for i in range(count):
+        db.save_finding(make_finding(
+            risk_score=100.0 - i,
+            target_ip=f"192.168.1.{100 + i}",
+            explanation=Explanation(
+                what=f"Problem {i}.", attack=f"Attack {i}.", defense=f"Defense step {i}.",
+            ),
+        ))
+
+
+def _recommendations_root(content: str) -> _Element:
+    return _parse_markup(_section(content, "recommendations"))
+
+
+def _toggle_buttons(root: _Element) -> list:
+    return [node for node in root.walk() if node.tag == "button" and "toggle-more" in node.classes]
+
+
+def _only_button(root: _Element, name: str) -> _Element:
+    buttons = _toggle_buttons(root)
+    assert len(buttons) == 1, f"expected one Voir plus button in {name}, found {len(buttons)}"
+    return buttons[0]
+
+
+def _rec_items(root: _Element) -> list:
+    return [node for node in root.walk() if "rec-item" in node.classes]
+
+
+def _rec_text(item: _Element, css_class: str) -> str:
+    node = next(n for n in item.walk() if css_class in n.classes)
+    return re.sub(r"\s+", " ", node.text)
+
+
 class TestHtmlSectionsT20:
 
     def test_sections_are_separate_and_in_order(self, tmp_path):
@@ -568,6 +671,150 @@ class TestTopFindings:
         content = _render(tmp_path)
         assert re.search(r'<details class="finding ', content)
         assert not re.search(r"<details[^>]*\bopen\b", content)
+
+
+_TOGGLE_HARNESS = r"""
+const vm = require('vm');
+const fs = require('fs');
+const [, , scriptPath, specJson] = process.argv;
+const spec = JSON.parse(specJson);
+const src = fs.readFileSync(scriptPath, 'utf8');
+
+class ClassList {
+  constructor(initial) { this.items = new Set(initial); }
+  toggle(c) { if (this.items.has(c)) { this.items.delete(c); return false; } this.items.add(c); return true; }
+  contains(c) { return this.items.has(c); }
+}
+const html = {
+  attrs: { 'data-theme': 'dark' },
+  getAttribute(n) { return this.attrs[n]; },
+  setAttribute(n, v) { this.attrs[n] = v; },
+};
+const context = {
+  document: { documentElement: html, getElementById: () => null, querySelectorAll: () => [] },
+  localStorage: { getItem: () => null, setItem: () => {} },
+  window: { addEventListener: () => {} },
+  setTimeout: () => {},
+};
+vm.createContext(context);
+vm.runInContext(src, context);
+
+const lists = {};
+const buttons = {};
+for (const b of spec.buttons) {
+  lists[b.name] = { classList: new ClassList(b.listClasses) };
+  buttons[b.name] = { dataset: b.dataset, textContent: b.text, previousElementSibling: lists[b.name] };
+}
+const snapshot = () => {
+  const state = {};
+  for (const name of Object.keys(buttons)) {
+    state[name] = { expanded: lists[name].classList.contains('expanded'), label: buttons[name].textContent };
+  }
+  return state;
+};
+const steps = [{ action: 'start', state: snapshot() }];
+for (const name of spec.clicks) {
+  context.toggleTop(buttons[name]);
+  steps.push({ action: name, state: snapshot() });
+}
+console.log(JSON.stringify(steps));
+"""
+
+
+class TestRecommendationsPagination:
+    """Section 06 follows the Top 5 rule: five shown, then Voir plus (N) / Voir moins."""
+
+    @pytest.mark.parametrize("count", [0, 5, 6, 12], ids=["0-recs", "5-recs", "6-recs", "12-recs"])
+    def test_visible_hidden_and_button_follow_the_count(self, tmp_path, count):
+        _save_recommendations(count)
+        content = _render(tmp_path)
+        if count == 0:
+            assert 'id="recommendations"' not in content
+            assert 'href="#recommendations"' not in content
+            return
+        root = _recommendations_root(content)
+        items = _rec_items(root)
+        assert len(items) == count
+        assert ["is-extra" in item.classes for item in items] == [i >= 5 for i in range(count)]
+        buttons = _toggle_buttons(root)
+        if count <= 5:
+            assert buttons == []
+            return
+        (button,) = buttons
+        assert button.text == f"Voir plus ({count - 5})"
+        assert button.attrs["data-count"] == str(count - 5)
+        assert button.attrs["data-more"] == "Voir plus"
+        assert button.attrs["data-less"] == "Voir moins"
+
+    def test_button_sits_right_after_the_recommendations_list(self, tmp_path):
+        # The shared toggle reads button.previousElementSibling to find the list it expands.
+        _save_recommendations(6)
+        button = _only_button(_recommendations_root(_render(tmp_path)), "recommendations")
+        previous = button.previous_element_sibling()
+        assert previous is not None and "rec-list" in previous.classes
+
+    def test_all_recommendations_keep_their_order_and_text(self, tmp_path):
+        _save_recommendations(12)
+        items = _rec_items(_recommendations_root(_render(tmp_path)))
+        assert [_rec_text(item, "rec-action") for item in items] == [
+            f"Defense step {i}." for i in range(12)
+        ]
+        for i, item in enumerate(items):
+            assert _rec_text(item, "rec-target").startswith(f"192.168.1.{100 + i}")
+
+    def test_stylesheet_hides_extra_items_until_expanded_and_prints_them_all(self, tmp_path):
+        _save_recommendations(12)
+        content = _render(tmp_path)
+        assert re.search(r"\.rec-list:not\(\.expanded\)\s+\.is-extra\s*\{\s*display:\s*none", content)
+        assert re.search(r"\.rec-list\s+\.is-extra\s*\{\s*display:\s*block\s*!important", content)
+        # Declared after .rec-item (display:flex): the hiding must not depend on specificity alone.
+        assert content.index(".rec-list:not(.expanded) .is-extra") > content.index(".rec-item {")
+
+    def test_findings_button_still_follows_the_top_list(self, tmp_path):
+        _save_recommendations(12)
+        button = _only_button(_parse_markup(_section(_render(tmp_path), "security")), "security")
+        assert button.text == "Voir plus (7)"
+        assert button.previous_element_sibling().attrs.get("id") == "top-list"
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+    def test_both_voir_plus_buttons_toggle_only_their_own_list(self, tmp_path):
+        _save_recommendations(12)
+        content = _render(tmp_path)
+        spec = {"buttons": [], "clicks": ["recommendations", "recommendations", "findings"]}
+        for name, section_id in (("findings", "security"), ("recommendations", "recommendations")):
+            button = _only_button(_parse_markup(_section(content, section_id)), name)
+            spec["buttons"].append({
+                "name": name,
+                "text": button.text,
+                "dataset": {key[len("data-"):]: value
+                            for key, value in button.attrs.items() if key.startswith("data-")},
+                "listClasses": button.previous_element_sibling().classes,
+            })
+        script = re.search(r"<script>(.*?)</script>", content, flags=re.S).group(1)
+        steps = _run_toggle_harness(tmp_path, script, spec)
+
+        collapsed = {"expanded": False, "label": "Voir plus (7)"}
+        expanded = {"expanded": True, "label": "Voir moins"}
+        assert [step["state"] for step in steps] == [
+            {"findings": collapsed, "recommendations": collapsed},
+            {"findings": collapsed, "recommendations": expanded},
+            {"findings": collapsed, "recommendations": collapsed},
+            {"findings": expanded, "recommendations": collapsed},
+        ]
+
+
+def _run_toggle_harness(tmp_path, script: str, spec: dict) -> list:
+    node = shutil.which("node")
+    script_path = tmp_path / "inline.js"
+    script_path.write_text(script, encoding="utf-8")
+    harness = tmp_path / "toggle_harness.js"
+    harness.write_text(_TOGGLE_HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(harness), str(script_path), json.dumps(spec)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 class TestCompletenessIndicators:
