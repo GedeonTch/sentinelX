@@ -31,6 +31,7 @@ Rules enforced here:
 - NEVER report closed or filtered ports as Findings
 """
 
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -114,10 +115,12 @@ def tcp_scan(
 
     Returns:
         List[Finding]: One Finding per open TCP port. Empty only when the
-                       scan succeeds and no open ports are found.
+                       scan succeeds (host up, every planned port recorded)
+                       and no open ports are found.
 
     Raises:
-        TcpScanFailed: If Nmap fails or returns invalid XML.
+        TcpScanFailed: If Nmap fails, the host is DOWN or not reported, or the
+                       XML does not prove a completed scan of an up host.
         TcpScanCancelled: If the user cancels this host scan.
     """
     if profile not in PROFILE_FLAGS:
@@ -140,17 +143,13 @@ def tcp_scan(
         transient=True,
     ) as progress:
         progress.add_task(f"nmap TCP scan → {target}", total=None)
-        xml_output = _run_nmap_tcp(target, profile, ports)
+        xml_output = _run_nmap_tcp(target, profile, ports, strict=True)
 
     if not xml_output:
         display(f"[yellow]No response from nmap TCP scan on {target}.[/yellow]")
         raise TcpScanFailed(f"Nmap TCP scan returned no result for {target}")
 
-    try:
-        ET.fromstring(xml_output)
-    except ET.ParseError as exc:
-        display("[red]Failed to parse nmap TCP XML output.[/red]")
-        raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
+    _check_tcp_xml(xml_output, target)
 
     findings, states = _parse_tcp_xml_with_states(xml_output, target, session_id)
     findings = TcpScanFindings(findings, states)
@@ -196,19 +195,31 @@ def tcp_scan_port_state(
 # nmap subprocess
 # ---------------------------------------------------------------------------
 
-def _run_nmap_tcp(target: str, profile: str, ports: str) -> Optional[str]:
-    """Run nmap TCP scan and return raw XML output.
+def _run_nmap_tcp(
+    target: str,
+    profile: str,
+    ports: str,
+    strict: bool = False,
+) -> Optional[str]:
+    """Run nmap TCP scan and return raw XML output, or None on error.
 
     Args:
         target:  IP or hostname.
         profile: Scan profile key.
         ports:   Port range string.
+        strict:  False (default) keeps the historical contract shared with
+                 Sentinel and the baseline: exit codes 0 and 1 are tolerated
+                 and any unexpected error becomes None.
+                 True is used by the pipeline (tcp_scan): see
+                 _run_nmap_tcp_strict.
 
     Returns:
         str: Raw XML from nmap, or None on error.
     """
     flags = PROFILE_FLAGS.get(profile, PROFILE_FLAGS["normal"])
     cmd = ["nmap"] + flags + ["-oX", "-", "-p", ports, target]
+    if strict:
+        return _run_nmap_tcp_strict(cmd)
     try:
         result = subprocess.run(
             cmd,
@@ -229,6 +240,186 @@ def _run_nmap_tcp(target: str, profile: str, ports: str) -> Optional[str]:
     except Exception as exc:
         display(f"[red]nmap error: {exc}[/red]")
         return None
+
+
+def _run_nmap_tcp_strict(cmd: List[str]) -> Optional[str]:
+    """Run the pipeline's TCP command with the T20 success criterion.
+
+    Failure by default: any non-zero exit code is a failure, because no real
+    lab run has yet confirmed which codes are benign. Known environment errors
+    (nmap missing, timeout, launch error, unreadable output) return None with a
+    message. Any other exception is a programming error and propagates.
+
+    Args:
+        cmd: Full nmap command line.
+
+    Returns:
+        str: Raw XML when nmap exited with 0 and produced output, else None.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        display("[red]nmap not found. Run 'netlab doctor'.[/red]")
+        return None
+    except subprocess.TimeoutExpired:
+        display("[yellow]nmap TCP scan timed out after 300s.[/yellow]")
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        display(f"[red]nmap TCP scan could not run or its output was unreadable: {exc}[/red]")
+        return None
+
+    if result.returncode != 0:
+        display(f"[yellow]nmap TCP scan failed (exit {result.returncode}): "
+                f"{result.stderr.strip()[:200]}[/yellow]")
+        return None
+    return result.stdout if result.stdout.strip() else None
+
+
+# A TCP scan covers at most the 65535 port numbers, so no port count nmap writes
+# can exceed it. nmap writes counts as canonical decimal integers.
+MAX_TCP_PORT_COUNT = 65535
+_COUNT_RE = re.compile(r"0|[1-9][0-9]*")
+_MAX_COUNT_DIGITS = len(str(MAX_TCP_PORT_COUNT))
+
+
+def _parse_port_count(raw: Optional[str], minimum: int) -> Optional[int]:
+    """Return an nmap port count as an int, or None when it is not a valid count.
+
+    A valid count is a canonical decimal (no sign, no spaces, no leading zero)
+    lying in [minimum, MAX_TCP_PORT_COUNT]. Its length is checked before the
+    conversion, so an oversized value is refused without being converted.
+    """
+    if raw is None or not _COUNT_RE.fullmatch(raw) or len(raw) > _MAX_COUNT_DIGITS:
+        return None
+    value = int(raw)
+    return value if minimum <= value <= MAX_TCP_PORT_COUNT else None
+
+
+def _planned_port_count(root: ET.Element, target: str) -> int:
+    """Return how many ports nmap planned for the TCP scan of target.
+
+    nmap prints one <scaninfo protocol="tcp"> for a TCP connect scan. Its
+    numservices is the number of distinct ports in the request: duplicates and
+    overlapping ranges are counted once (checked on nmap 7.95). Every TCP
+    scaninfo must carry the same count, and the count must lie from 1 to
+    MAX_TCP_PORT_COUNT.
+
+    Raises:
+        TcpScanFailed: If there is no TCP scaninfo, if the TCP scaninfo elements
+                       disagree, or if the count is absent or out of range.
+    """
+    counts = {
+        info.get("numservices")
+        for info in root.findall("scaninfo")
+        if info.get("protocol") == "tcp"
+    }
+    if not counts:
+        raise TcpScanFailed(f"nmap XML for {target} has no TCP scaninfo: planned ports unknown")
+    if len(counts) > 1:
+        raise TcpScanFailed(f"nmap XML for {target} has conflicting TCP scaninfo port counts")
+    (raw,) = counts
+    planned = _parse_port_count(raw, minimum=1)
+    if planned is None:
+        shown = "absent" if raw is None else repr(raw[:20])
+        raise TcpScanFailed(
+            f"nmap XML for {target} has an invalid planned port count: {shown} "
+            f"(expected 1 to {MAX_TCP_PORT_COUNT})"
+        )
+    return planned
+
+
+def _recorded_port_states(ports: ET.Element) -> Optional[int]:
+    """Count the port states nmap recorded in one host's <ports> table.
+
+    nmap writes a port either as an explicit <port> (open, closed or filtered)
+    or inside an <extraports state="..." count="N"> group that summarises N
+    ports of one state. Returns None when a group's count is not a valid count
+    (from 0 to MAX_TCP_PORT_COUNT), because the table then cannot be counted.
+    """
+    total = len(ports.findall("port"))
+    for group in ports.findall("extraports"):
+        count = _parse_port_count(group.get("count"), minimum=0)
+        if count is None:
+            return None
+        total += count
+    return total
+
+
+def _check_tcp_xml(xml_output: str, target: str) -> None:
+    """Refuse nmap XML that does not prove a completed scan of an up host.
+
+    A TCP scan is a success only when the XML shows, for the target:
+      - a well-formed nmaprun document,
+      - a finished run (runstats/finished, with exit="success" when present),
+      - a host whose status is "up" and that nmap did not flag as timedout,
+      - a port table for that host,
+      - a planned port count (TCP scaninfo numservices): an integer from 1 to
+        MAX_TCP_PORT_COUNT on which every TCP scaninfo agrees,
+      - exactly that many port states recorded: explicit <port> entries plus the
+        counts of <extraports> groups (each from 0 to MAX_TCP_PORT_COUNT). Fewer
+        states means a partial table; more means the counts disagree.
+    Zero open ports is still a success when all of the above hold.
+
+    Args:
+        xml_output: Raw XML string from nmap.
+        target:     IP or hostname that was scanned.
+
+    Raises:
+        TcpScanFailed: If the XML is invalid or incomplete, the host is DOWN or
+                       not reported by nmap, or the port states recorded do not
+                       match the planned ports.
+    """
+    try:
+        root = ET.fromstring(xml_output)
+    except ET.ParseError as exc:
+        display("[red]Failed to parse nmap TCP XML output.[/red]")
+        raise TcpScanFailed(f"Invalid nmap TCP XML output for {target}") from exc
+
+    if root.tag != "nmaprun":
+        raise TcpScanFailed(f"Unexpected nmap XML root for {target}: {root.tag}")
+
+    finished = root.find("runstats/finished")
+    if finished is None or finished.get("exit", "success") != "success":
+        raise TcpScanFailed(f"nmap TCP run for {target} is not proven finished")
+
+    up_hosts = [
+        host for host in root.findall("host")
+        if host.find("status") is not None
+        and host.find("status").get("state") == "up"
+    ]
+    if not up_hosts:
+        display(f"[yellow]Host {target} is DOWN or was not reported by nmap.[/yellow]")
+        raise TcpScanFailed(f"Host {target} is DOWN or not reported by nmap")
+
+    if up_hosts[0].get("timedout") == "true":
+        raise TcpScanFailed(f"nmap stopped the scan of {target} on its host timeout")
+
+    ports = up_hosts[0].find("ports")
+    if ports is None:
+        raise TcpScanFailed(f"nmap XML for {target} has no port table")
+
+    planned = _planned_port_count(root, target)
+    recorded = _recorded_port_states(ports)
+    if recorded is None:
+        raise TcpScanFailed(
+            f"nmap XML for {target} has an invalid <extraports> count "
+            f"(expected 0 to {MAX_TCP_PORT_COUNT})"
+        )
+    if recorded < planned:
+        raise TcpScanFailed(
+            f"nmap XML for {target} records {recorded} of {planned} planned port state(s): "
+            "partial port table"
+        )
+    if recorded > planned:
+        raise TcpScanFailed(
+            f"nmap XML for {target} records {recorded} port state(s) "
+            f"for {planned} planned port(s)"
+        )
 
 
 # ---------------------------------------------------------------------------

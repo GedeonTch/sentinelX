@@ -20,6 +20,7 @@ Tables:
     findings  — core of the system, one record per detected issue
     baseline  — Sentinel normal state per asset
     events    — Sentinel detected events
+    scan_outcomes — per-machine outcome of each scan module (T20)
 """
 
 import sqlite3
@@ -268,9 +269,32 @@ def init_db(session_id: str) -> None:
             )
         """)
 
+        # scan_outcomes — one row per machine and scan module (additive, T20)
+        _create_scan_outcomes_table(cursor)
+
         conn.commit()
     finally:
         conn.close()
+
+
+def _create_scan_outcomes_table(cursor: sqlite3.Cursor) -> None:
+    """Create the scan_outcomes table when it is missing.
+
+    Additive and idempotent: existing sessions gain an empty table, and
+    existing rows in other tables are untouched.
+
+    Args:
+        cursor: Open cursor on a session database.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scan_outcomes (
+            target_ip   TEXT,
+            module      TEXT,
+            outcome     TEXT,
+            open_ports  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (target_ip, module)
+        )
+    """)
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +744,94 @@ def get_assets(session_id: str) -> List[dict]:
     try:
         rows = conn.execute(
             "SELECT * FROM assets ORDER BY ip"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Scan outcomes — how each scan module ended for each machine (T20)
+# ---------------------------------------------------------------------------
+
+SCAN_OUTCOME_COMPLETED = "completed"
+SCAN_OUTCOME_FAILED = "failed"
+SCAN_OUTCOME_CANCELLED = "cancelled"
+SCAN_OUTCOMES = (SCAN_OUTCOME_COMPLETED, SCAN_OUTCOME_FAILED, SCAN_OUTCOME_CANCELLED)
+
+
+def save_scan_outcome(
+    session_id: str,
+    target_ip: str,
+    module: str,
+    outcome: str,
+    open_ports: int = 0,
+) -> None:
+    """Record how one scan module ended for one machine in a session.
+
+    A later call for the same (target_ip, module) replaces the previous row,
+    so a retried scan overwrites its earlier outcome within the session.
+    open_ports is meaningful only for a completed scan: other outcomes store 0.
+
+    Args:
+        session_id: Unique session identifier.
+        target_ip:  Machine that was scanned.
+        module:     Scan module name, e.g. "tcp_scan" or "udp_scan".
+        outcome:    One of SCAN_OUTCOMES.
+        open_ports: Number of open ports reported by a completed scan.
+
+    Raises:
+        ValueError: If the outcome is unknown, the identity is empty,
+                    or open_ports is negative.
+    """
+    if outcome not in SCAN_OUTCOMES:
+        raise ValueError(f"Unknown scan outcome: {outcome!r}")
+    if not target_ip or not module:
+        raise ValueError("A scan outcome needs a target_ip and a module.")
+    if open_ports < 0:
+        raise ValueError("open_ports must be >= 0.")
+    stored_ports = int(open_ports) if outcome == SCAN_OUTCOME_COMPLETED else 0
+
+    conn = get_connection(session_id)
+    try:
+        cursor = conn.cursor()
+        _create_scan_outcomes_table(cursor)
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO scan_outcomes (target_ip, module, outcome, open_ports)
+            VALUES (?, ?, ?, ?)
+            """,
+            (target_ip, module, outcome, stored_ports),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_scan_outcomes(session_id: str) -> Optional[List[dict]]:
+    """Return the scan outcomes recorded for a session.
+
+    Returns None when the session database has no scan_outcomes table, which
+    is the case for sessions created before T20. Callers must treat None as
+    "unknown", never as "no machine was scanned".
+
+    Args:
+        session_id: Unique session identifier.
+
+    Returns:
+        List[dict]: One dict per row with keys target_ip, module, outcome and
+                    open_ports, ordered by target_ip then module; or None.
+    """
+    conn = get_connection(session_id)
+    try:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_outcomes'"
+        ).fetchone()
+        if table is None:
+            return None
+        rows = conn.execute(
+            "SELECT target_ip, module, outcome, open_ports FROM scan_outcomes "
+            "ORDER BY target_ip, module"
         ).fetchall()
         return [dict(row) for row in rows]
     finally:

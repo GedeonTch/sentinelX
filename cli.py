@@ -296,7 +296,8 @@ def _run_pipeline(
 ) -> List[Finding]:
     """Execute the full scan pipeline and return produced findings."""
     from core.database import (
-        close_session, init_db, save_findings, save_session,
+        SCAN_OUTCOME_CANCELLED, SCAN_OUTCOME_COMPLETED, SCAN_OUTCOME_FAILED,
+        close_session, init_db, save_findings, save_scan_outcome, save_session,
         update_finding_risk_score,
     )
 
@@ -323,6 +324,10 @@ def _run_pipeline(
     except Exception as exc:
         result.add("session", "failed", str(exc))
         return []  # cannot continue without a session
+
+    def record_outcome(ip: str, module: str, outcome: str, open_ports: int = 0) -> None:
+        """Persist how one scan module ended for one machine (T20)."""
+        save_scan_outcome(session_id, ip, module, outcome, open_ports=open_ports)
 
     session_close_status = "completed"
     discover_status = None
@@ -373,13 +378,30 @@ def _run_pipeline(
             for ip in active_ips:
                 try:
                     findings = tcp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
-                    all_tcp_findings.extend(findings)
-                    tcp_ok += 1
                 except TcpScanFailed:
                     tcp_fail += 1
                     tcp_failed_hosts.append(ip)
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_FAILED)
                 except TcpScanCancelled:
                     tcp_cancelled += 1
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_CANCELLED)
+                except (KeyboardInterrupt, typer.Abort):
+                    # Interrupted on this host: record it, then stop the pipeline.
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_CANCELLED)
+                    raise
+                except Exception:
+                    # Unexpected error: record it, then propagate (no masking).
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_FAILED)
+                    raise
+                else:
+                    # Persist this host's open ports now, so the stored open_ports
+                    # count always matches the stored findings (T20).
+                    if findings:
+                        persist_findings(findings)
+                    all_tcp_findings.extend(findings)
+                    tcp_ok += 1
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_COMPLETED,
+                                   open_ports=len(findings))
             tcp_detail = (
                 f"{tcp_ok}/{len(active_ips)} hosts scanned"
                 + (f" — {tcp_fail} failed" if tcp_fail else "")
@@ -394,8 +416,6 @@ def _run_pipeline(
             else:
                 tcp_status = "partial"
             result.add("tcp_scan", tcp_status, tcp_detail, failed_hosts=tcp_failed_hosts)
-            if all_tcp_findings:
-                persist_findings(all_tcp_findings)
 
         # ── Step 4 — UDP scan ─────────────────────────────────────────────────
         all_udp_findings = []
@@ -410,13 +430,28 @@ def _run_pipeline(
             for ip in active_ips:
                 try:
                     findings = udp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
-                    all_udp_findings.extend(findings)
-                    udp_ok += 1
                 except UdpScanFailed:
                     udp_fail += 1
                     udp_failed_hosts.append(ip)
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_FAILED)
                 except UdpScanCancelled:
                     udp_cancelled += 1
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_CANCELLED)
+                except (KeyboardInterrupt, typer.Abort):
+                    # Interrupted on this host: record it, then stop the pipeline.
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_CANCELLED)
+                    raise
+                except Exception:
+                    # Unexpected error: record it, then propagate (no masking).
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_FAILED)
+                    raise
+                else:
+                    if findings:  # same rule as TCP (T20)
+                        persist_findings(findings)
+                    all_udp_findings.extend(findings)
+                    udp_ok += 1
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_COMPLETED,
+                                   open_ports=len(findings))
             udp_detail = (
                 f"{udp_ok}/{len(active_ips)} hosts scanned"
                 + (f" — {udp_fail} failed" if udp_fail else "")
@@ -431,8 +466,6 @@ def _run_pipeline(
             else:
                 udp_status = "partial"
             result.add("udp_scan", udp_status, udp_detail, failed_hosts=udp_failed_hosts)
-            if all_udp_findings:
-                persist_findings(all_udp_findings)
 
         # ── Step 5 — CVE enrichment ───────────────────────────────────────────
         all_port_findings = all_tcp_findings + all_udp_findings

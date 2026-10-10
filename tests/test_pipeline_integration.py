@@ -38,7 +38,9 @@ OS_XML = """\
 TCP_XML = """\
 <?xml version="1.0"?>
 <nmaprun>
+  <scaninfo type="connect" protocol="tcp" numservices="1" services="23"/>
   <host>
+    <status state="up" reason="syn-ack"/>
     <address addr="192.0.2.10" addrtype="ipv4"/>
     <ports>
       <port protocol="tcp" portid="23">
@@ -47,6 +49,10 @@ TCP_XML = """\
       </port>
     </ports>
   </host>
+  <runstats>
+    <finished time="1700000000" exit="success" elapsed="1.00"/>
+    <hosts up="1" down="0" total="1"/>
+  </runstats>
 </nmaprun>
 """
 

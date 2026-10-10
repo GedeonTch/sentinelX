@@ -159,13 +159,17 @@ class TestInitDb:
 
         conn = db.get_connection(SESSION_A)
         try:
-            count = conn.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type='table'"
-            ).fetchone()[0]
+            names = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
         finally:
             conn.close()
 
-        assert count == 5
+        assert names == {
+            "assets", "sessions", "findings", "baseline", "events", "scan_outcomes",
+        }
 
 
 # ---------------------------------------------------------------------------
