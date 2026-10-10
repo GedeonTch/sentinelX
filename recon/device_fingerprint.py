@@ -128,7 +128,11 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
         )
         for ip in active_ips:
             progress.update(task, description=f"Pass 2/2 — OS detection → {ip}")
-            os_xml = _run_nmap_os(ip)
+            try:
+                os_xml = _run_nmap_os(ip)
+            except DiscoveryFailed:
+                # Operational OS failure only: ping discovery remains valid.
+                os_xml = None
             if os_xml is None:
                 display(
                     f"[yellow]OS detection unavailable for {ip}; "
@@ -220,7 +224,7 @@ def _run_nmap(cmd: List[str], timeout: int = 300) -> Optional[str]:
     except subprocess.TimeoutExpired as exc:
         display(f"[yellow]nmap timed out after {timeout}s — skipping.[/yellow]")
         raise DiscoveryFailed(f"nmap timed out after {timeout}s") from exc
-    except Exception as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         display(f"[red]nmap error: {exc}[/red]")
         raise DiscoveryFailed(f"nmap error: {exc}") from exc
 

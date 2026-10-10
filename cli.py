@@ -81,6 +81,8 @@ class PipelineResult:
     session_id: str = ""
     findings_count: int = 0
     global_score: Optional[float] = None
+    current_findings: List[Finding] = field(default_factory=list)
+    session_findings: Optional[List[Finding]] = None
 
     def add(self, name: str, status: str, detail: str = "", failed_hosts=None) -> StepResult:
         sr = StepResult(name, status, detail, failed_hosts or [])
@@ -96,7 +98,7 @@ class PipelineResult:
         )
         if critical_failed:
             return "FAILED"
-        if any(s.status in ("partial", "failed") for s in self.steps):
+        if any(s.status in ("partial", "failed", "cancelled") for s in self.steps):
             return "PARTIAL"
         return "SUCCESS"
 
@@ -280,7 +282,31 @@ def scan(
             raise typer.Exit(code=0)
 
     result = PipelineResult()
-    findings = _run_pipeline(target, profile, session, yes, result)
+    try:
+        findings = _run_pipeline(target, profile, session, yes, result)
+    except (KeyboardInterrupt, typer.Abort):
+        try:
+            _render_scan_summary(result, result.current_findings)
+        except Exception:
+            # Display errors must not replace the original interruption.
+            pass
+        raise
+    except Exception:
+        try:
+            if result.overall_status == "FAILED":
+                _render_scan_summary(result, result.current_findings)
+            else:
+                # An exception can precede registration of its step result.
+                # Do not infer SUCCESS from the previously completed steps.
+                display(
+                    "[red]Erreur inattendue du pipeline.[/red] "
+                    f"Session : {escape(result.session_id or 'non créée')}"
+                )
+        except Exception:
+            # Preserve the original exception and traceback even if rendering
+            # or the output stream fails while reporting the failure.
+            pass
+        raise
     _render_scan_summary(result, findings)
 
     if result.overall_status == "FAILED":
@@ -298,7 +324,7 @@ def _run_pipeline(
     from core.database import (
         SCAN_OUTCOME_CANCELLED, SCAN_OUTCOME_COMPLETED, SCAN_OUTCOME_FAILED,
         close_session, init_db, save_findings, save_scan_outcome, save_session,
-        update_finding_risk_score,
+        update_finding_risk_score, get_findings,
     )
 
     # Track successful persistence operations by internal Finding identity.
@@ -331,6 +357,7 @@ def _run_pipeline(
 
     session_close_status = "completed"
     discover_status = None
+    active_step = "discover"
     try:
         # ── Step 2 — DISCOVER ─────────────────────────────────────────────────
         active_ips: List[str] = []
@@ -359,17 +386,20 @@ def _run_pipeline(
             result.add("discover", "failed", f"FAILED: {exc}")
             session_close_status = "failed"
             return []
+        except (KeyboardInterrupt, typer.Abort):
+            raise
         except Exception as exc:
             discover_status = "FAILED"
             result.add("discover", "failed", f"FAILED: {exc}")
             session_close_status = "failed"
-            return []
+            raise
 
         # ── Step 3 — TCP scan ─────────────────────────────────────────────────
+        tcp_ok, tcp_fail, tcp_cancelled = 0, 0, 0
+        tcp_failed_hosts = []
+        active_step = "tcp_scan"
         all_tcp_findings = []
         if active_ips:
-            tcp_ok, tcp_fail, tcp_cancelled = 0, 0, 0
-            tcp_failed_hosts = []
             from detect.tcp_scan import (
                 TcpScanCancelled,
                 TcpScanFailed,
@@ -418,10 +448,11 @@ def _run_pipeline(
             result.add("tcp_scan", tcp_status, tcp_detail, failed_hosts=tcp_failed_hosts)
 
         # ── Step 4 — UDP scan ─────────────────────────────────────────────────
+        udp_ok, udp_fail, udp_cancelled = 0, 0, 0
+        udp_failed_hosts = []
+        active_step = "udp_scan"
         all_udp_findings = []
         if active_ips:
-            udp_ok, udp_fail, udp_cancelled = 0, 0, 0
-            udp_failed_hosts = []
             from detect.udp_scan import (
                 UdpScanCancelled,
                 UdpScanFailed,
@@ -468,6 +499,7 @@ def _run_pipeline(
             result.add("udp_scan", udp_status, udp_detail, failed_hosts=udp_failed_hosts)
 
         # ── Step 5 — CVE enrichment ───────────────────────────────────────────
+        active_step = "cve_enrichment"
         all_port_findings = all_tcp_findings + all_udp_findings
         enriched = all_port_findings
         if all_port_findings:
@@ -484,10 +516,13 @@ def _run_pipeline(
                 }
                 enriched = enrich_findings(all_port_findings, asset_context=_asset_context or None)
                 result.add("cve_enrichment", "ok", f"{len(enriched)} finding(s) processed")
+            except (KeyboardInterrupt, typer.Abort):
+                raise
             except Exception as exc:
                 result.add("cve_enrichment", "failed", str(exc))
 
         # ── Step 6 — Misconfiguration detection ───────────────────────────────
+        active_step = "misconfig_detection"
         misconfig_findings = []
         if active_ips and enriched:
             mc_ok, mc_fail, mc_failed_hosts = 0, 0, []
@@ -498,6 +533,8 @@ def _run_pipeline(
                     mc = detect_misconfigs(ip_findings, session_id)
                     misconfig_findings.extend(mc)
                     mc_ok += 1
+                except (KeyboardInterrupt, typer.Abort):
+                    raise
                 except Exception as exc:
                     mc_fail += 1
                     mc_failed_hosts.append(ip)
@@ -505,18 +542,21 @@ def _run_pipeline(
                 result.add("misconfig_detection", "ok",
                            f"{len(misconfig_findings)} misconfiguration(s) found")
             else:
-                result.add("misconfig_detection", "partial",
+                result.add("misconfig_detection", "failed" if mc_ok == 0 else "partial",
                            f"{mc_ok}/{len(active_ips)} réussis",
                            failed_hosts=mc_failed_hosts)
 
         # ── Step 8 — Explanation enrichment ───────────────────────────────────
         # Explanation failures are non-critical for the Findings themselves, but
         # remain observable so the session can be marked partial.
+        active_step = "explanation"
         all_findings = enriched + misconfig_findings
         explained = []
         explanation_failures = 0
         try:
             from knowledge.knowledge_base import get_explanation_for_finding
+        except (KeyboardInterrupt, typer.Abort):
+            raise
         except Exception:
             get_explanation_for_finding = None
             if all_findings:
@@ -530,6 +570,8 @@ def _run_pipeline(
                     )
                     if exp:
                         f = dataclasses.replace(f, explanation=exp)
+                except (KeyboardInterrupt, typer.Abort):
+                    raise
                 except Exception:
                     explanation_failures += 1
             explained.append(f)
@@ -545,6 +587,7 @@ def _run_pipeline(
             result.add("explanation", "ok", f"{len(explained)} finding(s) processed")
 
         # ── Step 9 — Risk scoring ─────────────────────────────────────────────
+        active_step = "risk_scoring"
         scored = explained
         try:
             from core.risk_scorer import score_findings, get_global_score
@@ -552,9 +595,12 @@ def _run_pipeline(
             result.global_score = get_global_score(scored)
             result.add("risk_scoring", "ok",
                        f"worst current threat: {result.global_score:.1f}" if result.global_score else "no qualifying findings")
+        except (KeyboardInterrupt, typer.Abort):
+            raise
         except Exception as exc:
             result.add("risk_scoring", "failed", str(exc))
 
+        active_step = "persist"
         # ── Step 9 — Persist final findings ───────────────────────────────────
         try:
             persist_findings(scored)
@@ -562,19 +608,37 @@ def _run_pipeline(
                 if f.risk_score is not None:
                     update_finding_risk_score(session_id, f.id, f.risk_score)
             result.findings_count = len(persisted_by_id)
-            result.add("persist", "ok", f"{result.findings_count} finding(s) saved")
+            result.add("persist", "ok", f"{result.findings_count} résultat(s) enregistré(s) pendant le scan actuel")
+        except (KeyboardInterrupt, typer.Abort):
+            raise
         except Exception as exc:
             result.findings_count = len(persisted_by_id)
             result.add("persist", "failed", str(exc))
 
         return list(persisted_by_id.values())
 
+    except (KeyboardInterrupt, typer.Abort):
+        session_close_status = "partial"
+        if active_step == "discover":
+            discover_status = "CANCELLED"
+        detail = "Interrupted by user"
+        failed_hosts = []
+        if active_step == "tcp_scan":
+            detail += f" — {tcp_ok}/{len(active_ips)} hosts scanned — {tcp_fail} failed"
+            failed_hosts = tcp_failed_hosts
+        elif active_step == "udp_scan":
+            detail += f" — {udp_ok}/{len(active_ips)} hosts scanned — {udp_fail} failed"
+            failed_hosts = udp_failed_hosts
+        result.add(active_step, "cancelled", detail, failed_hosts=failed_hosts)
+        raise
     except Exception:
         session_close_status = "failed"
         raise
 
     finally:
-        if session_close_status != "failed":
+        result.current_findings = list(persisted_by_id.values())
+        result.findings_count = len(persisted_by_id)
+        if session_close_status not in ("failed", "partial"):
             session_close_status = {
                 "SUCCESS": "completed",
                 "PARTIAL": "partial",
@@ -592,6 +656,13 @@ def _run_pipeline(
                 f"{exc}[/yellow]"
             )
 
+        try:
+            result.session_findings = get_findings(session_id)
+        except Exception:
+            # A failed read is unknown, never a fabricated zero count.
+            result.session_findings = None
+            display("[yellow]Warning: session totals unavailable.[/yellow]")
+
 
 def _render_scan_summary(
     result: PipelineResult,
@@ -601,6 +672,8 @@ def _render_scan_summary(
     from core.finding import Severity
     severity_counts = {severity.value: 0 for severity in Severity}
     for finding in findings:
+        if _is_inventory_observation(finding):
+            continue
         severity = getattr(finding, "severity", None)
         severity_value = getattr(severity, "value", severity)
         if severity_value in severity_counts:
@@ -614,7 +687,7 @@ def _render_scan_summary(
         for host in step.failed_hosts:
             display(f"  [dim]└─ {host}[/dim]")
 
-    severity_table = Table(title="Findings", box=box.ROUNDED)
+    severity_table = Table(title="Security Findings — scan actuel", box=box.ROUNDED)
     severity_table.add_column("Severity", style="bold")
     severity_table.add_column("Count", justify="right")
     for severity in Severity:
@@ -627,14 +700,30 @@ def _render_scan_summary(
     display(f"[bold {status_color}]RÉSULTAT : {status}[/bold {status_color}]")
     display("─" * 40)
     display(f"[dim]Session:[/dim] {result.session_id}")
-    display(f"[dim]Findings:[/dim] {result.findings_count}")
+    inventory = sum(_is_inventory_observation(f) for f in findings)
+    display(f"Findings de sécurité enregistrés pendant le scan actuel : {len(findings) - inventory}")
+    display(f"Observations d’inventaire enregistrées pendant le scan actuel : {inventory}")
+    stored = result.session_findings
+    if stored is None:
+        display("Findings de sécurité présents dans la session : indisponible")
+        display("Observations d’inventaire présentes dans la session : indisponible")
+        display("Total des résultats présents dans la session : indisponible")
+    else:
+        stored_inventory = sum(_is_inventory_observation(f) for f in stored)
+        stored_security = len(stored) - stored_inventory
+        display(f"Findings de sécurité présents dans la session : {stored_security}")
+        display(f"Observations d’inventaire présentes dans la session : {stored_inventory}")
+        display(f"Total des résultats présents dans la session : {len(stored)} "
+                f"(sécurité : {stored_security}, inventaire : {stored_inventory})")
     if result.global_score is not None:
         display(f"[dim]Worst Current Threat:[/dim] {result.global_score:.1f}/100")
     display(f"\n[dim]› netlab findings list --session {result.session_id}[/dim]")
     display(f"[dim]› netlab report generate --session {result.session_id} --format html[/dim]")
 
     if result.failure_count:
-        display(f"\n[yellow]⚠ {result.failure_count} opération(s) ont échoué.[/yellow]")
+        label = ("étape en échec ou partiellement exécutée" if result.failure_count == 1
+                 else "étapes en échec ou partiellement exécutées")
+        display(f"\n[yellow]⚠ {result.failure_count} {label}.[/yellow]")
 
     _render_contextual_suggestions(findings, result)
 

@@ -358,9 +358,9 @@ class TestScan:
         assert tcp_step.status == "cancelled"
         assert "0/2 hosts scanned" in tcp_step.detail
         assert "2 cancelled" in tcp_step.detail
-        assert result.overall_status == "SUCCESS"
+        assert result.overall_status == "PARTIAL"
         close_session.assert_called_once_with(
-            close_session.call_args.args[0], status="completed", discover_status="OK"
+            close_session.call_args.args[0], status="partial", discover_status="OK"
         )
 
     def test_port_scan_failed_and_cancelled_without_success_is_failed(self):
@@ -581,7 +581,7 @@ class TestScan:
         tcp_scan.assert_not_called()
         udp_scan.assert_not_called()
         close_session.assert_called_once_with(
-            close_session.call_args.args[0], status="completed", discover_status="CANCELLED"
+            close_session.call_args.args[0], status="partial", discover_status="CANCELLED"
         )
 
     def test_discover_tool_failure_is_failed(self):
@@ -622,7 +622,7 @@ class TestScan:
 
         assert result.exit_code == 0
         # This scan produced and persisted exactly one Finding.
-        assert "Findings: 1" in result.output
+        assert "Observations d’inventaire enregistrées pendant le scan actuel : 1" in result.output
 
     def test_scan_counter_for_multiple_modules(self):
         tcp_finding = make_finding(
@@ -647,7 +647,7 @@ class TestScan:
             return_value=[], expose_mocks=True
         )
 
-        assert "Findings: 0" in result.output
+        assert "Observations d’inventaire enregistrées pendant le scan actuel : 0" in result.output
         close_session.assert_called_once()
 
     def test_scan_stealth_profile_accepted(self):
@@ -780,7 +780,7 @@ class TestScanSummary:
         rendered_table = output.getvalue()
 
         assert "CRITICAL" in rendered_table and "1" in rendered_table
-        assert "HIGH" in rendered_table and "2" in rendered_table
+        assert "HIGH" in rendered_table and "1" in rendered_table
         assert "MEDIUM" in rendered_table and "3" in rendered_table
         assert "LOW" in rendered_table and "1" in rendered_table
         assert "INFO" in rendered_table and "0" in rendered_table
@@ -869,7 +869,7 @@ class TestScanSummary:
         output = StringIO()
         Console(file=output, width=80).print(table)
         rendered_table = output.getvalue()
-        assert "HIGH" in rendered_table and "2" in rendered_table
+        assert "HIGH" in rendered_table and "1" in rendered_table
 
 
 # ---------------------------------------------------------------------------
