@@ -20,7 +20,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import typer
 from rich import box
@@ -38,6 +38,11 @@ from core.dependencies import (
 )
 from core.finding import Finding, Severity, format_finding_id
 from core.logger import display
+
+if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+    from core.credential_vault import CredentialVault
+    from detect.default_creds import CheckReport
 
 # ---------------------------------------------------------------------------
 # Version
@@ -235,18 +240,143 @@ def smb_enum_cmd(
         display(f"[yellow]No SMB findings for {target}.[/yellow]")
 
 
+def _credential_error(message: str) -> None:
+    """Never let a diagnostic failure expose secret-bearing stack locals."""
+    try:
+        display(Text(message, style="red"))
+    except Exception:
+        pass
+    raise typer.Exit(code=1) from None
+
+
+def _open_credential_vault(writable: bool = False) -> AbstractContextManager[CredentialVault]:
+    """Interactive preparation only; keys never enter CLI arguments or config."""
+    import sys
+    from core.credential_vault import VaultError, default_vault_path, open_vault
+    # Fail before requesting secrets if a required backend cannot be loaded.
+    try:
+        import cryptography  # noqa: F401
+        import portalocker  # noqa: F401
+        if sys.platform == "win32":
+            import win32security  # noqa: F401
+    except ImportError:
+        raise VaultError("Credential vault dependencies are unavailable") from None
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise VaultError("An interactive private terminal is required")
+    path = default_vault_path()
+    absent = not path.exists() and not path.is_symlink()
+    if absent:
+        if not writable:
+            raise VaultError("Vault absent; initialize through creds_check")
+        display("[yellow]A local encrypted vault will be created. Losing its passphrase "
+                "makes its contents unrecoverable. Back up only the encrypted vault.[/yellow]")
+        if not typer.confirm("Create the encrypted credential vault?"):
+            raise typer.Abort()
+    phrase = typer.prompt("Vault passphrase", hide_input=True, confirmation_prompt=absent)
+    return open_vault(path, phrase, create=absent, writable=writable)
+
+
+def _render_credential_summary(report: CheckReport) -> None:
+    """Only safe counters and fixed reason codes, never candidate values."""
+    display("Credential verification — no result proves that a service is safe.")
+    for item in report.services:
+        display(Text(f"{item.service}: {item.state}; candidates={item.candidates}; "
+                     f"attempts={item.attempts}; confirmed={item.outcomes['SUCCESS']}; "
+                     f"stored={item.created + item.updated} (created={item.created}, updated={item.updated}); "
+                     f"save_failures={item.save_failures}; save_uncertain={item.save_uncertain}; reason={item.reason or '—'}"))
+        display(Text("Outcomes (attempts): " + str(dict(item.outcomes))))
+        display(Text("Protocol evidence (attempts): " + str(dict(item.details))))
+        display(Text("Not tested (candidates): " + str(dict(item.skipped))))
+    if any(item.save_uncertain for item in report.services):
+        display("[yellow]Vault write outcome uncertain: testing stopped. "
+                "Inspect the vault before retrying; the last record may already exist.[/yellow]")
+    if report.interrupted:
+        display("[yellow]Verification interrupted; previously saved credentials remain in the vault.[/yellow]")
+    display("netlab creds list")
+    display("netlab creds show <id>")
+
+
 @app.command("creds_check")
 def creds_check_cmd(
-    target: str = typer.Option(..., "--target", "-t", help="IPv4 address to probe for default credentials."),
+    target: str = typer.Option(..., "--target", "-t", help="Single authorized IPv4 address."),
+    dictionary: Optional[str] = typer.Option(None, "--dict", help="UTF-8 JSON Lines candidate file; replaces the built-in catalog."),
+    service: Optional[List[str]] = typer.Option(None, "--service", help="Repeatable: ftp or snmp. Default: both."),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Applicable built-in product profile; incompatible with --dict."),
 ) -> None:
-    """Probe known default FTP/SNMP credentials. Findings are displayed, not saved."""
-    from detect.default_creds import check_default_creds
+    """Check FTP/SNMP explicitly. Accepted secrets go only to the encrypted vault."""
+    from pathlib import Path
+    from core.credential_vault import VaultError
+    from detect.credential_dictionary import DictionaryError, prepare_candidates
+    from detect.default_creds import CheckReport, check_default_creds
+    report = CheckReport()
+    try:
+        try:
+            address = str(ipaddress.IPv4Address(target))
+        except ValueError:
+            raise DictionaryError("A single IPv4 address is required") from None
+        candidates, selected = prepare_candidates(Path(dictionary) if dictionary is not None else None,
+                                                  service or (), profile)
+        with _open_credential_vault(writable=True) as vault:
+            display("Confirmed authentications will be saved in the encrypted vault only. "
+                    "No identities or secrets enter Findings or reports. "
+                    "Budgets: 3/service, 2/account, 10 total; lockout risk remains.")
+            if profile:
+                display("The selected catalog profile must match this authorized product; "
+                        "its applicability is not automatically detected.")
+            findings = check_default_creds(address, _standalone_session_id(), candidates=candidates,
+                                          services=selected, recorder=vault, report=report)
+            if findings:
+                _render_findings_table(findings)
+    except (DictionaryError, VaultError) as exc:
+        _credential_error(str(exc))
+    except Exception:
+        _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
+    finally:
+        if report.services:
+            try:
+                _render_credential_summary(report)
+            except Exception:
+                _credential_error("Credential summary could not be displayed")
+    if any(item.save_failures or item.save_uncertain or any(item.outcomes[k] for k in ("ERROR", "TIMEOUT", "INACCESSIBLE", "INCONCLUSIVE", "LOCKED", "ANONYMOUS_ACCESS"))
+           for item in report.services):
+        raise typer.Exit(code=1)
 
-    findings = check_default_creds(target, _standalone_session_id())
-    if findings:
-        _render_findings_table(findings)
-    else:
-        display(f"[yellow]No default-credential findings for {target}.[/yellow]")
+
+creds_app = typer.Typer(help="Explicit consultation of the encrypted local vault.")
+app.add_typer(creds_app, name="creds")
+
+
+@creds_app.command("list")
+def creds_list() -> None:
+    """List safe metadata only; never identities, passwords or communities."""
+    from core.credential_vault import VaultError
+    try:
+        with _open_credential_vault() as vault:
+            for row in vault.list_metadata():
+                display(Text(json.dumps(row, ensure_ascii=True)))
+    except VaultError as exc:
+        _credential_error(str(exc))
+    except Exception:
+        _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
+
+
+@creds_app.command("show")
+def creds_show(record_id: str = typer.Argument(..., help="Opaque vault record ID.")) -> None:
+    """Reveal exactly one record after explicit confirmation in a private terminal."""
+    from core.credential_vault import VaultError
+    try:
+        with _open_credential_vault() as vault:
+            record = vault.reveal(record_id)
+            if record is None:
+                raise VaultError("Credential record not found")
+            if not typer.confirm("Reveal this secret? Terminal scrollback and recordings may retain it"):
+                return
+            # JSON escapes control characters; Text disables Rich markup interpretation.
+            display(Text(json.dumps(record, ensure_ascii=True)))
+    except VaultError as exc:
+        _credential_error(str(exc))
+    except Exception:
+        _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
 
 
 # ---------------------------------------------------------------------------

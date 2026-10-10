@@ -1485,8 +1485,10 @@ class TestStandaloneCommands:
         save.assert_not_called()
 
     def test_creds_check_calls_module_without_db_persist(self):
+        from contextlib import nullcontext
+
         finding = make_finding(module="default_creds", target_port=21, target_service="ftp")
-        with patch(
+        with patch("cli._open_credential_vault", return_value=nullcontext(MagicMock(ready=True))), patch(
             "detect.default_creds.check_default_creds",
             return_value=[finding],
         ) as check, \

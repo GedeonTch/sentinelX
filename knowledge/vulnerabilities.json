@@ -89,9 +89,9 @@
     },
 
     "default_creds_found": {
-      "what": "Des credentials par défaut ont été acceptés par ce service. Les équipements et logiciels sont souvent livrés avec des comptes administrateurs préconfigurés (admin/admin, admin/password, root/root...) que les administrateurs oublient de changer lors de l'installation.",
-      "attack": "Un attaquant qui réussit à s'authentifier avec des credentials par défaut obtient un accès complet au service. Pour les équipements réseau (routeurs, switches), cela signifie le contrôle total du réseau. Pour les services applicatifs (bases de données, interfaces web), cela expose toutes les données.",
-      "defense": "Changer tous les mots de passe par défaut immédiatement lors de l'installation. Utiliser un gestionnaire de mots de passe ou un coffre-fort d'entreprise (Vault, CyberArk). Auditer régulièrement les comptes et désactiver ceux inutilisés. Activer l'authentification multi-facteurs partout où c'est possible."
+      "what": "Une authentification avec une valeur par défaut documentée a été observée sur un service correspondant au profil sélectionné. Les données d’authentification ne sont consultables que dans le coffre local chiffré.",
+      "attack": "Une valeur par défaut connue peut permettre un accès non autorisé selon les permissions du compte ou de la communauté. Une lecture SNMP ne démontre pas un droit d’écriture. SNMPv1 ne protège pas cryptographiquement l’intégrité des échanges.",
+      "defense": "Remplacer les valeurs par défaut, limiter les accès réseau et les privilèges, désactiver les comptes inutiles et utiliser une authentification forte. Pour SNMP, privilégier SNMPv3 avec authentification et confidentialité."
     },
 
     "cve_2011_2523": {
