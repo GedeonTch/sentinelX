@@ -1299,8 +1299,20 @@ def sentinel_start(
     relearn: bool          = typer.Option(False, "--relearn", help="Force baseline relearn."),
 ) -> None:
     """Learn the network baseline and start monitoring for changes."""
-    from sentinel.sentinel_manager import start
-    start(target_network=target, session_id=session, force_relearn=relearn)
+    from sentinel.sentinel_manager import start, LifecycleError
+    try:
+        start(target_network=target, session_id=session, force_relearn=relearn)
+    except KeyboardInterrupt:
+        display("[yellow]Sentinel start: démarrage interrompu, aucun succès confirmé.[/yellow]")
+        raise typer.Exit(code=130) from None
+    except LifecycleError as exc:
+        display(f"[red]Sentinel start: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        # Finalization belongs to the manager; never render arbitrary exception
+        # messages/traceback locals at the CLI boundary (may contain secrets).
+        display(f"[red]Sentinel start: échec inattendu ({type(exc).__name__}). Surveillance interrompue.[/red]")
+        raise typer.Exit(code=1) from None
 
 
 @sentinel_app.command("status")
@@ -1319,11 +1331,25 @@ def sentinel_status(
 
 @sentinel_app.command("stop")
 def sentinel_stop(
-    session: str = typer.Option(..., "--session", "-s", help="Session or network ID."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Legacy owner session/network ID; must resolve unambiguously."),
+    network: Optional[str] = typer.Option(None, "--network", "-n", help="Sentinel network ID."),
+    timeout: float = typer.Option(30.0, "--timeout", min=0.01, help="Maximum confirmation wait in seconds (default 30). In-flight checks are not cancelled."),
 ) -> None:
-    """Stop Sentinel monitoring."""
-    from sentinel.sentinel_manager import stop
-    stop(session)
+    """Request stop and confirm finalization, lock release and process exit."""
+    from sentinel.sentinel_manager import stop, LifecycleError
+    if (session is None) == (network is None):
+        raise typer.BadParameter("Specify exactly one of --network or --session")
+    try:
+        if session is not None and timeout == 30.0:
+            stop(session)  # Preserve the legacy call shape as well as CLI syntax.
+        else:
+            stop(session, network_id=network, timeout=timeout)
+    except (LifecycleError, ValueError) as exc:
+        display(f"[red]Sentinel stop: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        display(f"[red]Sentinel stop: vérification impossible ({type(exc).__name__}), arrêt non confirmé.[/red]")
+        raise typer.Exit(code=1) from None
 
 
 # ---------------------------------------------------------------------------

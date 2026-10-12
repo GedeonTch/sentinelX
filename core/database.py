@@ -24,6 +24,7 @@ Tables:
 """
 
 import sqlite3
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -1203,6 +1204,20 @@ def get_sentinel_state(session_id: str) -> dict:
 # Sentinel restarts, unlike ~/.netlab/sessions/<session_id>.db.
 # ===========================================================================
 
+def validate_sentinel_network_id(network_id: str) -> str:
+    """Safe legacy-compatible ID, validated before any path construction.
+
+    Real network hashes and existing safe opaque identifiers remain supported.
+    fullmatch (not '$') also rejects trailing newlines on all platforms.
+    """
+    import re
+    if not isinstance(network_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", network_id):
+        raise ValueError("Invalid Sentinel network_id: expected 1-64 ASCII letters, digits, '_' or '-'")
+    if re.fullmatch(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", network_id, re.IGNORECASE):
+        raise ValueError("Invalid Sentinel network_id: reserved Windows path component")
+    return network_id
+
+
 def get_sentinel_db_path(network_id: str) -> Path:
     """Return path to the persistent Sentinel DB for a network identity.
 
@@ -1217,7 +1232,7 @@ def get_sentinel_db_path(network_id: str) -> Path:
     Raises:
         ValueError: If network_id is unsafe (path traversal check).
     """
-    _validate_session_id(network_id)
+    validate_sentinel_network_id(network_id)
     db_dir = _real_user_home() / ".netlab" / "sentinel"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / f"{network_id}.db"
@@ -1526,7 +1541,14 @@ def list_sentinel_network_ids() -> List[str]:
     directory = _real_user_home() / ".netlab" / "sentinel"
     if not directory.is_dir():
         return []
-    return sorted(path.stem for path in directory.glob("*.db") if path.is_file())
+    networks = []
+    for path in directory.glob("*.db"):
+        if path.is_file():
+            try:
+                networks.append(validate_sentinel_network_id(path.stem))
+            except ValueError:
+                continue
+    return sorted(networks)
 
 
 def sentinel_has_conflicting_baseline(
@@ -1551,3 +1573,192 @@ def sentinel_has_conflicting_baseline(
         return False
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sentinel execution control — separate from events / Findings / business schema
+# ---------------------------------------------------------------------------
+
+class SentinelControlError(RuntimeError):
+    """Control persistence failed; never evidence of a confirmed stop."""
+
+
+@contextmanager
+def reserve_sentinel_session_file(session_id):
+    """Reserve a NEW session path; remove only our untouched empty reservation.
+
+    Existing files never enter the cleanup block. A populated file, including an
+    uncertain save/commit, is retained. Identity/ctime protect replaced paths.
+    """
+    path = get_db_path(session_id)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise SentinelControlError("Run session already exists; choose a new --session") from exc
+    try:
+        reserved = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        yield
+    finally:
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            identity = lambda st: (st.st_dev, st.st_ino, st.st_ctime_ns)
+            if current.st_size == 0 and identity(current) == identity(reserved):
+                path.unlink()
+
+
+@contextmanager
+def _sentinel_control_connection(network_id):
+    validate_sentinel_network_id(network_id)
+    path = get_sentinel_db_path(network_id)
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0.2)
+    except sqlite3.Error as exc:
+        raise SentinelControlError("Contrôle SQLite indisponible : arrêt non confirmé") from exc
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            yield conn
+    except sqlite3.Error as exc:
+        raise SentinelControlError("Contrôle SQLite indisponible : arrêt non confirmé") from exc
+    finally:
+        conn.close()
+
+
+def sentinel_control_records(network_id):
+    validate_sentinel_network_id(network_id)
+    if network_id not in list_sentinel_network_ids():
+        return []
+    with _sentinel_control_connection(network_id) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sentinel_control'").fetchone():
+            return []
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM sentinel_control WHERE network_id=? ORDER BY rowid DESC", (network_id,))]
+
+
+def sentinel_control_register(network_id, instance, run_session_id, pid, birth):
+    """Called only by the exclusive network owner; additive control DDL only."""
+    with _sentinel_control_connection(network_id) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS sentinel_control (
+            instance TEXT PRIMARY KEY, network_id TEXT NOT NULL,
+            run_session_id TEXT NOT NULL, pid INTEGER NOT NULL,
+            birth TEXT NOT NULL, stop_requested INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT 'running', error TEXT,
+            cycle_active INTEGER NOT NULL DEFAULT 0,
+            cycle_number INTEGER NOT NULL DEFAULT 0
+        )""")
+        # Accept a control table from the earlier review draft, without changing
+        # any business schema or requiring a business migration.
+        columns = {row['name'] for row in conn.execute("PRAGMA table_info(sentinel_control)")}
+        for column in ('cycle_active', 'cycle_number'):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE sentinel_control ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE sentinel_control SET result='stale' WHERE result='running'")
+        conn.execute("INSERT INTO sentinel_control(instance,network_id,run_session_id,pid,birth) VALUES(?,?,?,?,?)",
+                     (instance, network_id, run_session_id, pid, birth))
+
+
+def sentinel_control_get(network_id, instance):
+    with _sentinel_control_connection(network_id) as conn:
+        row = conn.execute("SELECT * FROM sentinel_control WHERE instance=? AND network_id=?",
+                           (instance, network_id)).fetchone()
+        if row is None:
+            raise SentinelControlError("Arrêt non confirmé : contrôle introuvable")
+        return dict(row)
+
+
+def sentinel_control_request_stop(network_id, instance):
+    """Commit is the stop linearization point, serialized with cycle admission."""
+    with _sentinel_control_connection(network_id) as conn:
+        conn.execute("UPDATE sentinel_control SET stop_requested=1 WHERE instance=? AND network_id=? AND result='running'",
+                     (instance, network_id))
+
+
+def sentinel_control_admit_cycle(network_id, instance):
+    """Atomic compare-and-update; commit is the cycle linearization point.
+
+    Both this operation and stop write the same SQLite row. There is no read /
+    check / start gap: whichever write commits first determines admissibility.
+    A successful admission means the cycle is already in-flight, even if the
+    calling process is descheduled before executing its first scan instruction.
+    """
+    with _sentinel_control_connection(network_id) as conn:
+        updated = conn.execute("""UPDATE sentinel_control
+            SET cycle_active=1, cycle_number=cycle_number+1
+            WHERE instance=? AND network_id=? AND stop_requested=0
+              AND result='running' AND cycle_active=0""", (instance, network_id)).rowcount
+        if not updated:
+            row = conn.execute("SELECT cycle_active FROM sentinel_control WHERE instance=? AND network_id=?",
+                               (instance, network_id)).fetchone()
+            if row is None:
+                raise SentinelControlError("Owner control record disappeared")
+            if row['cycle_active']:
+                raise SentinelControlError("A cycle is already admitted")
+        return bool(updated)
+
+
+def sentinel_control_end_cycle(network_id, instance):
+    with _sentinel_control_connection(network_id) as conn:
+        conn.execute("UPDATE sentinel_control SET cycle_active=0 WHERE instance=? AND network_id=?",
+                     (instance, network_id))
+
+
+def sentinel_control_finish(network_id, instance, result, error=None):
+    with _sentinel_control_connection(network_id) as conn:
+        conn.execute("UPDATE sentinel_control SET result=?, error=?, cycle_active=0 WHERE instance=? AND network_id=?",
+                     (result, error, instance, network_id))
+
+
+
+def sentinel_reconcile_failed_start(network_id):
+    """Owner-less preparation failure, called ONLY under the network lock.
+
+    Update an existing state row if possible; never create a DB, schema, state
+    row or control acknowledgement. This is stale-state reconciliation, not
+    confirmation of a process termination. Failure propagates to the finalizer.
+    """
+    validate_sentinel_network_id(network_id)
+    if network_id not in list_sentinel_network_ids():
+        return
+    import datetime
+    from datetime import timezone
+    with _sentinel_control_connection(network_id) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sentinel_state'").fetchone():
+            return
+        conn.execute("""UPDATE sentinel_state
+            SET sentinel_status='inactive', updated_at=? WHERE network_id=?""",
+            (datetime.datetime.now(timezone.utc).isoformat(), network_id))
+
+
+
+def sentinel_fail_unconfirmed_session(session_id):
+    """Close only an existing matching session after an uncertain startup save.
+
+    Caller must own the exclusive reservation for THIS attempt. No creation,
+    schema initialization, insert, or deletion; absent/empty/schema-only files
+    cannot become invented sessions. Corruption/read/write errors propagate.
+    """
+    path = get_db_path(session_id)
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    import datetime
+    from datetime import timezone
+    conn = None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0.2)
+        with conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").fetchone():
+                return False
+            result = conn.execute("""UPDATE sessions SET status='failed', end_time=?
+                WHERE id=?""", (datetime.datetime.now(timezone.utc).isoformat(), session_id))
+            return result.rowcount == 1
+    except sqlite3.Error as exc:
+        raise SentinelControlError("Session non confirmée : clôture impossible") from exc
+    finally:
+        if conn is not None:
+            conn.close()

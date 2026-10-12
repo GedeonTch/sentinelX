@@ -27,7 +27,6 @@ Rules enforced here:
 from __future__ import annotations
 
 import datetime
-import signal
 import time
 import uuid
 from datetime import timezone
@@ -35,6 +34,7 @@ from typing import Optional
 
 import typer
 
+from core import database as _database
 from core.database import (
     init_db,
     init_sentinel_db,
@@ -45,7 +45,7 @@ from core.database import (
     sentinel_get_state,
     sentinel_has_conflicting_baseline,
     sentinel_update_state,
-    update_sentinel_state,
+    close_session,
 )
 from core.logger import display
 from sentinel.alerting import AlertCounter, process_changes
@@ -64,6 +64,7 @@ from sentinel.monitor import (
     check_network,
 )
 from sentinel.whitelist import load_whitelist
+from sentinel.lifecycle import Owner, LifecycleError, network_lock, request_stop, DEFAULT_STOP_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -127,14 +128,78 @@ def start(
             "Network identity is partial.[/yellow]"
         )
 
-    # Step 2 — initialise persistent sentinel DB for this network
-    init_sentinel_db(network_id)
+    # Acquire before any network/session data mutation. Held through finalization.
+    with network_lock(network_id):
+        run_session_id = session_id or f"sentinel-run-{uuid.uuid4().hex}"
+        with _database.reserve_sentinel_session_file(run_session_id):
+            owner = None
+            session_created = False
+            outcome = "failed"
+            fatal_error = None
+            try:
+                init_sentinel_db(network_id)
+                owner = Owner(network_id, run_session_id)
+                init_db(run_session_id)
+                save_session(run_session_id, target=target_network, profile="sentinel")
+                session_created = True
+                outcome = _start_owned(target_network, network_id, run_session_id,
+                                       identity, interval, force_relearn, owner)
+            except KeyboardInterrupt:
+                if not session_created:
+                    # No confirmed session: this is an interrupted startup, not
+                    # a successful stop. Keep outcome failed for any registered
+                    # owner and preserve the interrupt through cleanup failures.
+                    fatal_error = "KeyboardInterrupt: preparation interrupted"
+                    raise
+                outcome = "partial"
+            except Exception as exc:
+                fatal_error = type(exc).__name__ + ": surveillance failed"
+                raise
+            finally:
+                errors = []
+                if session_created:
+                    try:
+                        close_session(run_session_id, status=outcome)
+                    except Exception as exc:
+                        errors.append(type(exc).__name__ + ": session finalization failed")
+                else:
+                    try:
+                        # save_session may have committed before its return was
+                        # interrupted. Inspect only this attempt's reserved DB;
+                        # close a real matching row without inventing a session.
+                        _database.sentinel_fail_unconfirmed_session(run_session_id)
+                    except Exception as exc:
+                        errors.append(type(exc).__name__ + ": unconfirmed session finalization failed")
+                try:
+                    if owner is None:
+                        # We hold the network lock, but have no registered owner
+                        # to acknowledge. Reconcile only an existing state row.
+                        _database.sentinel_reconcile_failed_start(network_id)
+                    else:
+                        _graceful_stop(network_id)
+                except Exception as exc:
+                    errors.append(type(exc).__name__ + ": network finalization failed")
+                if owner is not None:
+                    try:
+                        owner.finish("finalization_failed" if errors else
+                                     ("failed" if outcome == "failed" else "completed"),
+                                     "; ".join(errors) or fatal_error)
+                    except Exception as exc:
+                        errors.append(type(exc).__name__ + ": control finalization failed")
+                if errors:
+                    diagnostic = "Arrêt non finalisé proprement : " + "; ".join(errors)
+                    if fatal_error is not None:
+                        # Preserve the original exception being propagated. Only
+                        # safe operation/type information describes cleanup failure.
+                        display(f"[red]{diagnostic}[/red]")
+                    else:
+                        raise LifecycleError(diagnostic)
+            if outcome == "failed":
+                raise LifecycleError("Sentinel initialization failed")
 
-    # Step 3 — create a run session for tracking this execution
-    run_session_id = session_id or f"sentinel-run-{uuid.uuid4().hex[:8]}"
-    init_db(run_session_id)
-    save_session(run_session_id, target=target_network, profile="sentinel")
 
+def _start_owned(target_network, network_id, run_session_id, identity,
+                 interval, force_relearn, owner):
     # Step 4 — check for conflicting baseline (same CIDR, different gateway MAC)
     if not force_relearn and sentinel_has_conflicting_baseline(
         network_id, target_network, identity.gateway_ip, identity.gateway_mac
@@ -150,7 +215,7 @@ def start(
         )
         if not confirmed:
             display("[yellow]Sentinel annulé.[/yellow]")
-            return
+            return "partial"
         force_relearn = True
 
     # Step 5 — learn baseline if missing or force_relearn
@@ -162,7 +227,7 @@ def start(
         )
         if not confirmed:
             display("[yellow]Sentinel annulé.[/yellow]")
-            return
+            return "partial"
 
         ok = learn_baseline(
             target_network=target_network,
@@ -172,8 +237,7 @@ def start(
         )
         if not ok:
             display("[red]Échec de l'apprentissage de la baseline. Sentinel non démarré.[/red]")
-            sentinel_update_state(network_id, "inactive")
-            return
+            return "failed"
     else:
         display("[green]Baseline existante trouvée — surveillance démarrée.[/green]")
 
@@ -207,7 +271,9 @@ def start(
         interval=interval,
         whitelist=whitelist,
         counter=counter,
+        owner=owner,
     )
+    return "completed"
 
 
 def _run_loop(
@@ -218,11 +284,13 @@ def _run_loop(
     interval: int,
     whitelist,
     counter: AlertCounter,
+    owner: Owner,
 ) -> None:
-    """Run the surveillance loop until interrupted."""
-    try:
-        while True:
-            time.sleep(interval)
+    """Cooperative stop: bounded polling when idle, finish an in-flight check."""
+    while not owner.wait(interval):
+        if not owner.admit_cycle():
+            return
+        try:
             _do_check(
                 target_network=target_network,
                 network_id=network_id,
@@ -232,8 +300,8 @@ def _run_loop(
                 whitelist=whitelist,
                 counter=counter,
             )
-    except KeyboardInterrupt:
-        _graceful_stop(network_id)
+        finally:
+            owner.end_cycle()
 
 
 def _do_check(
@@ -293,8 +361,9 @@ def _do_check(
         sentinel_update_state(network_id=network_id, sentinel_status="degraded")
         display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
     except Exception as exc:
-        # Unexpected error — same behaviour: no last_check_time update
-        display(f"[yellow]Monitor check error: {exc}[/yellow]")
+        # Unexpected failures leave through the common owner finalizer.
+        display(f"[yellow]Monitor check failed ({type(exc).__name__}); arrêt de la surveillance.[/yellow]")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -403,26 +472,16 @@ def display_status(network_id: Optional[str] = None) -> None:
 # stop
 # ---------------------------------------------------------------------------
 
-def stop(session_id: str) -> None:
-    """Stop Sentinel. Baseline preserved in sentinel DB."""
-    _graceful_stop(session_id)
-    display(f"[○] Sentinel arrêté. Session: {session_id}")
+def stop(session_id: Optional[str] = None, *, network_id: Optional[str] = None,
+         timeout: float = DEFAULT_STOP_TIMEOUT) -> None:
+    """Request one owner's stop; success requires ack, free lock and OS exit."""
+    request_stop(network_id=network_id, session_id=session_id, timeout=timeout)
+    display("[○] Sentinel arrêté : finalisation et terminaison confirmées.")
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _graceful_stop(network_or_session_id: str) -> None:
-    """Mark sentinel as inactive. Never deletes baseline or events."""
-    try:
-        sentinel_update_state(network_or_session_id, "inactive")
-    except Exception:
-        try:
-            update_sentinel_state(network_or_session_id, sentinel_state="inactive")
-        except Exception:
-            pass
-    display("\n[○] Sentinel arrêté proprement. Baseline conservée.")
+def _graceful_stop(network_id: str) -> None:
+    """Owner-only persistence; failures must propagate, never signal success."""
+    sentinel_update_state(network_id, "inactive")
 
 
 def _compute_display_state(

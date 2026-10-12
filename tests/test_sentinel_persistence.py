@@ -82,7 +82,7 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
         if ticks == 2:
             states.append(db.sentinel_get_state(NETWORK))
             raise KeyboardInterrupt
-    monkeypatch.setattr(manager.time, 'sleep', simulated_sleep)
+    monkeypatch.setattr(manager.Owner, 'wait', lambda owner, seconds: simulated_sleep(seconds) or False)
 
     manager.start(TARGET, session_id=RUN)
 
@@ -116,7 +116,7 @@ def test_network_events_survive_distinct_runs(isolated, monkeypatch):
     monkeypatch.setattr(manager, 'load_whitelist', Whitelist)
     monkeypatch.setattr(monitor, '_get_active_hosts', lambda target: ['192.0.2.10', '192.0.2.99'])
     for index, run in enumerate((RUN, 'sentinel-run-second'), 1):
-        monkeypatch.setattr(manager.time, 'sleep', Mock(side_effect=[None, KeyboardInterrupt]))
+        monkeypatch.setattr(manager.Owner, 'wait', Mock(side_effect=[False, KeyboardInterrupt]))
         manager.start(TARGET, session_id=run)
         findings = db.get_findings(run)
         assert len(findings) == 1 and findings[0].session_id == run
@@ -131,7 +131,7 @@ def test_generated_run_id_is_not_replaced_by_network_id(isolated, monkeypatch):
     session_path, _ = isolated
     monkeypatch.setattr(manager, 'load_whitelist', Whitelist)
     monkeypatch.setattr(monitor, '_get_active_hosts', lambda target: ['192.0.2.10', '192.0.2.99'])
-    monkeypatch.setattr(manager.time, 'sleep', Mock(side_effect=[None, KeyboardInterrupt]))
+    monkeypatch.setattr(manager.Owner, 'wait', Mock(side_effect=[False, KeyboardInterrupt]))
     manager.start(TARGET)
     files = list(session_path(RUN).parent.glob('*.db'))
     assert len(files) == 1
