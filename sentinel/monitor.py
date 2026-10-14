@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from core.logger import display
 from sentinel.arp_probe import ArpProbeStatus, arp_probe
 from sentinel.baseline import BaselineEntry, NetworkIdentity
 
@@ -52,7 +51,6 @@ def check_network(
     probe each. Such a partial check raises ScanDegradedError after collecting
     changes, so callers can process them without marking the check successful.
     """
-    display(f"[dim]Checking network {target_network}...[/dim]")
 
     changes: List[NetworkChange] = []
     services_degraded = False
@@ -128,11 +126,6 @@ def check_network(
                         f"Baseline ports: {entry.ports}."
                     ),
                 ))
-
-    if changes:
-        display(f"[yellow]Monitor: {len(changes)} change(s) detected.[/yellow]")
-    else:
-        display("[dim]Monitor: no changes detected.[/dim]")
 
     if ping_failed or services_degraded:
         if ping_failed:

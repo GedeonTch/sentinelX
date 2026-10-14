@@ -18,11 +18,13 @@ import hashlib
 import ipaddress
 import json
 import uuid
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import timezone
 from typing import TYPE_CHECKING, List, Optional
 
 import typer
+from typer.core import TyperCommand, TyperGroup
 from rich import box
 from rich.markup import escape
 from rich.panel import Panel
@@ -119,14 +121,76 @@ class PipelineResult:
 # App + sub-apps
 # ---------------------------------------------------------------------------
 
+def _sentinel_help_view(command, prefix):
+    """Return a rendering-only copy; never mutate the shared command or epilog."""
+    view = copy(command)
+    if view.epilog:
+        view.epilog = view.epilog.replace("netlab sentinel", prefix)
+    return view
+
+
+class SentinelHelpGroup(TyperGroup):
+    def format_help(self, ctx, formatter):
+        view = _sentinel_help_view(self, ctx.command_path)
+        TyperGroup.format_help(view, ctx, formatter)
+
+
+class SentinelHelpCommand(TyperCommand):
+    def format_help(self, ctx, formatter):
+        view = _sentinel_help_view(self, ctx.parent.command_path)
+        TyperCommand.format_help(view, ctx, formatter)
+
+
+SCAN_EXAMPLES = """Afficher l’aide et scanner une machine autorisée (confirmations interactives) :
+netlab scan --help
+netlab scan --target 192.168.1.10
+"""
+
+FINDINGS_EXAMPLES = """Remplacer SESSION_ID par l’identifiant affiché dans le bilan du scan :
+netlab findings list --session SESSION_ID
+"""
+
+START_EXAMPLES = """Surveiller un réseau autorisé dans le terminal courant, puis le garder ouvert :
+netlab sentinel start --target 192.168.1.0/24
+"""
+
+STATUS_EXAMPLES = """Dans un second terminal, remplacer NETWORK_ID par le Network ID affiché au démarrage.
+Ce n’est ni le CIDR surveillé, ni le SESSION_ID des Findings :
+netlab sentinel status --network NETWORK_ID
+"""
+
+STOP_EXAMPLES = """Dans un second terminal, demander l’arrêt du réseau désigné par son Network ID :
+netlab sentinel stop --network NETWORK_ID --timeout 30
+"""
+
+SENTINEL_EXAMPLES = (
+    "Exemples d’utilisation\n\n"
+    "Utilisez le point d’entrée indiqué dans ces exemples.\n"
+    "Utilisez uniquement un réseau autorisé et adaptez le CIDR à votre laboratoire.\n\n"
+    + START_EXAMPLES + "\n" + STATUS_EXAMPLES + "\n" + STOP_EXAMPLES
+)
+
+CLI_EXAMPLES = (
+    "Exemples d’utilisation\n\n"
+    "Interface officielle : netlab. Ces exemples ne vérifient pas son installation.\n"
+    "Scannez uniquement une cible autorisée ; adaptez ce réseau privé à votre laboratoire.\n\n"
+    + SCAN_EXAMPLES + "\n" + FINDINGS_EXAMPLES + "\n"
+    + START_EXAMPLES + "\n" + STATUS_EXAMPLES + "\n" + STOP_EXAMPLES
+)
+
 app = typer.Typer(
     name="netlab",
-    help="SentinelX NetLab V1 — educational network audit CLI",
+    help="SentinelX NetLab V1 — audit réseau pédagogique.",
+    epilog=CLI_EXAMPLES,
     no_args_is_help=True,
 )
 
-findings_app = typer.Typer(help="Manage and display findings from a session.")
-sentinel_app = typer.Typer(help="Baseline learning and network change detection.")
+findings_app = typer.Typer(help="Consulter les Findings d’une session explicite.")
+sentinel_app = typer.Typer(
+    cls=SentinelHelpGroup,
+    help="Apprendre une baseline et surveiller les changements du réseau.",
+    epilog=SENTINEL_EXAMPLES,
+)
 report_app   = typer.Typer(help="Generate reports from a session.")
 cleanup_app  = typer.Typer(help="Clean up lab artifacts and old sessions.")
 config_app   = typer.Typer(help="Read and write NetLab configuration.")
@@ -156,7 +220,7 @@ def main(
         help="Show version and exit.",
     ),
 ) -> None:
-    """SentinelX NetLab — educational network audit CLI."""
+    """SentinelX NetLab — audit réseau pédagogique. Voir les exemples ci-dessous."""
 
 
 # ---------------------------------------------------------------------------
@@ -386,14 +450,14 @@ def creds_show(record_id: str = typer.Argument(..., help="Opaque vault record ID
 _VALID_PROFILES = ("normal", "stealth", "aggressive")
 
 
-@app.command()
+@app.command(epilog=SCAN_EXAMPLES)
 def scan(
-    target:  str           = typer.Option(..., "--target",  "-t", help="IP address or CIDR range to scan."),
-    profile: str           = typer.Option("normal", "--profile", "-p", help="Scan profile: normal, stealth, aggressive."),
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID (auto-generated if omitted)."),
-    yes:     bool          = typer.Option(False, "--yes", "-y", help="Auto-confirm all scan prompts (pipeline mode)."),
+    target:  str           = typer.Option(..., "--target",  "-t", help="Cible obligatoire : adresse IP ou réseau CIDR autorisé."),
+    profile: str           = typer.Option("normal", "--profile", "-p", help="Profil : normal (défaut), stealth ou aggressive."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="SESSION_ID du scan ; généré automatiquement si omis, affiché dans le bilan."),
+    yes:     bool          = typer.Option(False, "--yes", "-y", help="Confirmer automatiquement les demandes du scan (sinon mode interactif)."),
 ) -> None:
-    """Discover assets and detect vulnerabilities on a target network."""
+    """Scanner une cible autorisée, donnée avec --target (pas en argument positionnel)."""
     if profile not in _VALID_PROFILES:
         display(f"[red]Invalid profile:[/red] '{profile}'. Choose from: {', '.join(_VALID_PROFILES)}")
         raise typer.Exit(code=1)
@@ -909,17 +973,19 @@ def _render_contextual_suggestions(
 @findings_app.callback(invoke_without_command=True)
 def findings_main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
-        display("[yellow]Usage: netlab findings [list|show|explain|rescan][/yellow]")
+        display(Text("Usage: netlab findings "
+                     f"[{'|'.join(ctx.command.list_commands(ctx))}] — --help pour les options",
+                     style="yellow"))
 
 
-@findings_app.command("list")
+@findings_app.command("list", epilog=FINDINGS_EXAMPLES)
 def findings_list(
-    session: str = typer.Option(..., "--session", "-s", help="Session ID."),
+    session: str = typer.Option(..., "--session", "-s", help="SESSION_ID obligatoire : reprendre celui affiché dans le bilan du scan."),
 ) -> None:
-    """List findings for a session, grouped by machine.
+    """Lister les Findings par machine pour une session explicite.
 
-    Each machine shows its Security Findings (most severe first) and its
-    Inventory Observations (device_fingerprint) in separate blocks.
+    Sépare les Findings de sécurité (plus sévères en premier) des observations
+    d’inventaire. SESSION_ID n’est ni un CIDR ni le NETWORK_ID de Sentinel.
     """
     try:
         from core.database import get_findings
@@ -1289,16 +1355,62 @@ def _render_verify_summary(outcome: dict) -> None:
 @sentinel_app.callback(invoke_without_command=True)
 def sentinel_main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
-        display("[yellow]Usage: netlab sentinel [start|status|stop][/yellow]")
+        commands = "|".join(ctx.command.list_commands(ctx))
+        display(Text(
+            f"Usage: {ctx.command_path} [{commands}] — --help pour les options",
+            style="yellow",
+        ))
 
 
-@sentinel_app.command("start")
-def sentinel_start(
-    target:  str           = typer.Option(..., "--target", "-t", help="Network to monitor (CIDR)."),
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID."),
-    relearn: bool          = typer.Option(False, "--relearn", help="Force baseline relearn."),
+sentinel_findings_app = typer.Typer(help="Consultation explicite des Findings Sentinel.")
+sentinel_app.add_typer(sentinel_findings_app, name="findings")
+
+
+@sentinel_findings_app.command("show")
+def sentinel_findings_show(
+    finding_id: str = typer.Argument(..., help="UUID complet du Finding Sentinel."),
+    session: str = typer.Option(..., "--session", "-s", help="Session Sentinel réelle."),
 ) -> None:
-    """Learn the network baseline and start monitoring for changes."""
+    """Read a Sentinel Finding in its explicit session, never scan Findings."""
+    from core.database import sentinel_read_finding
+    from sentinel.monitor_view import safe_text
+    try:
+        finding = sentinel_read_finding(session, finding_id)
+    except ValueError as exc:
+        display(Text(str(exc), style="red"))
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        display(Text(f"Consultation Sentinel impossible ({type(exc).__name__})", style="red"))
+        raise typer.Exit(code=1) from None
+    for label, value in [
+        ("Session Sentinel", finding.session_id), ("UUID", finding.id),
+        ("Module", finding.module), ("Cible", finding.target_ip),
+        ("Port", finding.target_port), ("Service", finding.target_service),
+        ("Sévérité", finding.severity.value), ("Statut", finding.status.value),
+        ("Créé", finding.created_at), ("Preuve", finding.evidence.raw),
+    ]:
+        display(Text(f"{label} : {safe_text(value)}"))
+
+
+@sentinel_app.command("start", cls=SentinelHelpCommand, epilog=START_EXAMPLES)
+def sentinel_start(
+    target: str = typer.Option(
+        ..., "--target", "-t",
+        help="CIDR obligatoire du réseau autorisé à surveiller ; ce n’est pas le NETWORK_ID.",
+    ),
+    session: Optional[str] = typer.Option(
+        None, "--session", "-s",
+        help="SESSION_ID de surveillance ; généré si omis, distinct du NETWORK_ID.",
+    ),
+    relearn: bool = typer.Option(
+        False, "--relearn", help="Forcer le réapprentissage de la baseline."
+    ),
+) -> None:
+    """Apprendre la baseline si nécessaire, puis surveiller dans le processus courant.
+
+    Garder ce terminal ouvert. Dans un second terminal, utiliser status ou stop
+    avec --network et le Network ID affiché au démarrage, pas le CIDR.
+    """
     from sentinel.sentinel_manager import start, LifecycleError
     try:
         start(target_network=target, session_id=session, force_relearn=relearn)
@@ -1315,13 +1427,17 @@ def sentinel_start(
         raise typer.Exit(code=1) from None
 
 
-@sentinel_app.command("status")
+@sentinel_app.command("status", cls=SentinelHelpCommand, epilog=STATUS_EXAMPLES)
 def sentinel_status(
     network: Optional[str] = typer.Option(
-        None, "--network", "-n", help="Sentinel network ID."
+        None, "--network", "-n", help="NETWORK_ID Sentinel affiché au démarrage ; pas le CIDR ni le SESSION_ID."
     ),
 ) -> None:
-    """Show current Sentinel monitoring status for a network."""
+    """Consulter l’état depuis un second terminal, sans démarrer de surveillance.
+
+    Sans --network, un seul réseau Sentinel doit être connu. Sinon préciser
+    le Network ID affiché au démarrage (pas le CIDR ni la session).
+    """
     from sentinel.sentinel_manager import display_status
     try:
         display_status(network)
@@ -1329,13 +1445,18 @@ def sentinel_status(
         display(f"[yellow]Sentinel status unavailable: {exc}[/yellow]")
 
 
-@sentinel_app.command("stop")
+@sentinel_app.command("stop", cls=SentinelHelpCommand, epilog=STOP_EXAMPLES)
 def sentinel_stop(
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Legacy owner session/network ID; must resolve unambiguously."),
-    network: Optional[str] = typer.Option(None, "--network", "-n", help="Sentinel network ID."),
-    timeout: float = typer.Option(30.0, "--timeout", min=0.01, help="Maximum confirmation wait in seconds (default 30). In-flight checks are not cancelled."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Compatibilité : session propriétaire ou identifiant réseau, résolution non ambiguë requise."),
+    network: Optional[str] = typer.Option(None, "--network", "-n", help="NETWORK_ID Sentinel affiché au démarrage ; pas le CIDR ni le SESSION_ID."),
+    timeout: float = typer.Option(30.0, "--timeout", min=0.01, help="Attente de confirmation en secondes : défaut 30, minimum 0.01. N’annule pas les contrôles déjà engagés."),
 ) -> None:
-    """Request stop and confirm finalization, lock release and process exit."""
+    """Demander l’arrêt depuis un second terminal et attendre sa confirmation.
+
+    Fournir exactement un sélecteur : --network OU --session, jamais les deux.
+    Préférer --network avec le Network ID affiché au démarrage, pas le CIDR.
+    Confirme la finalisation, la libération du verrou et la fin du processus.
+    """
     from sentinel.sentinel_manager import stop, LifecycleError
     if (session is None) == (network is None):
         raise typer.BadParameter("Specify exactly one of --network or --session")
@@ -1350,6 +1471,27 @@ def sentinel_stop(
     except Exception as exc:
         display(f"[red]Sentinel stop: vérification impossible ({type(exc).__name__}), arrêt non confirmé.[/red]")
         raise typer.Exit(code=1) from None
+
+
+@sentinel_app.command("report")
+def sentinel_report(
+    network: str = typer.Option(..., "--network", "-n", help="Known Sentinel network ID."),
+    output_format: str = typer.Option("html", "--output-format", "-o", help="Output format (html only); unique file in current directory."),
+) -> None:
+    """Export a local read-only network snapshot; never starts monitoring."""
+    if output_format.lower() != "html":
+        raise typer.BadParameter("Sentinel report supports html only", param_hint="--output-format")
+    from reports.sentinel_report import generate_sentinel_report
+    try:
+        path = generate_sentinel_report(network)
+    except ValueError as exc:
+        display(f"[red]Sentinel report: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        display(f"[red]Sentinel report impossible ({type(exc).__name__}).[/red]")
+        raise typer.Exit(code=1) from None
+    from rich.text import Text
+    display(Text(f"Rapport Sentinel : {path}"))
 
 
 # ---------------------------------------------------------------------------
@@ -1689,4 +1831,4 @@ def _write_config(key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app()
+    app(prog_name="netlab")

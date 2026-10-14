@@ -54,13 +54,13 @@ def isolated(tmp_path, monkeypatch):
     return session_path, network_path
 
 
-@pytest.mark.parametrize('mode', ['normal', 'whitelisted', 'silent'])
+@pytest.mark.parametrize('mode', ['normal', 'whitelisted', 'multiple_hosts'])
 @pytest.mark.parametrize('degraded', [False, True])
 def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatch, mode, degraded):
     """Exercises start -> loop -> check -> real process_changes -> DB -> status."""
     session_path, network_path = isolated
     assert NETWORK != RUN
-    new_hosts = ['192.0.2.99'] if mode != 'silent' else [f'192.0.2.{i}' for i in (11, 12, 13, 14, 99)]
+    new_hosts = ['192.0.2.99'] if mode != 'multiple_hosts' else [f'192.0.2.{i}' for i in (11, 12, 13, 14, 99)]
     allowed = ['192.0.2.99'] if mode != 'normal' else []
     wl = Whitelist(allowed_new_hosts=allowed, sentinel_max_alerts_per_hour=3)
     monkeypatch.setattr(manager, 'load_whitelist', lambda: wl)
@@ -70,7 +70,7 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
     shown = Mock()
     monkeypatch.setattr(alerting, 'display', shown)
     alerts = Mock()
-    monkeypatch.setattr(alerting, '_display_alert', alerts)
+    monkeypatch.setattr(manager.MonitorView, 'emit', alerts)
     db.init_sentinel_db('other-network')
 
     ticks = 0
@@ -104,11 +104,9 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
     assert not session_path(NETWORK).exists()
     assert network_path(NETWORK).exists()
     assert states[0]['sentinel_status'] == ('degraded' if degraded else 'active')
-    assert alerts.call_count == (2 if mode == 'silent' else unresolved)
+    assert alerts.call_count == unresolved  # independent quotas for distinct hosts
     if allowed:
         assert any('[INFO]' in str(call) for call in shown.call_args_list)
-    if mode == 'silent':
-        assert any('mode silencieux' in str(call) for call in shown.call_args_list)
 
 
 def test_network_events_survive_distinct_runs(isolated, monkeypatch):
@@ -142,26 +140,21 @@ def test_generated_run_id_is_not_replaced_by_network_id(isolated, monkeypatch):
     assert not session_path(NETWORK).exists()
 
 
-def test_resume_count_reads_network_not_run_storage(isolated, monkeypatch):
+def test_notification_window_reads_network_not_run_storage(isolated, monkeypatch):
     session_path, _ = isolated
     db.init_sentinel_db(NETWORK)
     db.init_db(RUN)
     db.save_session(RUN, target=TARGET)
     for index in range(2):
-        db.sentinel_save_event(NETWORK, f'previous-{index}', 'new_host', NOW.isoformat(), None, {}, False)
-    # A decoy session event distinguishes the two existing database APIs.
+        db.sentinel_save_event(NETWORK, f'previous-{index}', 'new_host', NOW.isoformat(), None,
+                               {'ip': '192.0.2.99'}, False)
     db.save_event(RUN, 'session-decoy', 'new_host', NOW.isoformat(), None, {}, False)
-    counter = alerting.AlertCounter(count=1, silent_since=NOW - datetime.timedelta(hours=2))
-    display = Mock()
-    monkeypatch.setattr(alerting, 'display', display)
-    result = alerting.process_changes(
-        [monitor.NetworkChange('new_host', '192.0.2.99', 'new host detected', 'synthetic')],
-        RUN, Whitelist(), counter, network_id=NETWORK,
-    )
-    assert any('Événements enregistrés pendant le silence : 2' in str(call.args[0])
-               for call in display.call_args_list)
-    assert len(result) == 1 and result[0].session_id == RUN
-    assert len(db.sentinel_get_events(NETWORK)) == 3
-    assert len(db.get_events(RUN)) == 1  # only the deliberately seeded decoy
-    assert counter.count == 2 and not counter.is_silent
+    counter = alerting.AlertCounter()
+    change = monitor.NetworkChange('new_host', '192.0.2.99', 'new host detected', 'synthetic')
+    assert len(alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK)) == 1
+    assert alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK) == []
+    row = counter.summary()['192.0.2.99']
+    assert row['displayed'] == 1 and row['reserved'] == 2 and row['masked'] == 1
+    assert len(db.sentinel_get_events(NETWORK)) == 4
+    assert len(db.get_events(RUN)) == 1
     assert not session_path(NETWORK).exists()

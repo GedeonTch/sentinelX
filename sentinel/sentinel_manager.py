@@ -15,7 +15,7 @@ Spec rules enforced:
     - --relearn is atomic: new baseline learned first, old deleted after success
     - Ctrl+C / stop: sentinel_state = "inactive", baseline preserved
     - last_check_time updated ONLY on successful check
-    - AlertCounter resets at each start (session-local, never inherited)
+    - Notification quotas are per host/network and recovered from event metadata
     - MAC="" never matches a baseline with known MAC
 
 Rules enforced here:
@@ -64,6 +64,7 @@ from sentinel.monitor import (
     check_network,
 )
 from sentinel.whitelist import load_whitelist
+from sentinel.monitor_view import MonitorView
 from sentinel.lifecycle import Owner, LifecycleError, network_lock, request_stop, DEFAULT_STOP_TIMEOUT
 
 
@@ -242,37 +243,24 @@ def _start_owned(target_network, network_id, run_session_id, identity,
         display("[green]Baseline existante trouvée — surveillance démarrée.[/green]")
 
     # Step 6 — record initial state in sentinel DB
-    now = datetime.datetime.now(timezone.utc).isoformat()
     sentinel_update_state(
         network_id=network_id,
         sentinel_status="active",
-        last_check_time=now,
         target_network=target_network,
         gateway_ip=identity.gateway_ip,
         gateway_mac=identity.gateway_mac,
     )
 
     whitelist = load_whitelist()
-    counter = AlertCounter(max_per_hour=whitelist.sentinel_max_alerts_per_hour)
-
-    display(
-        f"\n[green][●] SENTINELX ACTIF | {target_network} | "
-        f"intervalle {interval}s[/green]"
-    )
-    display("[dim]Ctrl+C pour arrêter. Baseline conservée à l'arrêt.[/dim]")
-    _display_hints("active")
-
-    # Step 7 — surveillance loop
-    _run_loop(
-        target_network=target_network,
-        network_id=network_id,
-        run_session_id=run_session_id,
-        identity=identity,
-        interval=interval,
-        whitelist=whitelist,
-        counter=counter,
-        owner=owner,
-    )
+    counter = AlertCounter()
+    counter.bind(network_id)
+    with MonitorView(target_network, interval, counter, session_id=run_session_id) as view:
+        counter.view = view
+        _run_loop(
+            target_network=target_network, network_id=network_id,
+            run_session_id=run_session_id, identity=identity, interval=interval,
+            whitelist=whitelist, counter=counter, owner=owner,
+        )
     return "completed"
 
 
@@ -291,6 +279,7 @@ def _run_loop(
         if not owner.admit_cycle():
             return
         try:
+            counter.phase('contrôle')
             _do_check(
                 target_network=target_network,
                 network_id=network_id,
@@ -316,6 +305,7 @@ def _do_check(
     """Execute one surveillance check cycle using the sentinel DB."""
     baseline = get_baseline(network_id, identity)
     if not baseline:
+        counter.phase('erreur')
         display("[yellow]Baseline vide — impossible de comparer.[/yellow]")
         return
 
@@ -340,6 +330,7 @@ def _do_check(
                 whitelist=whitelist,
                 counter=counter,
             )
+        counter.phase('attente', finished=True)
     except ScanDegradedError as exc:
         # Partial check: process observed changes, but do not update
         # last_check_time because global discovery was incomplete.
@@ -353,14 +344,18 @@ def _do_check(
                 counter=counter,
             )
         sentinel_update_state(network_id=network_id, sentinel_status="degraded")
-        display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
+        counter.phase("dégradé", finished=True)
     except ScanFailedError as exc:
         # Ping and targeted ARP did not provide a usable host check.
         # Never update last_check_time and never infer host removal.
         display(f"[yellow]Monitor: {exc}[/yellow]")
         sentinel_update_state(network_id=network_id, sentinel_status="degraded")
-        display("[yellow][!] SENTINELX: DÉGRADÉ[/yellow]")
+        counter.phase("erreur", finished=True)
     except Exception as exc:
+        try:
+            counter.phase("erreur")
+        except Exception:
+            pass  # rendering must not replace the original failure
         # Unexpected failures leave through the common owner finalizer.
         display(f"[yellow]Monitor check failed ({type(exc).__name__}); arrêt de la surveillance.[/yellow]")
         raise

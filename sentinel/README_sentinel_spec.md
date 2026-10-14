@@ -1,3 +1,10 @@
+> **Mise à jour — notifications par hôte :** la règle de silence global de ce
+> document historique est remplacée par `docs/SENTINEL-NOTIFICATIONS.md` : trois
+> notifications émises par hôte/réseau dans une fenêtre glissante de 60 minutes,
+> avec métadonnées persistantes et récupération après redémarrage. Les passages
+> concernant le compteur global, sa remise à zéro et sa pause fixe ne décrivent
+> plus le comportement actuel.
+
 # Sentinel V1 — Document de conception (révision 3)
 
 > Révision 2 → Révision 3 : intégration de la revue finale produit/architecture.

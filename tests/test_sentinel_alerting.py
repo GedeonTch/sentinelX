@@ -2,10 +2,10 @@
 tests/test_sentinel_alerting.py — Unit tests for sentinel/alerting.py
 
 Covers: process_changes matrice Event/Finding/Display,
-        AlertCounter silent mode (count >= seuil),
+        per-host rolling notification quota,
         whitelisted=resolved=1 no Finding,
         silent mode: Finding in DB no display,
-        counter resets (simulated restart).
+        counter reconstruction after restart.
 """
 
 import datetime
@@ -71,47 +71,23 @@ def patch_db_path(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestAlertCounter:
-    def test_not_silent_initially(self):
-        c = AlertCounter(max_per_hour=3)
-        assert not c.is_silent
+    def test_three_emissions_then_fourth_masked(self):
+        c = AlertCounter()
+        results = [process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, c, network_id=NETWORK) for _ in range(4)]
+        assert [len(r) for r in results] == [1, 1, 1, 0]
+        row = c.summary()[CHANGE_NEW_HOST.asset_ip]
+        assert row['displayed'] == 3 and row['masked'] == 1
 
-    def test_triggers_at_threshold(self):
-        c = AlertCounter(max_per_hour=3)
-        c.increment()
-        c.increment()
-        triggered = c.increment()  # count = 3, >= 3
-        assert triggered is True
-        assert c.is_silent
+    def test_other_host_is_independent(self):
+        c = AlertCounter()
+        for _ in range(4):
+            process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, c, network_id=NETWORK)
+        assert len(process_changes([CHANGE_NEW_PORT], SESSION, WL_EMPTY, c, network_id=NETWORK)) == 1
 
-    def test_does_not_trigger_before_threshold(self):
-        c = AlertCounter(max_per_hour=3)
-        c.increment()
-        triggered = c.increment()  # count = 2
-        assert triggered is False
-        assert not c.is_silent
-
-    def test_silent_mode_expires(self):
-        c = AlertCounter(max_per_hour=3, silent_duration_s=1)
-        c.increment()
-        c.increment()
-        c.increment()  # triggers silence
-        assert c.is_silent
-        # Simulate expiry by backdating silent_since
-        c.silent_since = datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=2)
-        assert not c.is_silent
-
-    def test_try_exit_silent_returns_true_when_expired(self):
-        c = AlertCounter(max_per_hour=3, silent_duration_s=0)
-        c.silent_since = datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=2)
-        result = c.try_exit_silent()
-        assert result is True
-        assert c.silent_since is None
-
-    def test_counter_reset_behavior(self):
-        """A new AlertCounter (simulating restart) starts at 0, not silent."""
-        c = AlertCounter(max_per_hour=3)
-        assert c.count == 0
-        assert not c.is_silent
+    def test_restart_keeps_window(self):
+        for _ in range(3):
+            process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, AlertCounter(), network_id=NETWORK)
+        assert process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, AlertCounter(), network_id=NETWORK) == []
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +160,9 @@ class TestProcessChangesWhitelisted:
         assert result == []
 
     def test_counter_not_incremented_for_whitelisted(self):
-        counter = AlertCounter(max_per_hour=3)
+        counter = AlertCounter()
         process_changes([CHANGE_NEW_HOST], SESSION, WL_HOST_ALLOWED, counter, network_id=NETWORK)
-        assert counter.count == 0
+        assert counter.summary()[CHANGE_NEW_HOST.asset_ip]['displayed'] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -194,40 +170,14 @@ class TestProcessChangesWhitelisted:
 # ---------------------------------------------------------------------------
 
 class TestProcessChangesSilentMode:
-    def test_finding_in_db_during_silence(self):
-        """During silent mode, Findings must still be written to DB."""
-        counter = AlertCounter(max_per_hour=2)
-        # First change triggers silence at count=2
-        process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_NEW_PORT], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        assert counter.is_silent
-        # Third change — silent mode active
-        process_changes([CHANGE_MAC], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        findings = db.get_findings(SESSION)
-        assert len(findings) == 3  # all three in DB
-
-    def test_no_finding_returned_during_silence(self):
-        """During silent mode, no Finding returned for display."""
-        counter = AlertCounter(max_per_hour=2)
-        process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_NEW_PORT], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        assert counter.is_silent
-        result = process_changes([CHANGE_MAC], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        assert result == []
-
-    def test_event_written_during_silence(self):
-        """Events must always be written, even during silence."""
-        counter = AlertCounter(max_per_hour=2)
-        process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_NEW_PORT], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_MAC], SESSION, WL_EMPTY, counter, network_id=NETWORK)
+    def test_observations_and_findings_continue_during_silence(self):
+        counter = AlertCounter()
+        for _ in range(5):
+            process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, counter, network_id=NETWORK)
+        assert len(db.get_findings(SESSION)) == 5
         events = db.sentinel_get_events(NETWORK)
-        assert len(events) == 3
-
-    def test_counter_increments_during_silence(self):
-        """Alert counter continues to increment during silent mode."""
-        counter = AlertCounter(max_per_hour=2)
-        process_changes([CHANGE_NEW_HOST], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_NEW_PORT], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        process_changes([CHANGE_MAC], SESSION, WL_EMPTY, counter, network_id=NETWORK)
-        assert counter.count == 3
+        assert len(events) == 5
+        assert sum(e['details']['notification']['state'] == 'confirmed' for e in events) == 3
+        assert sum(e['details']['notification']['state'] == 'masked' for e in events) == 2
+        assert counter.summary()[CHANGE_NEW_HOST.asset_ip]['displayed'] == 3
+        assert counter.summary()[CHANGE_NEW_HOST.asset_ip]['masked'] == 2

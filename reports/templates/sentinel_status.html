@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>SentinelX — État réseau {{ network }}</title>
+<style>
+:root{color-scheme:dark;--accent:#e10600;--bg:#0a0a0a;--panel:#121212;--border:#262626;--text:#f2f2f2;--muted:#a8a8a8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 'Segoe UI',Arial,sans-serif}
+main{max-width:1140px;margin:auto;padding:36px 24px 72px}header{display:flex;align-items:center;gap:24px;border-bottom:2px solid var(--accent);padding-bottom:24px}
+.logo{width:105px;height:105px;object-fit:contain}h1{font-size:30px;margin:3px 0}h2{font-size:20px;margin:28px 0 12px}.eyebrow{color:var(--muted);letter-spacing:.18em;font-size:11px}.muted,small{color:var(--muted)}
+.notice{padding:16px 20px;border-left:3px solid var(--accent);background:var(--panel);margin:20px 0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{border:1px solid var(--border);padding:18px;border-radius:8px;background:var(--panel)}.value{display:block;font-size:28px;font-weight:700}dt{color:var(--muted)}dd{margin:0 0 12px;overflow-wrap:anywhere}
+.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}td,th{padding:12px;border-bottom:1px solid var(--border);vertical-align:top;overflow-wrap:anywhere}td{max-width:340px}details{border:1px solid var(--border);border-radius:8px;margin:12px 0;background:var(--panel)}summary{cursor:pointer;padding:14px 18px;color:var(--text)}summary:hover{color:#ff6b6b}.detail{border:0;margin:0}.detail summary{padding:0;color:var(--muted)}.detail p{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}footer{border-top:1px solid var(--border);margin-top:32px;padding-top:18px;color:var(--muted)}
+@media(max-width:600px){main{padding:20px 12px}header{gap:12px}.logo{width:65px;height:65px}h1{font-size:22px}td,th{padding:8px}}
+@media print{body{background:#fff;color:#111}.card,.notice,details{background:#fff}details>*{display:block}summary{color:#111}}
+</style></head>
+<body><main>
+<header><img class="logo" src="{{ logo }}" alt="Logo SentinelX"><div><div class="eyebrow">SENTINELX / NETLAB</div><h1>État du réseau Sentinel</h1><div class="muted">Instantané local · {{ generated }}</div></div></header>
+<div class="notice">Ce rapport est un instantané des données enregistrées, pas une preuve que Sentinel est encore actif. Il ne lance aucun scan et n’est pas actualisé automatiquement.</div>
+<h2>Réseau et état enregistré</h2>
+<dl><dt>Identifiant réseau</dt><dd>{{ network }}</dd><dt>Réseau surveillé</dt><dd>{{ state.get('target_network') or 'Non disponible' }}</dd><dt>État enregistré</dt><dd>{{ state.get('sentinel_status') or 'Inconnu' }}</dd><dt>Mise à jour de cet état</dt><dd>{{ state.get('updated_at') or 'Non disponible' }}</dd><dt>Horodatage de vérification enregistré</dt><dd>{{ state.get('last_check_time') or 'Non disponible' }}<br><small>Les anciennes versions pouvaient renseigner cette date au démarrage : elle n’est pas certifiée comme fin de contrôle pour les données historiques. Aucun succès n’est déduit d’un état dégradé.</small></dd></dl>
+<h2>Statistiques disponibles</h2>
+<div class="cards"><div class="card"><span class="value">{{ assets }}</span>Hôtes enregistrés</div><div class="card"><span class="value">{{ active }}</span>Marqués actifs en base</div><div class="card"><span class="value">{{ total }}</span>Événements enregistrés</div><div class="card"><span class="value">{{ whitelisted }}</span>Événements whitelistés</div></div>
+<p class="muted">Référence de baseline la plus récente : {{ reference or 'Non disponible' }}. Les hôtes marqués actifs ne constituent pas un recensement actuel ; leur fraîcheur individuelle n’est pas garantie.</p>
+<h2>Événements et notifications : deux mesures distinctes</h2>
+<p>Sur tout l’historique chargé : {{ counts.confirmed }} émissions confirmées, {{ counts.masked }} notifications explicitement masquées par quota, {{ counts.uncertain }} émissions incertaines, {{ counts.preparing }} émissions en préparation et {{ counts.unknown }} notifications inconnues.</p>
+<p class="muted">Seule une métadonnée explicite permet de qualifier une observation comme masquée pendant le silence. Les événements anciens ne sont jamais reclassés rétrospectivement. Une émission confirmée signifie une écriture terminal réussie, pas une preuve de lecture humaine. Les événements répétés restent distincts.</p>
+<details><summary>Voir plus — quotas par hôte à la génération (60 dernières minutes)</summary><div class="scroll"><table><thead><tr><th>Hôte</th><th>Affichées</th><th>Masquées</th><th>Réserves prudentes</th><th>État</th></tr></thead><tbody>
+{% for host in hosts %}<tr><td>{{ host.host }}</td><td>{{ host.displayed }}</td><td>{{ host.masked }}</td><td>{{ host.reserved }} ({{ host.unknown }} inconnues)</td><td>{{ host.state }}</td></tr>{% else %}<tr><td colspan="5">Aucune donnée par hôte disponible.</td></tr>{% endfor %}
+</tbody></table></div></details>
+<h2>Historique réseau</h2>
+{% for group in groups %}<details><summary>Voir plus — événements {{ loop.index0 * 25 + 1 }} à {{ loop.index0 * 25 + group|length }}</summary><div class="scroll"><table><thead><tr><th>Date</th><th>Hôte</th><th>Type</th><th>Détail</th><th>Notification</th></tr></thead><tbody>
+{% for event in group %}<tr><td>{{ event.when }}</td><td>{{ event.host }}</td><td>{{ event.type }}{% if event.whitelisted %}<br><small>Whitelisté</small>{% endif %}</td><td><details class="detail"><summary>Voir le détail</summary><p>{{ event.detail }}</p></details></td><td>{{ event.notification }}</td></tr>{% endfor %}
+</tbody></table></div></details>{% else %}<p>Aucun événement enregistré.</p>{% endfor %}
+<div class="notice">Sentinel fonctionne par sondages périodiques. Un événement apparu et disparu entre deux contrôles peut ne jamais être détecté. L’intervalle configuré est une attente après le contrôle précédent ; la durée des sondes s’y ajoute.</div>
+<footer>SentinelX · Rapport réseau statique et autonome · Distinct du rapport d’audit des Findings.</footer>
+</main></body></html>

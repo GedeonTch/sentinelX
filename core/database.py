@@ -1612,20 +1612,37 @@ def reserve_sentinel_session_file(session_id):
                 path.unlink()
 
 
+def _sentinel_control_sqlite_diagnostic(exc):
+    """Classify native SQLite result codes, never arbitrary exception text.
+
+    Extended result codes retain their primary code in the low byte. An absent
+    code is unknown, not evidence of contention. The original exception remains
+    chained by the connection helper, including its native extended code.
+    """
+    code = getattr(exc, 'sqlite_errorcode', None)
+    primary = code & 0xff if isinstance(code, int) else None
+    if primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        name = 'SQLITE_BUSY' if primary == sqlite3.SQLITE_BUSY else 'SQLITE_LOCKED'
+        return f"Contrôle SQLite indisponible : contention/verrouillage ({name}) ; arrêt non confirmé"
+    code_label = str(code) if isinstance(code, int) else 'inconnu'
+    return (f"Contrôle SQLite indisponible : erreur hors contention "
+            f"(code SQLite {code_label}) ; arrêt non confirmé")
+
+
 @contextmanager
 def _sentinel_control_connection(network_id):
     validate_sentinel_network_id(network_id)
     path = get_sentinel_db_path(network_id)
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0.2)
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=1.0)
     except sqlite3.Error as exc:
-        raise SentinelControlError("Contrôle SQLite indisponible : arrêt non confirmé") from exc
+        raise SentinelControlError(_sentinel_control_sqlite_diagnostic(exc)) from exc
     conn.row_factory = sqlite3.Row
     try:
         with conn:
             yield conn
     except sqlite3.Error as exc:
-        raise SentinelControlError("Contrôle SQLite indisponible : arrêt non confirmé") from exc
+        raise SentinelControlError(_sentinel_control_sqlite_diagnostic(exc)) from exc
     finally:
         conn.close()
 
@@ -1762,3 +1779,111 @@ def sentinel_fail_unconfirmed_session(session_id):
     finally:
         if conn is not None:
             conn.close()
+
+
+@contextmanager
+def _sentinel_read_snapshot(network_id):
+    """Read existing Sentinel data without DDL, WAL pragmas or file creation."""
+    validate_sentinel_network_id(network_id)
+    path = get_sentinel_db_path(network_id)
+    if not path.is_file():
+        raise ValueError("Unknown Sentinel network")
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        yield conn
+    finally:
+        conn.close()
+
+
+def sentinel_network_snapshot(network_id):
+    """Consistent full snapshot; intentionally NOT limited to 100 events."""
+    with _sentinel_read_snapshot(network_id) as conn:
+        state = conn.execute("SELECT * FROM sentinel_state WHERE network_id=?", (network_id,)).fetchone()
+        if state is None:
+            # A freshly initialized, owned network can have no state yet.
+            state = {}
+        events = []
+        for row in conn.execute("SELECT * FROM events ORDER BY timestamp, id"):
+            item = dict(row)
+            try:
+                details = json.loads(item['details'])
+            except (ValueError, TypeError):
+                details = {}
+            item['details'] = details if isinstance(details, dict) else {}
+            events.append(item)
+        return {'state': dict(state), 'events': events,
+                'assets': [dict(r) for r in conn.execute("SELECT * FROM assets")],
+                'baseline': [dict(r) for r in conn.execute("SELECT * FROM baseline")]}
+
+
+def sentinel_set_notification(network_id, event_id, notification, expected=None):
+    """Update versioned notification metadata only, preserving event semantics.
+
+    The caller is the exclusive network owner. CAS protects recovery/confirmation
+    from accidentally replacing a different notification state.
+    """
+    with _sentinel_control_connection(network_id) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT details FROM events WHERE id=?", (event_id,)).fetchone()
+        if row is None:
+            raise SentinelControlError("Notification event missing")
+        details = json.loads(row['details'])
+        if expected is not None and details.get('notification', {}).get('state') != expected:
+            raise SentinelControlError("Notification state changed unexpectedly")
+        details['notification'] = notification
+        conn.execute("UPDATE events SET details=? WHERE id=?", (json.dumps(details), event_id))
+
+
+def sentinel_read_finding(session_id: str, finding_id: str) -> Finding:
+    """Dedicated Sentinel consultation. No initialization, migration or recovery.
+
+    Reject mixed/unknown contexts using retained data, not a reconstructed link.
+    This cannot recover provenance whose every marker was historically erased.
+    """
+    import re
+    import uuid
+    if (not isinstance(session_id, str)
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', session_id)
+            or re.fullmatch(r'(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])', session_id, re.I)):
+        raise ValueError('Identifiant de session invalide')
+    try:
+        if str(uuid.UUID(finding_id)) != finding_id:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError('UUID complet canonique requis') from None
+    path = _real_user_home() / '.netlab' / 'sessions' / f'{session_id}.db'
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('Session inconnue ou chemin non pris en charge')
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute('PRAGMA query_only=ON')
+            conn.execute('BEGIN')
+            sessions = conn.execute('SELECT id, profile FROM sessions').fetchall()
+            if len(sessions) != 1 or sessions[0]['id'] != session_id:
+                raise ValueError('Contexte de session indéterminé')
+            if sessions[0]['profile'] != 'sentinel':
+                raise ValueError('Consultation réservée aux sessions Sentinel')
+            rows = conn.execute('SELECT * FROM findings').fetchall()
+            if any(row['session_id'] != session_id or not isinstance(row['module'], str)
+                   or not row['module'].startswith('sentinel.') or row['module'] == 'sentinel.'
+                   for row in rows):
+                raise ValueError('Session mixte ou indéterminée : consultation refusée')
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'scan_outcomes' in tables and conn.execute('SELECT 1 FROM scan_outcomes LIMIT 1').fetchone():
+                raise ValueError('Session mixte : résultats de scan présents')
+            for row in rows:
+                if row['id'] == finding_id:
+                    try:
+                        return _row_to_finding(row)
+                    except (ValueError, TypeError, KeyError, IndexError):
+                        raise ValueError('Finding Sentinel illisible') from None
+            raise ValueError('Finding absent de cette session Sentinel')
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        raise ValueError('Session illisible ou schéma indéterminé') from None

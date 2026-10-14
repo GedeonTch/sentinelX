@@ -1018,3 +1018,21 @@ def test_unconfirmed_session_cleanup_never_invents_or_deletes_rows(lab, storage)
         assert not path.exists()
     else:
         assert path.exists() and path.read_bytes() == before
+
+
+def test_notification_quota_survives_real_cli_restarts(lab):
+    """Four distinct OS owners, same network/host, no actual scans."""
+    _, marker = lab
+    for index in range(4):
+        run = f'quota-restart-{index}'
+        a = start(lab, run)
+        b = stop(lab)
+        eventually(requested)
+        marker(run, 'release').touch()
+        assert_exit(b)
+        assert_exit(a)
+        assert len(db.get_findings(run)) == 1
+    events = db.sentinel_get_events(NETWORK)
+    states = [e['details']['notification']['state'] for e in events]
+    assert states.count('confirmed') == 3 and states.count('masked') == 1
+    assert len(events) == 4
