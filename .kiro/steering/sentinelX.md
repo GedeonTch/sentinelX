@@ -95,7 +95,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 
 ## E. Tech Stack
 
-- **Language**: Python 3.10+, cross-platform Windows + Linux
+- **Language**: Python 3.11+, cross-platform Windows + Linux
 - **Low-level Linux tasks**: Bash scripts in `scripts/` only — called via subprocess
 - **CLI**: Typer — never argparse, never click
 - **Terminal display**: Rich — never `print()` directly in a module

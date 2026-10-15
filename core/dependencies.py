@@ -2,7 +2,7 @@
 core/dependencies.py — Environment checks for SentinelX NetLab V1
 
 Verifies that the host is ready before any real scan:
-- Python >= 3.10 (running interpreter)
+- Python >= 3.11 (running interpreter)
 - nmap on PATH
 - enum4linux-ng (external tool, own venv at ENUM4LINUX_NG_BIN)
 - ~/.netlab/ exists (or can be created) and is writable
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-REQUIRED_PYTHON: Tuple[int, int] = (3, 10)
+REQUIRED_PYTHON: Tuple[int, int] = (3, 11)
 EXTERNAL_TOOLS: Tuple[str, ...] = ("nmap", "enum4linux-ng")
 NETLAB_HOME_NAME: str = ".netlab"
 _WRITE_PROBE_NAME: str = ".doctor_write_probe"
@@ -238,7 +238,7 @@ def check_environment() -> List[DependencyCheck]:
 def environment_ready(checks: List[DependencyCheck]) -> bool:
     """Return True only if every required check is usable.
 
-    Python is usable when its version is >= 3.10.
+    Python is usable when its version is >= 3.11.
     External tools and ~/.netlab/ are usable when present is True.
 
     Args:
@@ -267,7 +267,7 @@ def check_status(check: DependencyCheck) -> str:
     Values:
         "ok" — usable for NetLab
         "missing" — external tool not on PATH
-        "python_too_old" — interpreter below 3.10
+        "python_too_old" — interpreter below 3.11
         "failed" — ~/.netlab/ missing, not creatable, or not writable
 
     Args:
@@ -286,13 +286,13 @@ def check_status(check: DependencyCheck) -> str:
 
 
 def python_version_ok(version: Optional[str]) -> bool:
-    """Return True if version is Python 3.10 or newer.
+    """Return True if version is Python 3.11 or newer.
 
     Args:
         version: Dotted version string (e.g. "3.12.3"), or None.
 
     Returns:
-        bool: False when version is missing or below 3.10.
+        bool: False when version is missing or below 3.11.
     """
     parsed = _parse_dotted_version(version)
     if parsed is None:

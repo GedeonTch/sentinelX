@@ -5,7 +5,7 @@ Covers:
 - Nominal: python + nmap + enum4linux-ng all usable
 - Edge: one external tool missing
 - Error: version detection fails (OSError / timeout) without crashing
-- Python below 3.10 is not ready
+- Python below 3.11 is not ready
 """
 
 from pathlib import Path
@@ -171,8 +171,19 @@ class TestPythonVersionGate:
         assert check_status(check) == "python_too_old"
         assert environment_ready([check, _nmap_ok(), _enum_ok(), _netlab_ok()]) is False
 
-    def test_python_3_10_is_ok(self):
-        assert python_version_ok("3.10.0") is True
+    def test_python_3_10_is_refused(self):
+        for version in ("3.10.0", "3.10.22", "3.10"):
+            assert python_version_ok(version) is False, version
+        check = DependencyCheck(name="python", present=True, version="3.10.22")
+        assert check_status(check) == "python_too_old"
+        assert environment_ready([check, _nmap_ok(), _enum_ok(), _netlab_ok()]) is False
+
+    def test_python_3_11_is_accepted(self):
+        for version in ("3.11", "3.11.0", "3.11.17", "3.12.3", "3.13.1"):
+            assert python_version_ok(version) is True, version
+        check = DependencyCheck(name="python", present=True, version="3.11.17")
+        assert check_status(check) == "ok"
+        assert environment_ready([check, _nmap_ok(), _enum_ok(), _netlab_ok()]) is True
 
     def test_none_version_is_not_ok(self):
         assert python_version_ok(None) is False

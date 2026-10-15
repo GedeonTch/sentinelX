@@ -235,7 +235,7 @@ def doctor() -> None:
     if not environment_ready(checks):
         display(
             "[red]Environment is not ready.[/red] "
-            "Install missing tools and ensure Python >= 3.10 before running a scan."
+            "Install missing tools and ensure Python >= 3.11 before running a scan."
         )
         raise typer.Exit(code=1)
     display("[green]Environment is ready.[/green]")
@@ -260,7 +260,7 @@ def _render_doctor_report(checks: List[DependencyCheck]) -> None:
 def _status_markup(status: str) -> str:
     mapping = {
         "ok":            "[green]ok[/green]",
-        "python_too_old":"[red]python < 3.10[/red]",
+        "python_too_old":"[red]python < 3.11[/red]",
         "failed":        "[red]failed[/red]",
         "missing":       "[red]missing[/red]",
     }

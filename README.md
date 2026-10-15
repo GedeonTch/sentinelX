@@ -7,7 +7,7 @@
 SentinelX est une plateforme modulaire de cybersécurité qui évolue avec ses besoins : de l'audit réseau en labo jusqu'à une plateforme unifiée et intelligente.
 
 ![Status](https://img.shields.io/badge/status-en%20d%C3%A9veloppement-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -67,7 +67,7 @@ Détail complet des tickets et des règles d'architecture : [`docs/sentinelx_ste
 
 ## Stack technique (V1)
 
-- **Langage** : Python 3.10+, cross-platform Windows + Linux
+- **Langage** : Python 3.11+, cross-platform Windows + Linux
 - **CLI** : [Typer](https://typer.tiangolo.com/)
 - **Affichage terminal** : [Rich](https://github.com/Textualize/rich)
 - **Persistance** : SQLite (stdlib), un fichier par session
