@@ -392,3 +392,86 @@ class TestConfigFallback:
         assert "risk_score" in scorer.FORMULA_DESCRIPTION
         assert "confidence" in scorer.FORMULA_DESCRIPTION
         assert "exposure" in scorer.FORMULA_DESCRIPTION
+
+
+# ---------------------------------------------------------------------------
+# Inventory observations (device_fingerprint) never receive a risk score
+# ---------------------------------------------------------------------------
+
+def make_inventory(target_ip="192.0.2.10", **overrides) -> Finding:
+    """Inventory observation shaped like recon/device_fingerprint.py output."""
+    data = dict(
+        session_id="session-test",
+        module="device_fingerprint",
+        target_ip=target_ip,
+        target_port=None,
+        target_service="host",
+        category=Category.NETWORK,
+        severity=Severity.INFO,
+        confidence=Confidence.CONFIRMED,
+        exposure=Exposure.INTERNAL,
+        evidence=Evidence(raw="host up", command="nmap -sn"),
+        status=FindingStatus.OPEN,
+    )
+    data.update(overrides)
+    return Finding(**data)
+
+
+class TestInventoryObservationsNotScored:
+    def test_inventory_observation_alone_gets_no_risk_score(self):
+        result = scorer.score_findings([make_inventory()])
+        assert result[0].risk_score is None
+
+    def test_calculate_score_refuses_inventory_observation(self):
+        with pytest.raises(ValueError, match="device_fingerprint"):
+            scorer.calculate_score(make_inventory())
+
+    def test_inventory_only_session_has_no_global_score(self):
+        findings = scorer.score_findings([
+            make_inventory("192.0.2.10"),
+            make_inventory("192.0.2.11"),
+        ])
+        assert all(f.risk_score is None for f in findings)
+        assert scorer.get_global_score(findings) is None
+
+    def test_inventory_does_not_change_global_score(self):
+        # INFO × PROBABLE × INTERNAL = 5 × 0.85 × 1.00 = 4.25
+        vuln = make_finding(severity=Severity.INFO, confidence=Confidence.PROBABLE,
+                            exposure=Exposure.INTERNAL)
+        alone = scorer.get_global_score(scorer.score_findings([vuln]))
+        with_inventory = scorer.get_global_score(
+            scorer.score_findings([vuln, make_inventory()])
+        )
+        assert alone == 4.25
+        assert with_inventory == 4.25
+
+    def test_inventory_with_stale_score_is_excluded_from_global(self):
+        stale = dataclasses.replace(make_inventory(), risk_score=5.0)
+        assert scorer.get_global_score([stale]) is None
+
+        vuln_scored = scorer.score_findings([make_finding(severity=Severity.HIGH)])
+        assert scorer.get_global_score([stale, *vuln_scored]) == \
+            scorer.get_global_score(vuln_scored)
+
+    def test_module_match_is_exact(self):
+        # Only the exact module name is inventory; a lookalike stays a scored finding.
+        lookalike = make_inventory(module="device_fingerprint_v2")
+        (result,) = scorer.score_findings([lookalike])
+        assert result.risk_score == scorer.calculate_score(lookalike)
+
+    def test_mixed_batch_keeps_order_and_scores_only_security_findings(self):
+        vuln = make_finding(severity=Severity.HIGH)
+        result = scorer.score_findings([make_inventory(), vuln])
+        assert [f.module for f in result] == ["device_fingerprint", "test_module"]
+        assert result[0].risk_score is None
+        assert result[1].risk_score == scorer.calculate_score(vuln)
+
+    @pytest.mark.parametrize("severity", list(Severity))
+    @pytest.mark.parametrize("confidence", [
+        Confidence.CONFIRMED, Confidence.PROBABLE, Confidence.POSSIBLE,
+    ])
+    def test_security_findings_keep_current_scoring(self, severity, confidence):
+        finding = make_finding(severity=severity, confidence=confidence)
+        (scored,) = scorer.score_findings([finding])
+        assert scored.risk_score is not None
+        assert scored.risk_score == scorer.calculate_score(finding)

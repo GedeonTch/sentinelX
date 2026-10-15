@@ -399,6 +399,14 @@ class TestHelpers:
         score = _compute_worst_current_threat([f])
         assert score is None
 
+    def test_compute_worst_current_threat_ignores_inventory_observation(self):
+        """An inventory observation, even with a stale score, is never the worst threat."""
+        inventory = make_finding(module="device_fingerprint", severity=Severity.INFO,
+                                 risk_score=5.0, target_port=None, target_service="host")
+        vulnerability = make_finding(module="tcp_scan", risk_score=4.25)
+        assert _compute_worst_current_threat([inventory]) is None
+        assert _compute_worst_current_threat([inventory, vulnerability]) == 4.25
+
     def test_compute_worst_current_threat_empty_list(self):
         assert _compute_worst_current_threat([]) is None
 

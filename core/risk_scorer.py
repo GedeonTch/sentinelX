@@ -25,6 +25,10 @@ Global network score = worst (highest) open Finding score — never an average.
 Coefficients are loaded from config.yaml (project root).
 This formula always appears in every generated report.
 
+Inventory observations (INVENTORY_MODULES, e.g. device_fingerprint) describe
+what exists on the network, not a vulnerability. They never receive a
+risk_score and never contribute to the global score.
+
 Rules enforced here:
 - ZERO import sqlite3
 - ZERO print()
@@ -92,6 +96,16 @@ _CONFIG = _load_config()
 # Core scoring function
 # ---------------------------------------------------------------------------
 
+# Modules whose Findings are inventory observations, not vulnerabilities.
+# Exact module-name match only. A future inventory module must be added here.
+INVENTORY_MODULES = frozenset({"device_fingerprint"})
+
+
+def is_inventory_observation(finding: Finding) -> bool:
+    """Return True when a Finding describes inventory, not a security weakness."""
+    return finding.module in INVENTORY_MODULES
+
+
 def calculate_score(finding: Finding) -> float:
     """Calculate the risk score for a single Finding.
 
@@ -108,7 +122,16 @@ def calculate_score(finding: Finding) -> float:
 
     Returns:
         float: Calculated risk score, between 0.0 and 100.0 inclusive.
+
+    Raises:
+        ValueError: If the Finding is an inventory observation. Such a Finding
+            is never scored; score_findings() handles it before calling here.
     """
+    if is_inventory_observation(finding):
+        raise ValueError(
+            f"Inventory observation '{finding.module}' is not risk-scored"
+        )
+
     # Step 1 — Base severity
     if finding.cvss_score is not None:
         base = finding.cvss_score * 10.0
@@ -168,6 +191,10 @@ def score_findings(findings: List[Finding]) -> List[Finding]:
 
     scored = []
     for f in findings:
+        if is_inventory_observation(f):
+            # Kept in place for the caller, but never given a score.
+            scored.append(dataclasses.replace(f, risk_score=None))
+            continue
         score = calculate_score(f)
         scored.append(dataclasses.replace(f, risk_score=score))
     return scored
@@ -199,6 +226,7 @@ def get_global_score(findings: List[Finding]) -> Optional[float]:
         if f.status == FindingStatus.OPEN
         and f.risk_score is not None
         and float(f.confidence) >= 0.7
+        and not is_inventory_observation(f)
     ]
 
     return max(qualifying) if qualifying else None
