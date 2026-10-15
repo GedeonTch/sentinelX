@@ -6,6 +6,9 @@ __pycache__/
 .env
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
 
 # Pedagogical READMEs — for local learning only, not part of the codebase
 *_README.md

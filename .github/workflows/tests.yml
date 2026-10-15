@@ -2,9 +2,10 @@ name: Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, a4-arena ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, a4-arena ]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -19,6 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install project (provides the sentinel entry point)
+        run: pip install .
 
       - name: Run tests
         run: pytest --tb=short -q
