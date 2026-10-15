@@ -724,6 +724,22 @@ class TestTcpSuccessCriterion:
         with pytest.raises(TcpScanFailed):
             self._scan(xml)
 
+    @pytest.mark.parametrize("states", [
+        ("open", "open"),
+        ("open", "closed"),
+        ("closed", "closed"),
+    ], ids=["open-twice", "open-then-closed", "closed-twice"])
+    def test_repeated_tcp_port_is_not_a_success(self, states):
+        # Two <port> entries for port 23 and numservices=2: the counts agree, but
+        # the table records one port number twice, so it is not proven complete.
+        first, second = states
+        ports_inner = (
+            f'<port protocol="tcp" portid="23"><state state="{first}" reason="syn-ack"/></port>'
+            f'<port protocol="tcp" portid="23"><state state="{second}" reason="syn-ack"/></port>'
+        )
+        with pytest.raises(TcpScanFailed, match="TCP port 23 more than once"):
+            self._scan(_up_host_xml(ports_inner, scaninfo=_tcp_scaninfo("2", "23")))
+
     def test_zero_count_extraports_group_is_accepted_when_the_table_is_complete(self):
         # 0 is a valid extraports count: an explicit port plus an empty group still
         # records exactly the one planned port.

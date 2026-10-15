@@ -13,6 +13,7 @@ in the test sandbox, so none of these results validates real Nmap behaviour.
 Lab validation of XML and exit codes is still required.
 """
 
+import re
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -21,6 +22,7 @@ import typer
 
 import core.database as db
 from cli import PipelineResult, _run_pipeline
+from reports.generator import generate_report
 
 
 SESSION = "t20-storage"
@@ -523,3 +525,142 @@ class TestPipelineScanOutcomes:
         }
         # The third machine was never reached: no row at all.
         assert len(_scanned_tcp_targets(fake)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Pipeline -> scan_outcomes -> HTML report (T20, integration)
+# ---------------------------------------------------------------------------
+
+def tcp_open_ports_xml(ip: str, ports=(22, 445)) -> str:
+    """nmap TCP XML with several open ports and consistent counts."""
+    services = ",".join(str(p) for p in ports)
+    port_xml = "".join(
+        f'<port protocol="tcp" portid="{p}"><state state="open" reason="syn-ack"/>'
+        f'<service name="svc{p}"/></port>'
+        for p in ports
+    )
+    return (
+        '<?xml version="1.0"?><nmaprun>'
+        f'<scaninfo type="connect" protocol="tcp" numservices="{len(ports)}" services="{services}"/>'
+        '<host><status state="up" reason="syn-ack"/>'
+        f'<address addr="{ip}" addrtype="ipv4"/>'
+        f"<ports>{port_xml}</ports></host>"
+        f"{RUN_OK}</nmaprun>"
+    )
+
+
+def tcp_duplicate_port_xml(ip: str) -> str:
+    """Port 23 recorded twice: must be refused as a failed scan (T20 D1)."""
+    entry = '<port protocol="tcp" portid="23"><state state="open" reason="syn-ack"/><service name="telnet"/></port>'
+    return (
+        '<?xml version="1.0"?><nmaprun>'
+        '<scaninfo type="connect" protocol="tcp" numservices="2" services="23,23"/>'
+        '<host><status state="up" reason="syn-ack"/>'
+        f'<address addr="{ip}" addrtype="ipv4"/>'
+        f"<ports>{entry}{entry}</ports></host>"
+        f"{RUN_OK}</nmaprun>"
+    )
+
+
+_MACHINE_CARD = re.compile(r'<article class="machine-card">(.*?)</article>', re.S)
+
+
+def _html_machine(html: str, ip: str) -> dict:
+    """What the HTML report shows for one machine's TCP scan."""
+    for card in _MACHINE_CARD.findall(html):
+        if f'<span class="m-ip">{ip}</span>' not in card:
+            continue
+        state = re.search(
+            r'<div class="fk">TCP scan</div>\s*<div class="fv[^"]*">\s*(.*?)\s*</div>',
+            card, re.S,
+        ).group(1)
+        listed = re.search(
+            r'<div class="fk">Open TCP ports</div>\s*<div class="fv mono">(.*?)</div>',
+            card, re.S,
+        ).group(1).strip()
+        count = re.search(r"(\d+) open port\(s\)", state)
+        return {
+            "label": state.split("·")[0].strip(),
+            "open_ports": int(count.group(1)) if count else None,
+            "listed": [] if listed == "—" else [int(p) for p in listed.split(", ")],
+        }
+    raise AssertionError(f"no machine card in the report for {ip}")
+
+
+class TestPipelineToHtmlReport:
+    """One session through the real pipeline (nmap mocked), then the HTML report.
+
+    The four machines cover: a failed TCP scan, a completed scan with zero open
+    ports, a completed scan with two open ports, and a refused duplicate port.
+    """
+
+    IPS = {
+        "open": "192.0.2.10",
+        "zero": "192.0.2.20",
+        "failed": "192.0.2.30",
+        "duplicate": "192.0.2.40",
+    }
+
+    @pytest.fixture
+    def report(self, run_real_pipeline, tmp_path):
+        session = "t20-html-report"
+        fake = FakeNmap(
+            ping_hosts=list(self.IPS.values()),
+            tcp={
+                self.IPS["open"]: tcp_open_ports_xml(self.IPS["open"]),
+                self.IPS["zero"]: tcp_no_open_port_xml(self.IPS["zero"]),
+                self.IPS["failed"]: _done(tcp_no_open_port_xml(self.IPS["failed"]), returncode=2),
+                self.IPS["duplicate"]: tcp_duplicate_port_xml(self.IPS["duplicate"]),
+            },
+        )
+        run_real_pipeline(session, fake)
+        output = tmp_path / "report.html"
+        assert generate_report(session, "html", str(output)) is True
+        return session, output.read_text(encoding="utf-8")
+
+    def test_failed_tcp_scan_is_shown_as_failed_without_a_port_count(self, report):
+        _, html = report
+        shown = _html_machine(html, self.IPS["failed"])
+        assert shown == {"label": "Failed", "open_ports": None, "listed": []}
+
+    def test_completed_scan_with_zero_open_ports_is_shown_as_zero(self, report):
+        _, html = report
+        shown = _html_machine(html, self.IPS["zero"])
+        assert shown == {"label": "Completed", "open_ports": 0, "listed": []}
+
+    def test_completed_scan_with_open_ports_shows_count_and_list(self, report):
+        _, html = report
+        shown = _html_machine(html, self.IPS["open"])
+        assert shown == {"label": "Completed", "open_ports": 2, "listed": [22, 445]}
+
+    def test_repeated_port_is_refused_and_never_counted(self, report):
+        _, html = report
+        shown = _html_machine(html, self.IPS["duplicate"])
+        assert shown == {"label": "Failed", "open_ports": None, "listed": []}
+
+    def test_stored_counts_agree_with_the_html_for_every_machine(self, report):
+        session, html = report
+        rows = {
+            r["target_ip"]: r
+            for r in db.get_scan_outcomes(session)
+            if r["module"] == "tcp_scan"
+        }
+        assert set(rows) == set(self.IPS.values())
+
+        stored_ports: dict = {}
+        for f in db.get_findings(session):
+            if f.module == "tcp_scan":
+                stored_ports.setdefault(f.target_ip, []).append(f.target_port)
+
+        for ip, row in rows.items():
+            shown = _html_machine(html, ip)
+            if row["outcome"] == "completed":
+                distinct = sorted(set(stored_ports.get(ip, [])))
+                # open_ports (stored) == distinct stored ports == HTML count == HTML list
+                assert row["open_ports"] == len(distinct) == shown["open_ports"]
+                assert shown["listed"] == distinct
+                assert len(stored_ports.get(ip, [])) == len(distinct)  # no duplicate Finding
+            else:
+                assert row["open_ports"] == 0
+                assert ip not in stored_ports
+                assert shown["open_ports"] is None

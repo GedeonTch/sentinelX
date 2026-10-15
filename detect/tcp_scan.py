@@ -403,6 +403,20 @@ def _check_tcp_xml(xml_output: str, target: str) -> None:
     if ports is None:
         raise TcpScanFailed(f"nmap XML for {target} has no port table")
 
+    # Each TCP port is recorded once. A repeated <port> would be counted twice
+    # by the planned-count check and then reported as two open ports for one
+    # port number: the table is not trusted, so the scan is not a success.
+    seen_tcp_ports = set()
+    for port_elem in ports.findall("port"):
+        if port_elem.get("protocol") != "tcp":
+            continue
+        port_id = port_elem.get("portid")
+        if port_id in seen_tcp_ports:
+            raise TcpScanFailed(
+                f"nmap XML for {target} records TCP port {port_id} more than once"
+            )
+        seen_tcp_ports.add(port_id)
+
     planned = _planned_port_count(root, target)
     recorded = _recorded_port_states(ports)
     if recorded is None:
