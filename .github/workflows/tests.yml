@@ -10,6 +10,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Typer forces ANSI output when GITHUB_ACTIONS is set (typer/rich_utils.py,
+      # FORCE_TERMINAL). Disable that forcing so captured CLI output is plain text.
+      _TYPER_FORCE_DISABLE_TERMINAL: "1"
 
     steps:
       - uses: actions/checkout@v4
