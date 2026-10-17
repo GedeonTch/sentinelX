@@ -24,6 +24,8 @@ RULE_ID = 'default_creds_found'
 PROBE_TIMEOUT_SECONDS = 5
 SUCCESS, NO_MATCH, TIMEOUT, INACCESSIBLE, ERROR = 'SUCCESS', 'NO_MATCH', 'TIMEOUT', 'INACCESSIBLE', 'ERROR'
 INCONCLUSIVE, LOCKED, ANONYMOUS = 'INCONCLUSIVE', 'LOCKED', 'ANONYMOUS_ACCESS'
+# SNMP agent answered (noSuchName) but read access was not demonstrated: distinct, never a success.
+READ_UNPROVEN = 'READ_UNPROVEN'
 MAX_SERVICE, MAX_ACCOUNT, MAX_TOTAL = 3, 2, 10
 ATTEMPT_SECONDS, SERVICE_SECONDS, INTERVAL_SECONDS = 10, 30, 2
 
@@ -199,8 +201,11 @@ def _try_snmp_community(target_ip: str, community: str) -> CredentialProbeResult
                     outcome = classify_response(data, community, request_id)
                 except InvalidResponse:
                     continue
-                if outcome in ('READ_OK', 'OID_UNAVAILABLE'):
+                if outcome == 'READ_OK':
                     return CredentialProbeResult('snmp', SUCCESS, outcome)
+                if outcome == 'OID_UNAVAILABLE':
+                    # Agent answered, but the requested read was not demonstrated.
+                    return CredentialProbeResult('snmp', READ_UNPROVEN, outcome)
                 return CredentialProbeResult('snmp', INCONCLUSIVE, 'STRUCTURED_SNMP_ERROR')
         return CredentialProbeResult('snmp', INCONCLUSIVE, 'PACKET_LIMIT')
     except socket.timeout:

@@ -92,7 +92,7 @@ def test_missing_implicit_service_no_prompt(monkeypatch,sink):
 
 def test_two_snmp_communities_distinct(monkeypatch,sink):
     cs=[Candidate('snmp',community='one',qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance),Candidate('snmp',community='two',qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance)]
-    fs,r=run(monkeypatch,sink,cs,[success('snmp','READ_OK'),success('snmp','OID_UNAVAILABLE')])
+    fs,r=run(monkeypatch,sink,cs,[success('snmp','READ_OK'),success('snmp','READ_OK')])
     assert len(fs)==1 and sink.record.call_count==2
     assert r.services[1].created==2
     assert 'one' not in fs[0].evidence.raw and 'two' not in fs[0].evidence.raw
@@ -212,7 +212,7 @@ def test_snmp_foreign_then_valid(monkeypatch):
     ([(b'\x30bad',(HOST,161)),socket.timeout()],dc.INCONCLUSIVE),
     ([(response(request_id=1),(HOST,161))]*16,dc.INCONCLUSIVE),
     ([(response(error=5,index=1),(HOST,161))],dc.INCONCLUSIVE),
-    ([(response(error=2,index=1),(HOST,161))],dc.SUCCESS),
+    ([(response(error=2,index=1),(HOST,161))],dc.READ_UNPROVEN),
     ([ConnectionRefusedError()],dc.INACCESSIBLE),([OSError(CANARY)],dc.ERROR),
 ])
 def test_snmp_transport_outcomes(monkeypatch,events,status):
@@ -490,7 +490,7 @@ def test_snmp_parser_rejects_independent_invalid_vectors(packet, reason):
 
 @pytest.mark.parametrize('packet,status,detail', [
     (_REFERENCE_READ, dc.SUCCESS, 'READ_OK'),
-    (_REFERENCE_NO_SUCH_NAME, dc.SUCCESS, 'OID_UNAVAILABLE'),
+    (_REFERENCE_NO_SUCH_NAME, dc.READ_UNPROVEN, 'OID_UNAVAILABLE'),
     (_OLD_OID_READ, dc.INCONCLUSIVE, 'NO_CORRELATED_RESPONSE'),
     (_OLD_OID_NO_SUCH_NAME, dc.INCONCLUSIVE, 'NO_CORRELATED_RESPONSE'),
     (_REFERENCE_READ[:-1], dc.INCONCLUSIVE, 'NO_CORRELATED_RESPONSE'),
@@ -508,3 +508,49 @@ def test_snmp_independent_vectors_transport_and_conservation(monkeypatch, sink, 
     assert sink.record.call_count == int(status == dc.SUCCESS)
     assert findings == []  # custom candidate never qualifies automatically
     sock.sendto.assert_called_once_with(_REFERENCE_GET, (HOST, 161))
+
+
+def test_read_ok_still_accepted_and_qualifies(monkeypatch,sink):
+    cs=[Candidate('snmp',community='one',qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance)]
+    fs,r=run(monkeypatch,sink,cs,[success('snmp','READ_OK')],services=('snmp',))
+    assert len(fs)==1 and sink.record.call_count==1
+    assert sink.record.call_args.kwargs['proof']=='READ_OK'
+    assert r.services[0].outcomes[dc.SUCCESS]==1 and r.services[0].outcomes[dc.READ_UNPROVEN]==0
+
+
+def test_read_unproven_not_recorded_no_finding_not_success(monkeypatch,sink):
+    cs=[Candidate('snmp',community=CANARY,qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance)]
+    fs,r=run(monkeypatch,sink,cs,[dc.CredentialProbeResult('snmp',dc.READ_UNPROVEN,'OID_UNAVAILABLE')],services=('snmp',))
+    s=r.services[0]
+    assert fs==[] and sink.record.call_count==0
+    assert s.outcomes[dc.READ_UNPROVEN]==1 and s.outcomes[dc.SUCCESS]==0
+    assert s.details['OID_UNAVAILABLE']==1 and s.created==0 and s.updated==0
+    assert s.state=='partial'
+    assert CANARY not in repr(r) and CANARY not in repr(fs)
+
+
+def test_read_unproven_does_not_stop_next_community(monkeypatch,sink):
+    cs=[Candidate('snmp',community='one',qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance),
+        Candidate('snmp',community='two',qualified=True,provenance=load_catalog('cisco-wlc-7.4')[0].provenance)]
+    fs,r=run(monkeypatch,sink,cs,[dc.CredentialProbeResult('snmp',dc.READ_UNPROVEN,'OID_UNAVAILABLE'),success('snmp','READ_OK')],services=('snmp',))
+    assert len(fs)==1 and sink.record.call_count==1
+    assert sink.record.call_args.kwargs['proof']=='READ_OK'
+    assert r.services[0].attempts==2
+
+
+@pytest.mark.parametrize('events,status,detail',[
+    ([(response(error=0,index=0),(HOST,161))],dc.SUCCESS,'READ_OK'),
+    ([(response(error=2,index=1),(HOST,161))],dc.READ_UNPROVEN,'OID_UNAVAILABLE'),
+    ([(response(error=5,index=1),(HOST,161))],dc.INCONCLUSIVE,'STRUCTURED_SNMP_ERROR'),
+    ([(response(error=2,index=0),(HOST,161)),socket.timeout()],dc.INCONCLUSIVE,'NO_CORRELATED_RESPONSE'),
+    ([(response(community='other',error=2,index=1),(HOST,161)),socket.timeout()],dc.INCONCLUSIVE,'NO_CORRELATED_RESPONSE'),
+    ([(b'\x30bad',(HOST,161)),socket.timeout()],dc.INCONCLUSIVE,'NO_CORRELATED_RESPONSE'),
+    ([socket.timeout()],dc.TIMEOUT,'NO_RESPONSE'),
+    ([ConnectionRefusedError()],dc.INACCESSIBLE,'CONNECTION_FAILED'),
+    ([OSError(CANARY)],dc.ERROR,'TRANSPORT_ERROR'),
+])
+def test_snmp_split_keeps_other_classifications(monkeypatch,events,status,detail):
+    snmp_socket(monkeypatch,events)
+    result=dc._try_snmp_community(HOST,'test')
+    assert (result.status,result.detail)==(status,detail)
+    assert CANARY not in repr(result)

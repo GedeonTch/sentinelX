@@ -401,7 +401,7 @@ def creds_check_cmd(
                 _render_credential_summary(report)
             except Exception:
                 _credential_error("Credential summary could not be displayed")
-    if any(item.save_failures or item.save_uncertain or any(item.outcomes[k] for k in ("ERROR", "TIMEOUT", "INACCESSIBLE", "INCONCLUSIVE", "LOCKED", "ANONYMOUS_ACCESS"))
+    if any(item.save_failures or item.save_uncertain or any(item.outcomes[k] for k in ("ERROR", "TIMEOUT", "INACCESSIBLE", "INCONCLUSIVE", "READ_UNPROVEN", "LOCKED", "ANONYMOUS_ACCESS"))
            for item in report.services):
         raise typer.Exit(code=1)
 

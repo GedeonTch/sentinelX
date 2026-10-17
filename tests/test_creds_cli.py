@@ -182,3 +182,20 @@ def test_cli_ambiguous_or_anonymous_not_stored(setup, status):
     assert 'confirmed=0' in result.output and 'stored=0' in result.output
     with open_vault(path, PHRASE) as v:
         assert v.list_metadata() == []
+
+
+def test_cli_read_unproven_shown_not_success_not_stored(monkeypatch, tmp_path):
+    sink = Mock(ready=True, record=Mock(return_value=True))
+    monkeypatch.setattr(cli, '_open_credential_vault', lambda writable=False: nullcontext(sink))
+    monkeypatch.setattr(dc.socket, 'socket', Mock(side_effect=AssertionError('No network')))
+    monkeypatch.setattr(dc.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(dc, '_try_snmp_community', Mock(return_value=dc.CredentialProbeResult('snmp', dc.READ_UNPROVEN, 'OID_UNAVAILABLE')))
+    dictionary = tmp_path / 'dictionary with spaces.txt'
+    dictionary.write_text(json.dumps(dict(service='snmp', community=SECRET)))
+    result = runner.invoke(cli.app, ['creds_check', '-t', '192.0.2.1', '--service', 'snmp', '--dict', str(dictionary)], input='y\n')
+    assert result.exit_code == 1
+    assert 'READ_UNPROVEN' in result.output
+    assert 'confirmed=0' in result.output and 'stored=0' in result.output
+    assert 'Findings (' not in result.output
+    assert sink.record.call_count == 0
+    assert SECRET not in result.output

@@ -162,7 +162,8 @@ sonde prouve le contrôle interne du mot de passe sur tout serveur.
 SNMPv1 : GET sysDescr uniquement. Source/port, BER borné, version, GetResponse,
 request-id aléatoire, communauté et OID sont vérifiés. Au plus 16 datagrammes et
 5 secondes, pas de retransmission. Lecture réussie = READ_OK. Réponse noSuchName
-corrélée/conforme = OID_UNAVAILABLE : acceptation protocolaire, pas lecture réussie.
+corrélée/conforme = OID_UNAVAILABLE, classé READ_UNPROVEN : l'agent a répondu mais la
+lecture n'est pas démontrée ; ce résultat n'est ni enregistré ni un Finding.
 Les autres erreurs structurées sont indicatives/inconclusives, pas conservées
 comme succès. Paquets malformés/non corrélés : jamais SUCCESS ou NO_MATCH ; attente
 bornée d'un paquet admissible, sinon INCONCLUSIVE. Silence = TIMEOUT.
