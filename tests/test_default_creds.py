@@ -242,7 +242,8 @@ def test_global_budget_even_with_distinct_services(monkeypatch,sink):
 
 
 def test_deadline_prevents_attempt(monkeypatch,sink):
-    clock=Mock(side_effect=[0,25,25,25])
+    late=dc.SERVICE_SECONDS-dc.ATTEMPT_SECONDS+1  # fewer than ATTEMPT_SECONDS left in the service window
+    clock=Mock(side_effect=[0,late,late,late])
     monkeypatch.setattr(dc.time,'monotonic',clock)
     _,r=run(monkeypatch,sink,[ftp()],[success()])
     assert r.services[0].attempts==0 and r.services[0].skipped['SERVICE_DEADLINE']==1
@@ -706,7 +707,7 @@ def test_deadline_cuts_repetition_and_is_reported(monkeypatch, sink):  # I2
     monkeypatch.setattr(dc.time, 'monotonic', lambda: now[0])
 
     def slow_timeout(*args):
-        now[0] += 12  # each attempt burns 12 s of a 30 s service budget
+        now[0] += 13  # each attempt burns 13 s: 26 s used of a 35 s service budget, 9 s left (< 10 s)
         return ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)
 
     _, r = run(monkeypatch, sink, [ftp('u', 'p1')], slow_timeout, services=('ftp',))
@@ -715,6 +716,56 @@ def test_deadline_cuts_repetition_and_is_reported(monkeypatch, sink):  # I2
     assert s.retry_stopped['SERVICE_DEADLINE'] == 1
     assert s.reason == '' and not s.skipped.get('TIMEOUT_STOP')
     assert s.skipped.get('NOT_TESTED', 0) == 0
+
+
+@pytest.mark.parametrize('gap', [0.000001, 0.5, 2.4])  # caller-side time between two attempts
+def test_ftp_two_near_ten_second_timeouts_leave_room_for_third_attempt(monkeypatch, sink, gap):  # M
+    # A pre-PASS timeout can use the whole ATTEMPT_SECONDS. With a 30 s window, any gap after it pushed
+    # the third start below 10 s (SERVICE_DEADLINE). With 35 s it starts while <= 25 s have elapsed.
+    now = [0.0]
+    monkeypatch.setattr(dc.time, 'monotonic', lambda: now[0])
+    starts = []
+
+    def timeout_twice_then_success(*args):
+        starts.append(now[0])
+        if len(starts) < 3:
+            now[0] += dc.ATTEMPT_SECONDS + gap
+            return ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)
+        return success()
+
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')], timeout_twice_then_success, services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 3
+    assert starts[2] <= dc.SERVICE_SECONDS - dc.ATTEMPT_SECONDS
+    assert s.attempts == 3 and s.outcomes[dc.TIMEOUT] == 2 and s.outcomes[dc.SUCCESS] == 1
+    assert not s.retry_stopped and not s.skipped.get('SERVICE_DEADLINE')
+    sink.record.assert_called_once()
+    assert s.created == 1
+
+
+@pytest.mark.parametrize('gap', [0.000001, 2.4])
+def test_ftp_three_near_ten_second_timeouts_stay_indeterminate(monkeypatch, sink, gap):  # N
+    now = [0.0]
+    monkeypatch.setattr(dc.time, 'monotonic', lambda: now[0])
+
+    calls = []
+
+    def timeout(*args):
+        calls.append(now[0])
+        now[0] += dc.ATTEMPT_SECONDS
+        # The extra delay exists only between two attempts, never after the last one.
+        if len(calls) < dc.MAX_CONTROL_TRIES:
+            now[0] += gap
+        return ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)
+
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1'), ftp('v', 'p2')], timeout, services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 3 and s.attempts == 3  # MAX_CONTROL_TRIES, no fourth
+    assert s.outcomes[dc.TIMEOUT] == 3
+    assert s.outcomes[dc.NO_MATCH] == 0 and s.outcomes[dc.SUCCESS] == 0 and s.outcomes[dc.INACCESSIBLE] == 0
+    assert s.reason == 'TIMEOUT_STOP' and s.state == 'partial'
+    assert s.candidates_tested == 1 and s.skipped['TIMEOUT_STOP'] == 1
+    sink.record.assert_not_called()
 
 
 def test_snmp_inconclusive_is_not_repeated(monkeypatch, sink):

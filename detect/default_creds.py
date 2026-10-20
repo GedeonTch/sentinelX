@@ -27,7 +27,7 @@ INCONCLUSIVE, LOCKED, ANONYMOUS = 'INCONCLUSIVE', 'LOCKED', 'ANONYMOUS_ACCESS'
 # SNMP agent answered (noSuchName) but read access was not demonstrated: distinct, never a success.
 READ_UNPROVEN = 'READ_UNPROVEN'
 MAX_SERVICE, MAX_ACCOUNT, MAX_TOTAL = 3, 2, 10
-ATTEMPT_SECONDS, SERVICE_SECONDS, INTERVAL_SECONDS = 10, 30, 2
+ATTEMPT_SECONDS, SERVICE_SECONDS, INTERVAL_SECONDS = 10, 35, 2
 # Network attempts for one control (one candidate on one service of one device), first included.
 MAX_CONTROL_TRIES = 3
 # Only these timeouts are repeated: FTP before any password was sent, SNMP with no answer at all.
