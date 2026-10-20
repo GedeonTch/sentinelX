@@ -554,3 +554,190 @@ def test_snmp_split_keeps_other_classifications(monkeypatch,events,status,detail
     result=dc._try_snmp_community(HOST,'test')
     assert (result.status,result.detail)==(status,detail)
     assert CANARY not in repr(result)
+
+
+# --- Timeout rule (repetitions, stops, budgets, accounting, secrets). Mocks only. ---
+
+TIMEOUT_BEFORE, TIMEOUT_AFTER = dc.TIMEOUT_BEFORE_PASSWORD, dc.TIMEOUT_AFTER_PASSWORD
+SNMP_COMMUNITY = 'SYNTHETIC_COMMUNITY_77'
+
+
+def ftp_result(status, detail=''):
+    return dc.CredentialProbeResult('ftp', status, detail)
+
+
+def snmp_result(status, detail=''):
+    return dc.CredentialProbeResult('snmp', status, detail)
+
+
+def snmp(community):
+    return Candidate('snmp', community=community)
+
+
+def test_ftp_timeout_phase_before_and_after_password(monkeypatch):
+    client = Mock()
+    client.sendcmd.side_effect = socket.timeout()
+    monkeypatch.setattr(dc, '_BoundedFTP', Mock(return_value=client))
+    before = dc._try_ftp_login(HOST, 'u', CANARY)
+    assert (before.status, before.detail) == (dc.TIMEOUT, TIMEOUT_BEFORE)
+
+    client = Mock()
+    client.sendcmd.side_effect = ['331 need password', socket.timeout()]
+    monkeypatch.setattr(dc, '_BoundedFTP', Mock(return_value=client))
+    after = dc._try_ftp_login(HOST, 'u', CANARY)
+    assert (after.status, after.detail) == (dc.TIMEOUT, TIMEOUT_AFTER)
+    assert CANARY not in repr(before) + repr(after)
+
+    # Deadline expiring while the socket is prepared for PASS: nothing was sent yet.
+    client = Mock()
+    client.sendcmd.side_effect = ['331 need password']
+    client.sock.settimeout.side_effect = [None, socket.timeout()]
+    monkeypatch.setattr(dc, '_BoundedFTP', Mock(return_value=client))
+    prepared = dc._try_ftp_login(HOST, 'u', CANARY)
+    assert (prepared.status, prepared.detail) == (dc.TIMEOUT, TIMEOUT_BEFORE)
+    client.sendcmd.assert_called_once()  # only USER was sent
+
+
+def test_ftp_three_timeouts_before_password_stop_service(monkeypatch, sink):  # A
+    cs = [ftp('u', 'p1'), ftp('u', 'p2')]
+    _, r = run(monkeypatch, sink, cs, [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)] * 3, services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 3
+    assert s.attempts == 3 and s.candidates_tested == 1 and s.outcomes[dc.TIMEOUT] == 3
+    assert s.skipped['TIMEOUT_STOP'] == 1 and s.reason == 'TIMEOUT_STOP'
+    assert s.state == 'partial' and not s.retry_stopped
+    sink.record.assert_not_called()
+
+
+def test_ftp_timeout_before_password_then_success_recorded_once(monkeypatch, sink):  # B
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')],
+               [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE), success()], services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 2
+    sink.record.assert_called_once()
+    assert s.created == 1 and s.attempts == 2 and s.outcomes[dc.SUCCESS] == 1
+
+
+def test_ftp_pre_password_repetitions_not_blocked_by_account_budget(monkeypatch, sink):  # B2
+    # MAX_ACCOUNT is 2: a third submission would be refused, but none of the timeouts sent a password.
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')],
+               [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)] * 2 + [success()], services=('ftp',))
+    assert dc._try_ftp_login.call_count == 3 and sink.record.call_count == 1
+    assert r.services[0].attempts == 3 and r.services[0].skipped['BUDGET'] == 0
+
+
+def test_ftp_timeout_before_password_then_explicit_refusal_no_third_try(monkeypatch, sink):  # C
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')],
+               [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE), ftp_result(dc.NO_MATCH, 'AUTH_REJECTED')], services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 2
+    assert s.outcomes[dc.NO_MATCH] == 1 and s.outcomes[dc.TIMEOUT] == 1
+    assert s.reason == '' and not s.skipped.get('TIMEOUT_STOP')
+    sink.record.assert_not_called()
+
+
+def test_ftp_timeout_after_password_never_repeated(monkeypatch, sink):  # D
+    cs = [ftp('u', 'p1'), ftp('v', 'p2')]
+    _, r = run(monkeypatch, sink, cs, [ftp_result(dc.TIMEOUT, TIMEOUT_AFTER)], services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 1 and s.attempts == 1
+    assert s.skipped['TIMEOUT_STOP'] == 1 and s.reason == 'TIMEOUT_STOP'
+    assert s.outcomes[dc.TIMEOUT] == 1 and s.state == 'partial'
+    sink.record.assert_not_called()
+
+
+def test_snmp_three_timeouts_same_community_stop_service(monkeypatch, sink):  # E
+    _, r = run(monkeypatch, sink, [snmp('c1'), snmp('c2')],
+               [snmp_result(dc.TIMEOUT, dc.SNMP_NO_RESPONSE)] * 3, services=('snmp',))
+    s = r.services[0]
+    assert dc._try_snmp_community.call_count == 3
+    assert s.attempts == 3 and s.candidates_tested == 1 and s.outcomes[dc.TIMEOUT] == 3
+    assert s.skipped['TIMEOUT_STOP'] == 1 and s.state == 'partial'
+    sink.record.assert_not_called()
+
+
+def test_snmp_timeout_then_read_ok_recorded_normally(monkeypatch, sink):  # F
+    _, r = run(monkeypatch, sink, [snmp('c1')],
+               [snmp_result(dc.TIMEOUT, dc.SNMP_NO_RESPONSE), success('snmp', 'READ_OK')], services=('snmp',))
+    s = r.services[0]
+    assert dc._try_snmp_community.call_count == 2
+    sink.record.assert_called_once()
+    assert s.created == 1 and s.attempts == 2
+
+
+def test_snmp_timeout_then_read_unproven_inconclusive_not_saved(monkeypatch, sink):  # G
+    fs, r = run(monkeypatch, sink, [snmp('c1')],
+                [snmp_result(dc.TIMEOUT, dc.SNMP_NO_RESPONSE),
+                 snmp_result(dc.READ_UNPROVEN, 'OID_UNAVAILABLE')], services=('snmp',))
+    s = r.services[0]
+    assert dc._try_snmp_community.call_count == 2 and s.attempts == 2
+    assert s.outcomes[dc.READ_UNPROVEN] == 1 and s.details['OID_UNAVAILABLE'] == 1
+    assert fs == [] and s.created == 0 and s.updated == 0
+    sink.record.assert_not_called()
+    assert s.state == 'partial' and not s.skipped.get('TIMEOUT_STOP')
+
+
+def test_next_service_runs_after_ftp_timeout_stop(monkeypatch, sink):  # H
+    # Separate mocks: each mock iterates its own copy of a list side_effect.
+    monkeypatch.setattr(dc, '_try_ftp_login', Mock(side_effect=[ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)] * 3))
+    monkeypatch.setattr(dc, '_try_snmp_community', Mock(side_effect=[success('snmp', 'READ_OK')]))
+    report = dc.CheckReport()
+    dc.check_default_creds(HOST, SESSION, candidates=[ftp('u', 'p1'), snmp('c1')],
+                           recorder=sink, report=report)
+    ftp_s, snmp_s = report.services
+    assert ftp_s.reason == 'TIMEOUT_STOP' and ftp_s.attempts == 3
+    assert dc._try_snmp_community.call_count == 1
+    assert snmp_s.created == 1 and snmp_s.reason == ''
+
+
+def test_budget_before_third_timeout_reported_as_budget(monkeypatch, sink):  # I1
+    monkeypatch.setattr(dc, 'MAX_SERVICE', 2)
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')], [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)] * 2, services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 2 and s.attempts == 2 and s.outcomes[dc.TIMEOUT] == 2
+    assert s.retry_stopped['BUDGET'] == 1
+    assert s.reason == '' and not s.skipped.get('TIMEOUT_STOP')
+    assert s.candidates_tested == 1 and s.skipped.get('NOT_TESTED', 0) == 0
+    assert all(v >= 0 for v in s.skipped.values())
+
+
+def test_deadline_cuts_repetition_and_is_reported(monkeypatch, sink):  # I2
+    now = [0.0]
+    monkeypatch.setattr(dc.time, 'monotonic', lambda: now[0])
+
+    def slow_timeout(*args):
+        now[0] += 12  # each attempt burns 12 s of a 30 s service budget
+        return ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)
+
+    _, r = run(monkeypatch, sink, [ftp('u', 'p1')], slow_timeout, services=('ftp',))
+    s = r.services[0]
+    assert dc._try_ftp_login.call_count == 2 and s.attempts == 2 and s.outcomes[dc.TIMEOUT] == 2
+    assert s.retry_stopped['SERVICE_DEADLINE'] == 1
+    assert s.reason == '' and not s.skipped.get('TIMEOUT_STOP')
+    assert s.skipped.get('NOT_TESTED', 0) == 0
+
+
+def test_snmp_inconclusive_is_not_repeated(monkeypatch, sink):
+    _, r = run(monkeypatch, sink, [snmp('c1')],
+               [snmp_result(dc.INCONCLUSIVE, 'NO_CORRELATED_RESPONSE')], services=('snmp',))
+    s = r.services[0]
+    assert dc._try_snmp_community.call_count == 1 and s.attempts == 1
+    assert s.outcomes[dc.INCONCLUSIVE] == 1
+
+
+def test_skipped_candidates_counted_once_per_candidate(monkeypatch, sink):  # L
+    cs = [ftp('u', 'p1'), ftp('u', 'p2'), ftp('u', 'p3')]
+    _, r = run(monkeypatch, sink, cs, [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE)] * 3, services=('ftp',))
+    s = r.services[0]
+    assert s.candidates == 3 and s.candidates_tested == 1
+    assert s.skipped['TIMEOUT_STOP'] == 2 and s.skipped.get('NOT_TESTED', 0) == 0
+    assert s.candidates == s.candidates_tested + sum(s.skipped.values())
+
+
+def test_no_secret_in_reports_after_timeouts(monkeypatch, sink):  # J
+    _, r = run(monkeypatch, sink, [ftp('u', CANARY)], [ftp_result(dc.TIMEOUT, TIMEOUT_BEFORE), success()],
+               services=('ftp',))
+    assert CANARY not in repr(r) and CANARY not in json.dumps(r.services[0].details)
+    _, r = run(monkeypatch, sink, [snmp(SNMP_COMMUNITY)],
+               [snmp_result(dc.TIMEOUT, dc.SNMP_NO_RESPONSE)] * 3, services=('snmp',))
+    assert SNMP_COMMUNITY not in repr(r) and SNMP_COMMUNITY not in json.dumps(r.services[0].details)

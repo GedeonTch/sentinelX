@@ -199,3 +199,20 @@ def test_cli_read_unproven_shown_not_success_not_stored(monkeypatch, tmp_path):
     assert 'Findings (' not in result.output
     assert sink.record.call_count == 0
     assert SECRET not in result.output
+
+
+def test_summary_shows_tested_and_cut_repetitions_without_secret(monkeypatch):
+    from detect.default_creds import CheckReport, ServiceReport
+    report = CheckReport(services=[ServiceReport('ftp', 2, state='partial', reason='TIMEOUT_STOP')])
+    item = report.services[0]
+    item.candidates_tested, item.attempts = 1, 3
+    item.outcomes['TIMEOUT'] = 3
+    item.skipped['TIMEOUT_STOP'] = 1
+    item.retry_stopped['BUDGET'] = 1
+    lines = []
+    monkeypatch.setattr(cli, 'display', lambda *args, **kwargs: lines.append(str(args[0])))
+    cli._render_credential_summary(report)
+    text = '\n'.join(lines)
+    assert 'tested=1' in text and 'attempts=3' in text and 'TIMEOUT_STOP' in text
+    assert 'Repetitions not performed' in text and "'BUDGET': 1" in text
+    assert 'SYNTHETIC' not in text

@@ -345,12 +345,13 @@ def _render_credential_summary(report: CheckReport) -> None:
     display("Credential verification — no result proves that a service is safe.")
     for item in report.services:
         display(Text(f"{item.service}: {item.state}; candidates={item.candidates}; "
-                     f"attempts={item.attempts}; confirmed={item.outcomes['SUCCESS']}; "
+                     f"tested={item.candidates_tested}; attempts={item.attempts}; confirmed={item.outcomes['SUCCESS']}; "
                      f"stored={item.created + item.updated} (created={item.created}, updated={item.updated}); "
                      f"save_failures={item.save_failures}; save_uncertain={item.save_uncertain}; reason={item.reason or '—'}"))
         display(Text("Outcomes (attempts): " + str(dict(item.outcomes))))
         display(Text("Protocol evidence (attempts): " + str(dict(item.details))))
         display(Text("Not tested (candidates): " + str(dict(item.skipped))))
+        display(Text("Repetitions not performed (budget or deadline; observed timeouts are in Outcomes): " + str(dict(item.retry_stopped))))
     if any(item.save_uncertain for item in report.services):
         display("[yellow]Vault write outcome uncertain: testing stopped. "
                 "Inspect the vault before retrying; the last record may already exist.[/yellow]")

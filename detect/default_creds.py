@@ -28,6 +28,12 @@ INCONCLUSIVE, LOCKED, ANONYMOUS = 'INCONCLUSIVE', 'LOCKED', 'ANONYMOUS_ACCESS'
 READ_UNPROVEN = 'READ_UNPROVEN'
 MAX_SERVICE, MAX_ACCOUNT, MAX_TOTAL = 3, 2, 10
 ATTEMPT_SECONDS, SERVICE_SECONDS, INTERVAL_SECONDS = 10, 30, 2
+# Network attempts for one control (one candidate on one service of one device), first included.
+MAX_CONTROL_TRIES = 3
+# Only these timeouts are repeated: FTP before any password was sent, SNMP with no answer at all.
+# Any other TIMEOUT (e.g. FTP after PASS) is never repeated and stops the service on this device.
+TIMEOUT_BEFORE_PASSWORD, TIMEOUT_AFTER_PASSWORD, SNMP_NO_RESPONSE = 'TIMEOUT_BEFORE_PASSWORD', 'TIMEOUT_AFTER_PASSWORD', 'NO_RESPONSE'
+RETRIABLE_TIMEOUTS = frozenset({TIMEOUT_BEFORE_PASSWORD, SNMP_NO_RESPONSE})
 
 
 class Recorder(Protocol):
@@ -58,6 +64,10 @@ class ServiceReport:
     save_failures: int = 0
     save_uncertain: int = 0
     skipped: Counter = field(default_factory=Counter)
+    # Candidates that started a control (one per candidate, however many network attempts it used).
+    candidates_tested: int = 0
+    # Repetitions cut short by a budget or deadline (never counted as observed timeouts).
+    retry_stopped: Counter = field(default_factory=Counter)
 
 
 @dataclass
@@ -139,8 +149,9 @@ def _try_ftp_login(target_ip: str, username: str, password: str) -> CredentialPr
         if _ftp_reply_code(response) != '331':
             return CredentialProbeResult('ftp', INCONCLUSIVE, 'UNEXPECTED_USER_REPLY')
         user_reply = response
-        phase = 'password'
         ftp.sock.settimeout(_remaining(deadline))
+        # Set just before PASS is sent: a timeout while still preparing the send is 'before password'.
+        phase = 'password'
         response = ftp.sendcmd('PASS ' + password)
         if _ftp_reply_code(response) == '230':
             if _ftp_anonymous_reply(user_reply) or _ftp_anonymous_reply(response):
@@ -164,7 +175,10 @@ def _try_ftp_login(target_ip: str, username: str, password: str) -> CredentialPr
         restricted = any(word in str(exc).lower() for word in ('locked', 'lockout', 'too many'))
         return CredentialProbeResult('ftp', LOCKED if restricted else ERROR, 'TEMPORARY_RESTRICTION')
     except socket.timeout:
-        return CredentialProbeResult('ftp', TIMEOUT, 'DEADLINE')
+        # The phase decides retry safety. 'password' is set before PASS is sent, so a timeout
+        # there may already have reached the server: it is treated as possibly submitted.
+        detail = TIMEOUT_AFTER_PASSWORD if phase == 'password' else TIMEOUT_BEFORE_PASSWORD
+        return CredentialProbeResult('ftp', TIMEOUT, detail)
     except (ConnectionRefusedError, ConnectionResetError):
         return CredentialProbeResult('ftp', INACCESSIBLE, 'CONNECTION_FAILED')
     except (OSError, EOFError, UnicodeError, ftplib.Error):
@@ -210,7 +224,7 @@ def _try_snmp_community(target_ip: str, community: str) -> CredentialProbeResult
         return CredentialProbeResult('snmp', INCONCLUSIVE, 'PACKET_LIMIT')
     except socket.timeout:
         return CredentialProbeResult('snmp', INCONCLUSIVE if received else TIMEOUT,
-                                     'NO_CORRELATED_RESPONSE' if received else 'NO_RESPONSE')
+                                     'NO_CORRELATED_RESPONSE' if received else SNMP_NO_RESPONSE)
     except (ConnectionRefusedError, ConnectionResetError):
         return CredentialProbeResult('snmp', INACCESSIBLE, 'CONNECTION_FAILED')
     except OSError:
@@ -273,12 +287,15 @@ def check_default_creds(target_ip: str, session_id: str, *,
             qualified_proofs = Counter()
             qualified_provenance = {}
             stop_service = False
+            stop_timeout = False
             for candidate in pool:
                 identity = candidate.identity()
                 account = (target_ip, *identity)
                 reason = None
-                if stop_all or stop_service:
+                if stop_all:
                     reason = 'STOPPED'
+                elif stop_service:
+                    reason = 'TIMEOUT_STOP' if stop_timeout else 'STOPPED'
                 elif identity in authenticated:
                     reason = 'IDENTITY_ALREADY_AUTHENTICATED'
                 elif result.attempts >= MAX_SERVICE or total >= MAX_TOTAL or account_attempts[account] >= (1 if candidate.service == 'snmp' else MAX_ACCOUNT):
@@ -294,21 +311,40 @@ def check_default_creds(target_ip: str, session_id: str, *,
                         result.skipped['SERVICE_DEADLINE'] += 1
                         continue
                     time.sleep(delay)
-                result.attempts += 1
-                total += 1
+                # One control per candidate: its repetitions are network attempts, not new candidates.
+                result.candidates_tested += 1
                 account_attempts[account] += 1
-                last_attempt = time.monotonic()
-                try:
-                    outcome = (_try_ftp_login(target_ip, candidate.username, candidate.password)
-                               if candidate.service == 'ftp' else _try_snmp_community(target_ip, candidate.community))
-                except (KeyboardInterrupt, typer.Abort):
-                    result.outcomes['CANCELLED'] += 1
-                    raise
-                except Exception:
-                    # Do not expose arbitrary backend exceptions with credentials.
-                    outcome = CredentialProbeResult(candidate.service, ERROR, 'UNEXPECTED_BACKEND_ERROR')
-                result.outcomes[outcome.status] += 1
-                result.details[outcome.detail] += 1
+                tries = 0
+                while True:
+                    tries += 1
+                    result.attempts += 1
+                    total += 1
+                    last_attempt = time.monotonic()
+                    try:
+                        outcome = (_try_ftp_login(target_ip, candidate.username, candidate.password)
+                                   if candidate.service == 'ftp' else _try_snmp_community(target_ip, candidate.community))
+                    except (KeyboardInterrupt, typer.Abort):
+                        result.outcomes['CANCELLED'] += 1
+                        raise
+                    except Exception:
+                        # Do not expose arbitrary backend exceptions with credentials.
+                        outcome = CredentialProbeResult(candidate.service, ERROR, 'UNEXPECTED_BACKEND_ERROR')
+                    result.outcomes[outcome.status] += 1
+                    result.details[outcome.detail] += 1
+                    if outcome.status != TIMEOUT or outcome.detail not in RETRIABLE_TIMEOUTS or tries >= MAX_CONTROL_TRIES:
+                        break
+                    # Repeat the same candidate; every network attempt passes the same budget and deadline gates.
+                    if result.attempts >= MAX_SERVICE or total >= MAX_TOTAL:
+                        result.retry_stopped['BUDGET'] += 1
+                        break
+                    delay = max(0, INTERVAL_SECONDS - (time.monotonic() - last_attempt))
+                    if deadline - time.monotonic() < delay + ATTEMPT_SECONDS:
+                        result.retry_stopped['SERVICE_DEADLINE'] += 1
+                        break
+                    time.sleep(delay)
+                if outcome.status == TIMEOUT and outcome.detail in RETRIABLE_TIMEOUTS:
+                    # No password was submitted and no SNMP answer came back: not counted against MAX_ACCOUNT.
+                    account_attempts[account] -= 1
                 if outcome.status == SUCCESS:
                     authenticated.add(identity)
                     if candidate.qualified and candidate.provenance is not None:
@@ -341,6 +377,11 @@ def check_default_creds(target_ip: str, session_id: str, *,
                     stop_all = True  # server restriction scope is not reliably known
                 elif outcome.status in (ERROR, INACCESSIBLE):
                     stop_service = True
+                elif outcome.status == TIMEOUT and (outcome.detail not in RETRIABLE_TIMEOUTS or tries >= MAX_CONTROL_TRIES):
+                    # Third timeout on a repeatable control, or a timeout after PASS: stop this service on this device only.
+                    stop_service = stop_timeout = True
+                    if not result.reason:
+                        result.reason = 'TIMEOUT_STOP'
             if qualified:
                 findings.append(_make_finding(session_id, target_ip, result.service, qualified, qualified_proofs, list(qualified_provenance.values())))
     except (KeyboardInterrupt, typer.Abort):
@@ -348,8 +389,9 @@ def check_default_creds(target_ip: str, session_id: str, *,
         raise
     finally:
         for result in report.services:
-            missing = result.candidates - result.attempts - sum(result.skipped.values())
-            if missing:
+            # Candidates, not network attempts: a repeated candidate must not be counted twice.
+            missing = result.candidates - result.candidates_tested - sum(result.skipped.values())
+            if missing > 0:
                 result.skipped['INTERRUPTED' if report.interrupted else 'NOT_TESTED'] += missing
             if result.state == 'tested' and (result.save_failures or result.save_uncertain or
                     any(v for k, v in result.skipped.items() if k != 'IDENTITY_ALREADY_AUTHENTICATED') or
