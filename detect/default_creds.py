@@ -1,4 +1,4 @@
-"""Explicit bounded FTP/SNMP/SSH (password only) checks, with mandatory ready secret sink.
+"""Explicit bounded FTP/SNMP/SSH (password only)/SMB (session authentication only) checks, with mandatory ready secret sink.
 
 No session DB, scoring, transcripts or credentials in Findings. The public scan
 still returns List[Finding]; the CLI supplies a vault and an assainised report.
@@ -10,12 +10,14 @@ import errno
 import ftplib
 import ipaddress
 import json
+import logging
 import os
 from pathlib import Path
 import socket
 import stat
 import threading
 import time
+import uuid
 from typing import Iterator, List, Optional, Protocol, Sequence
 
 import typer
@@ -40,8 +42,15 @@ MAX_CONTROL_TRIES = 3
 # Any other TIMEOUT (e.g. FTP after PASS) is never repeated and stops the service on this device.
 TIMEOUT_BEFORE_PASSWORD, TIMEOUT_AFTER_PASSWORD, SNMP_NO_RESPONSE = 'TIMEOUT_BEFORE_PASSWORD', 'TIMEOUT_AFTER_PASSWORD', 'NO_RESPONSE'
 RETRIABLE_TIMEOUTS = frozenset({TIMEOUT_BEFORE_PASSWORD, SNMP_NO_RESPONSE})
-SERVICE_PORTS = {'ftp': 21, 'snmp': 161, 'ssh': 22}
-SERVICE_CONTEXT = {'ftp': 'ftp-password', 'snmp': 'snmpv1-sysDescr', 'ssh': 'ssh-password'}
+SERVICE_PORTS = {'ftp': 21, 'snmp': 161, 'ssh': 22, 'smb': 445}
+SERVICE_CONTEXT = {'ftp': 'ftp-password', 'snmp': 'snmpv1-sysDescr', 'ssh': 'ssh-password', 'smb': 'smb-password'}
+# SMB session authentication only (smbprotocol: SMB2/SMB3, NTLM). Status codes are NTSTATUS values.
+SMB_LOGON_REFUSED = frozenset((0xC000006D, 0xC000006A, 0xC0000064))  # LOGON_FAILURE, WRONG_PASSWORD, NO_SUCH_USER
+SMB_LOCKED_OUT = 0xC0000234  # ACCOUNT_LOCKED_OUT
+# PASSWORD_EXPIRED, PASSWORD_MUST_CHANGE, ACCOUNT_DISABLED, ACCOUNT_RESTRICTION: state known, pair not proven wrong.
+SMB_ACCOUNT_STATE = frozenset((0xC0000071, 0xC0000224, 0xC0000072, 0xC000006E))
+# Cleanup bound for the LOGOFF sent after a decided result. Never more than the attempt has left.
+SMB_LOGOFF_SECONDS = 2
 # SSH host keys: a SentinelX-owned file, never ~/.ssh/known_hosts (which is not modified).
 SSH_TRUST_FILE = 'ssh_known_hosts'
 SSH_HOST_KEY_LEARNED, SSH_HOST_KEY_CHANGED = 'SSH_HOST_KEY_LEARNED', 'SSH_HOST_KEY_CHANGED'
@@ -480,11 +489,195 @@ def _try_ssh_login(target_ip: str, username: str, password: str) -> tuple[Creden
                     pass
 
 
+# Poll step of the SMB attempt deadline. The thread shuts the socket down at the limit, and keeps checking
+# until finish(), because the socket may only be created after the limit (TCP connect in progress).
+_SMB_POLL_SECONDS = 0.05
+
+
+class _SmbDeadline:
+    """Bounds one SMB attempt in time, whatever the library is waiting on.
+
+    At the deadline the socket is shut down (SHUT_RDWR) without taking smbprotocol's locks. That releases a
+    pending read or wait (EOF) and a blocked write (EPIPE), and each raises an exception in the calling thread.
+    transport.close() is not used for this: smbprotocol holds _sock_lock during a blocking send, so close()
+    waits for the peer. Measured on loopback with the real Tcp class: close() left a 16 MiB write blocked for
+    more than 3 s; shutdown() released it in about 20 ms.
+
+    'expired' follows the monotonic clock, so an answer obtained after the limit is never accepted, even if
+    this thread has not run yet. finish() stops the thread and joins it: nothing acts on the socket afterwards.
+    The shutdown call must never block: it runs under the lock, so a blocking call there would block finish().
+    """
+
+    def __init__(self, seconds: float, connection) -> None:
+        self._seconds = seconds
+        self._connection = connection
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._done = False
+        self._flag = False
+        self._due = None
+        self._thread = threading.Thread(target=self._run, name='smb-attempt-deadline', daemon=True)
+
+    def start(self) -> None:
+        self._due = time.monotonic() + self._seconds
+        self._thread.start()
+
+    @property
+    def expired(self) -> bool:
+        return self._flag or (self._due is not None and time.monotonic() >= self._due)
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                if self._done:
+                    return
+                if self.expired:
+                    self._flag = True
+                    self._shutdown_socket()
+            self._wake.wait(_SMB_POLL_SECONDS)
+
+    def _shutdown_socket(self) -> None:
+        # Not created yet, or already closed by the receiver thread: nothing to release, the next poll retries.
+        sock = getattr(getattr(self._connection, 'transport', None), '_sock', None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def finish(self) -> bool:
+        """True when the attempt ended before the deadline. Idempotent; the thread is stopped and joined."""
+        with self._lock:
+            self._done = True
+            expired = self.expired
+        self._wake.set()
+        if self._thread.ident is not None and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=1)
+        return not expired
+
+
+def _smb_quiet_loggers() -> None:
+    """Library loggers never reach a console or a sink: no SMB protocol debug in any output."""
+    for name in ('smbprotocol', 'spnego'):
+        logger = logging.getLogger(name)
+        logger.propagate = False
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
+
+
+def _smb_status_result(status: int) -> CredentialProbeResult:
+    if status in SMB_LOGON_REFUSED:
+        return CredentialProbeResult('smb', NO_MATCH, 'AUTH_REJECTED')
+    if status == SMB_LOCKED_OUT:
+        return CredentialProbeResult('smb', LOCKED, 'ACCOUNT_RESTRICTION')
+    if status in SMB_ACCOUNT_STATE:
+        return CredentialProbeResult('smb', INCONCLUSIVE, 'ACCOUNT_STATE')
+    return CredentialProbeResult('smb', ERROR, 'AUTH_STATUS_UNEXPECTED')
+
+
+def _smb_exchange(session_class, connection, deadline: _SmbDeadline, state: dict,
+                  account: str, password: str) -> CredentialProbeResult:
+    """Negotiation, then one session setup. No share, file, command or enumeration follows."""
+    connection.connect(timeout=ATTEMPT_SECONDS)
+    if deadline.expired:
+        return CredentialProbeResult('smb', TIMEOUT, TIMEOUT_BEFORE_PASSWORD)
+    # From here on a password or NTLM answer may have been sent: no automatic retry.
+    state['phase'] = 'session'
+    # require_encryption=False: SMB2 servers without encryption are in scope. Authentication only.
+    session = session_class(connection, username=account, password=password,
+                            require_encryption=False, auth_protocol='ntlm')
+    session.connect()
+    if not deadline.finish():
+        return CredentialProbeResult('smb', TIMEOUT, TIMEOUT_AFTER_PASSWORD)
+    if session.session_key is None:
+        # smbprotocol clears the key for guest and null sessions. The server opened such a session instead of
+        # refusing the pair, so the outcome is inconclusive: neither a success nor an explicit refusal.
+        return CredentialProbeResult('smb', INCONCLUSIVE, 'GUEST_OR_NULL_SESSION')
+    return CredentialProbeResult('smb', SUCCESS, 'AUTHENTICATED')
+
+
+def _smb_failure(exc: Exception, state: dict, deadline: _SmbDeadline, started: float) -> CredentialProbeResult:
+    """Classified by exception type and phase only. The exception text is never copied anywhere."""
+    from smbprotocol.exceptions import SMBAuthenticationError, SMBConnectionClosed, SMBResponseException
+    in_connect = state['phase'] == 'connect'
+    # The library truncates its own negotiation wait to whole seconds, so it can fire up to ~1 s early (about
+    # 9 s of 10). A connect-phase error at 90% of the limit or later is read as that timeout, never as a refusal.
+    late = deadline.expired or (in_connect and time.monotonic() - started >= ATTEMPT_SECONDS * 0.9)
+    if late:
+        return CredentialProbeResult('smb', TIMEOUT, TIMEOUT_BEFORE_PASSWORD if in_connect else TIMEOUT_AFTER_PASSWORD)
+    if isinstance(exc, SMBResponseException):
+        if in_connect:
+            return CredentialProbeResult('smb', ERROR, 'SMB_NEGOTIATION_FAILED')
+        return _smb_status_result(exc.header['status'].get_value())
+    if isinstance(exc, SMBAuthenticationError):
+        # The NTLM exchange itself failed: this is not a refusal of the credentials.
+        return CredentialProbeResult('smb', ERROR, 'SMB_AUTH_NEGOTIATION_FAILED')
+    if in_connect:
+        if isinstance(exc, (ConnectionRefusedError, ConnectionResetError)):
+            return CredentialProbeResult('smb', INACCESSIBLE, 'CONNECTION_FAILED')
+        return CredentialProbeResult('smb', ERROR, 'SMB_NEGOTIATION_FAILED')
+    if isinstance(exc, SMBConnectionClosed):
+        return CredentialProbeResult('smb', ERROR, 'CONNECTION_CLOSED_DURING_AUTH')
+    return CredentialProbeResult('smb', ERROR, 'PROTOCOL_ERROR')
+
+
+def _smb_cleanup(connection, logoff: bool, budget: float) -> None:
+    """Closes the attempt's connection once its result is decided. Never changes the result, never raises.
+
+    LOGOFF is sent only for an established session, and only within `budget` seconds. A guard shuts the socket
+    down when the budget ends, which releases a LOGOFF blocked on a write or waiting for a reply. The socket is
+    then closed and the receiver thread joined from this thread: the guard only shuts down, never closes.
+    """
+    if logoff and budget > 0:
+        guard = _SmbDeadline(budget, connection)
+        guard.start()
+        try:
+            connection.disconnect(close=True, timeout=budget)
+        except Exception:
+            pass
+        finally:
+            guard.finish()
+    try:
+        # Also reached after a failed LOGOFF: closes the socket and joins the receiver thread.
+        connection.disconnect(close=False)
+    except Exception:
+        pass
+
+
+def _try_smb_login(target_ip: str, username: str, password: str, domain: str = '') -> CredentialProbeResult:
+    """One SMB2/SMB3 session attempt with NTLM. Isolated connection, closed in every path."""
+    try:
+        from smbprotocol.connection import Connection
+        from smbprotocol.session import Session
+    except ImportError:
+        return CredentialProbeResult('smb', ERROR, 'SMB_DEPENDENCY_MISSING')
+    _smb_quiet_loggers()
+    # An empty domain sends no domain part: the server applies its own local or workgroup rules.
+    account = f'{domain}\\{username}' if domain else username
+    connection = Connection(uuid.uuid4(), target_ip, SERVICE_PORTS['smb'])
+    deadline = _SmbDeadline(ATTEMPT_SECONDS, connection)
+    state = {'phase': 'connect'}
+    started = time.monotonic()
+    deadline.start()
+    try:
+        return _smb_exchange(Session, connection, deadline, state, account, password)
+    except Exception as exc:
+        return _smb_failure(exc, state, deadline, started)
+    finally:
+        decided_in_time = deadline.finish()
+        # No LOGOFF after a timeout, nor when no session was established (NO_MATCH, refused, error).
+        logoff = decided_in_time and bool(getattr(connection, 'session_table', None))
+        remaining = started + ATTEMPT_SECONDS - time.monotonic()
+        _smb_cleanup(connection, logoff=logoff, budget=min(SMB_LOGOFF_SECONDS, remaining))
+
+
 def _probe(target_ip: str, candidate: Candidate) -> tuple[CredentialProbeResult, bool]:
     if candidate.service == 'ftp':
         return _try_ftp_login(target_ip, candidate.username, candidate.password), False
     if candidate.service == 'snmp':
         return _try_snmp_community(target_ip, candidate.community), False
+    if candidate.service == 'smb':
+        return _try_smb_login(target_ip, candidate.username, candidate.password, candidate.domain), False
     return _try_ssh_login(target_ip, candidate.username, candidate.password)
 
 

@@ -10,4 +10,7 @@ scapy>=2.5,<3
 cryptography>=44,<47
 paramiko>=5.1,<6
 portalocker>=3,<4
+# smbprotocol is pinned: the SMB attempt deadline shuts the socket down through the internal
+# attribute Tcp._sock (detect/default_creds.py, _SmbDeadline). Re-verify before any upgrade.
+smbprotocol==1.17.0
 pywin32>=308; sys_platform == "win32"

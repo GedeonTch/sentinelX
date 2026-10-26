@@ -9,8 +9,8 @@ MAX_BYTES = 1024 * 1024
 MAX_LINE = 16 * 1024
 MAX_ENTRIES = 500
 KNOWN = frozenset(('ftp', 'snmp', 'ssh', 'telnet', 'http', 'https', 'smb', 'rdp'))
-# SMB stays out of V1: no candidate, no verification path.
-SUPPORTED = frozenset(('ftp', 'snmp', 'ssh'))
+# SMB: explicit --dict candidates only. The built-in catalogue has no SMB candidate.
+SUPPORTED = frozenset(('ftp', 'snmp', 'ssh', 'smb'))
 CATALOG = Path(__file__).parent.parent / 'knowledge' / 'default_credentials.json'
 
 
@@ -111,6 +111,9 @@ def _candidate(row: object) -> Candidate:
             raise DictionaryError('SSH requires ASCII in this version')
         if service == 'ftp' and row['username'].lower() in ('anonymous', 'ftp-anonymous'):
             raise DictionaryError('Anonymous access is not a credential check')
+        if service == 'smb' and any('\\' in row.get(key, '') for key in ('username', 'domain')):
+            # The domain has its own field: DOMAIN\user inside username would be split by the NTLM layer.
+            raise DictionaryError('SMB identity cannot contain a backslash; use the domain field')
     return Candidate(**row)
 
 
@@ -200,6 +203,8 @@ def prepare_candidates(path: Optional[Path], services: Sequence[str],
     selected = tuple(dict.fromkeys(services)) if services else ('ftp', 'snmp')
     if any(s not in SUPPORTED for s in selected):
         raise DictionaryError('Selected service is not supported in this version')
+    if 'smb' in selected and path is None:
+        raise DictionaryError('SMB has no built-in candidates: provide --dict')
     if path is not None and profile is not None:
         raise DictionaryError('A custom dictionary cannot assert catalog provenance')
     candidates = load_dictionary(path) if path is not None else load_catalog(profile)

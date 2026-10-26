@@ -11,6 +11,7 @@ import io
 import json
 import multiprocessing
 import os
+import re
 import socket
 import stat
 import sys
@@ -701,10 +702,10 @@ def test_ssh_without_candidates_in_check_is_not_a_success(monkeypatch, sink):
     assert report.services[0].state == 'not_tested' and sink.record.call_count == 0
 
 
-def test_smb_and_telnet_remain_outside_v1():
+def test_telnet_remains_outside_v1_and_smb_needs_an_explicit_dictionary():
     with pytest.raises(ValueError, match='Unsupported service'):
-        dc.check_default_creds(HOST, SESSION, candidates=[], recorder=Mock(ready=True), services=('smb',))
-    with pytest.raises(DictionaryError, match='not supported'):
+        dc.check_default_creds(HOST, SESSION, candidates=[], recorder=Mock(ready=True), services=('telnet',))
+    with pytest.raises(DictionaryError, match='no built-in candidates'):
         prepare_candidates(None, ('smb',), None)
 
 
@@ -729,11 +730,13 @@ def test_paramiko_api_used_exists():
 
 # --- CLI contract -------------------------------------------------------------------------------
 
-def test_cli_help_lists_ssh_and_not_smb():
+def test_cli_help_lists_ssh_and_smb_as_explicit_services_only():
     result = runner.invoke(cli.app, ['creds_check', '--help'])
-    text = ' '.join(result.output.split())
+    # Rich wraps the option help inside a box: drop the border characters before comparing words.
+    text = ' '.join(re.sub(r'[│╭╮╰╯─]', ' ', result.output).split())
     assert result.exit_code == 0
-    assert 'ftp, snmp or ssh' in text and 'smb' not in text.lower()
+    assert 'ftp, snmp, ssh (password only) or smb (--dict only' in text
+    assert 'telnet' not in text.lower() and 'rdp' not in text.lower()
 
 
 def test_cli_ssh_run_uses_explicit_profile_and_shows_tofu_notice(tmp_path, monkeypatch):

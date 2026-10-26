@@ -368,10 +368,10 @@ def _render_credential_summary(report: CheckReport) -> None:
 def creds_check_cmd(
     target: str = typer.Option(..., "--target", "-t", help="Single authorized IPv4 address."),
     dictionary: Optional[str] = typer.Option(None, "--dict", help="UTF-8 JSON Lines candidate file; replaces the built-in catalog."),
-    service: Optional[List[str]] = typer.Option(None, "--service", help="Repeatable: ftp, snmp or ssh (SSH: password only). Default: ftp and snmp."),
+    service: Optional[List[str]] = typer.Option(None, "--service", help="Repeatable: ftp, snmp, ssh (password only) or smb (--dict only; session authentication only). Default: ftp and snmp."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Applicable built-in product profile; incompatible with --dict."),
 ) -> None:
-    """Check FTP and SNMP (default) or SSH (--service ssh, password only). Accepted secrets go only to the encrypted vault."""
+    """Check FTP and SNMP (default), SSH (--service ssh, password only) or SMB (--service smb with --dict). Accepted secrets go only to the encrypted vault."""
     from pathlib import Path
     from core.credential_vault import VaultError
     from detect.credential_dictionary import DictionaryError, prepare_candidates
@@ -394,6 +394,10 @@ def creds_check_cmd(
                 display("SSH: password only; no command, terminal or session channel is opened. "
                         "On first contact the server host key is accepted and saved in ~/.netlab/ssh_known_hosts "
                         "(this does not verify the server's identity); a changed key blocks the check.")
+            if "smb" in selected:
+                display("SMB: session authentication only (SMB2/SMB3, NTLM, port 445). No share, file, command or "
+                        "enumeration. Candidates come only from --dict; the domain field is optional. "
+                        "Each attempt is bounded by 10 seconds.")
             if profile:
                 display("The selected catalog profile must match this authorized product; "
                         "its applicability is not automatically detected.")

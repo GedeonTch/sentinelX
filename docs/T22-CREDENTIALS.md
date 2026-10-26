@@ -1,8 +1,9 @@
 # T22 — Fondations du dictionnaire, coffre et FTP/SNMP
 
-Ce lot ne rend pas T22 terminé. Services pris en charge : FTP, SNMP et SSH par
-mot de passe (SSH uniquement sur `--service ssh`). SMB, Telnet, HTTP(S) et RDP ne
-sont pas activés. Aucun test automatique n'effectue de connexion à une cible réelle.
+Ce lot ne rend pas T22 terminé. Services pris en charge : FTP, SNMP, SSH par
+mot de passe (SSH uniquement sur `--service ssh`) et SMB par session (SMB uniquement
+sur `--service smb`, avec `--dict`). Telnet, HTTP(S) et RDP ne sont pas activés.
+Aucun test automatique n'effectue de connexion à une cible réelle.
 
 ## Commande historique et autorisation
 
@@ -68,11 +69,94 @@ Seuls les succès d'authentification sont conservés dans un coffre séparé.
 - **Dépendance** : `paramiko>=5.1,<6` (`requirements.txt`). Erreur d'import = message
   explicite, aucun contrôle SSH.
 
+## SMB par session (authentification seule)
+
+- **Explicite** : SMB n'est contrôlé que par `--service smb`. Sans `--service`, seuls
+  FTP et SNMP sont contrôlés. Une confirmation est demandée pour SMB, comme pour
+  les autres services.
+- **Dictionnaire obligatoire** : aucun candidat SMB n'est intégré au catalogue.
+  `--service smb` sans `--dict` est refusé avant l'ouverture du coffre, avec le
+  message « SMB has no built-in candidates: provide --dict ». Un `--dict` sans ligne
+  `smb` pour `--service smb` est refusé de la même façon.
+- **Bibliothèque** : `smbprotocol==1.17.0` (MIT), version épinglée car le contrôle lit
+  `Tcp._sock` (voir « Délai strict »). SMB2 et SMB3, authentification
+  NTLM, port 445. Ne sont pas utilisés : Impacket, pysmb, Kerberos, tickets ou
+  identifiants existants, agent d'authentification, `smbclient`. SMB1 n'est pas
+  pris en charge : une négociation refusée est une `ERROR`, jamais un refus.
+- **Périmètre** : une session authentifiée puis déconnexion. Pas de partage, pas de
+  lecture ou écriture de fichier, pas de commande distante, pas d'énumération.
+  `smb_enum` et ses règles ne sont pas modifiés.
+- **Pas de test anonyme** : un identifiant est toujours requis. Une session invité
+  ou nulle n'est jamais un succès (voir les résultats ci-dessous).
+- **Domaine facultatif** : renseigné, l'identifiant est envoyé sous la forme
+  `DOMAINE\utilisateur` ; vide, seul `utilisateur` est envoyé et le serveur applique
+  ses propres règles (compte local ou groupe de travail). Le budget par compte inclut
+  le domaine : `CORP\bob` et `bob` sont deux comptes. Comme pour FTP, la casse est
+  ignorée pour le budget. Un domaine contenant `\` ou un nom contenant `\` est refusé
+  à la lecture du dictionnaire.
+- **Résultats** :
+  - `SUCCESS` / `AUTHENTICATED` : enregistré dans le coffre ; aucun Finding (un
+    candidat personnalisé n'a pas de provenance qualifiée).
+  - `NO_MATCH` / `AUTH_REJECTED` : LOGON_FAILURE, WRONG_PASSWORD ou NO_SUCH_USER.
+  - `INCONCLUSIVE` / `GUEST_OR_NULL_SESSION` : le serveur a ouvert une session
+    invité ou nulle au lieu de refuser le couple. Ce n'est ni un succès, ni un refus
+    explicite des identifiants : le résultat reste non concluant et n'est pas
+    enregistré. Le rendu du récapitulatif le signale comme `INCONCLUSIVE`.
+  - `LOCKED` / `ACCOUNT_RESTRICTION` : verrouillage ; le contrôle s'arrête.
+  - `INCONCLUSIVE` / `ACCOUNT_STATE` : mot de passe expiré, compte désactivé ou
+    restreint : l'état n'est pas un refus prouvé.
+  - `ERROR` : `SMB_NEGOTIATION_FAILED` (négociation), `SMB_AUTH_NEGOTIATION_FAILED`
+    (échec NTLM), `CONNECTION_CLOSED_DURING_AUTH`, `PROTOCOL_ERROR`,
+    `AUTH_STATUS_UNEXPECTED`. Une erreur n'est jamais un `NO_MATCH`.
+  - `INACCESSIBLE` / `CONNECTION_FAILED` : connexion refusée ou réinitialisée
+    avant la négociation.
+- **Délais** : 10 secondes maximum par tentative (`ATTEMPT_SECONDS`), 35 secondes
+  par service, deux secondes entre départs. Chaque candidat ouvre sa propre
+  connexion, fermée dans un bloc de nettoyage, y compris après échec.
+  - Expiration avant tout envoi de mot de passe (négociation) : `TIMEOUT` /
+    `TIMEOUT_BEFORE_PASSWORD`. Répétée au plus trois tentatives comme les autres
+    services.
+  - Expiration à partir du début de `Session.connect()` : `TIMEOUT` /
+    `TIMEOUT_AFTER_PASSWORD`. Jamais relancée, et le service s'arrête sur cette cible.
+  - Une réponse observée après l'échéance n'est jamais un succès ni un refus.
+- **Délai strict, y compris les écritures** : smbprotocol 1.17 ne donne aucun délai à
+  `Session.connect()`, et son `Tcp.send()` garde un verrou pendant une écriture
+  bloquante, que `Tcp.close()` attend. Le contrôle ferme donc la socket par
+  `shutdown` (sans verrou) à l'échéance : une lecture ou une attente est libérée
+  par la fin de flux, et une écriture bloquée par une erreur d'envoi. Une
+  minuterie interroge la socket jusqu'à la fin de la tentative, car la socket peut
+  n'être créée qu'après l'échéance. Mesures hors suite, avec les vrais délais
+  (10 s) sur loopback : négociation muette à 9,04 s (`TIMEOUT_BEFORE_PASSWORD`),
+  authentification muette à 10,04 s et envoi bloqué à 10,05 s
+  (`TIMEOUT_AFTER_PASSWORD`), sans thread résiduel. Avec `transport.close()`,
+  l'envoi bloqué restait bloqué plus de 40 s. LOGOFF réel mesuré sur loopback
+  (budget de 2 s, session établie sans NTLM) : silencieux, `SUCCESS` à 1,01 s ;
+  écriture bloquée, `SUCCESS` à 2,03 s ; aucun thread résiduel.
+  Dépendance : le contrôle lit `Tcp._sock`, attribut privé de smbprotocol 1.17.0 ;
+  un test de contrat vérifie sa présence, et la version est épinglée pour cette
+  raison. Le comportement de `shutdown` sous Windows n'est pas validé.
+- **Après un timeout** : aucun LOGOFF n'est envoyé ; la socket est fermée et le
+  thread de lecture rejoint.
+- **Nettoyage après décision** (`SUCCESS` ou `INCONCLUSIVE`, session établie) : un
+  LOGOFF est tenté, borné par `SMB_LOGOFF_SECONDS` = 2 s. Ce délai de nettoyage
+  n'est pas un budget de tentative : il est plafonné par le temps restant de la
+  tentative, et il ne modifie aucun budget par compte ou par service. À l'échéance,
+  un garde ferme la socket par `shutdown`, ce qui libère un LOGOFF bloqué. La socket
+  est ensuite fermée et le thread de lecture joint depuis le thread appelant ; le
+  garde ne ferme jamais la socket. Une réponse LOGOFF tardive ou en erreur ne change
+  pas le résultat déjà décidé. Limite résiduelle : le thread de lecture peut fermer
+  la socket en parallèle ; l'erreur `EBADF` qui en résulte est absorbée.
+- **Journaux** : les journaux des bibliothèques `smbprotocol` et `spnego` ne
+  remontent pas à la console ni aux sorties. Aucun mot de passe, identifiant ni
+  message de protocole n'est repris dans les résultats : seuls des codes fixes sont
+  enregistrés.
+
 ## Dictionnaire personnalisé
 
 `--dict` remplace entièrement la base intégrée. JSON Lines UTF-8 : un objet JSON
 par ligne, champs textuels `service`, `username`, `password`, ou `service`,
-`community` pour SNMP. `domain` est réservé aux formats SMB/RDP (non activés).
+`community` pour SNMP. `domain` est facultatif pour SMB (voir la section SMB) ;
+il est réservé à RDP, non activé.
 Les noms de service connus mais non sélectionnés ne déclenchent aucun réseau.
 
 Exemple **synthétique**, pas un identifiant réel :
@@ -167,7 +251,7 @@ Séquentiel : 3 tentatives/service, 2/compte/exécution, 10 globalement. Les bud
 FTP groupent conservativement les variantes de casse pour ne pas permettre leur
 contournement ; les valeurs réellement envoyées et stockées ne sont pas modifiées.
 Pour SNMP : une tentative par communauté/endpoint. Deux secondes entre départs,
-10 secondes maximum par tentative FTP, 30 par service, opérations au plus 5 s.
+10 secondes maximum par tentative FTP, 35 par service, opérations au plus 5 s.
 Pas de retries cachés. Le lecteur FTP impose une échéance même sur flux lent.
 Une authentification réussie est enregistrée immédiatement, puis les autres
 candidats de cette identité sont ignorés. La même clé conservatrice `casefold`
@@ -311,6 +395,19 @@ ne doit apparaître dans Findings, DB de session, logs ou exports HTML/JSON. Seu
 verrouillage, flux lent), agents SNMPv1 (noSuchName, erreurs, réponses tardives),
 Windows non administrateur (ACL, deux processus, restauration), Linux terminal
 headless. Ces validations labo ne sont pas exécutées par les tests unitaires.
+
+SMB : les tests (`tests/test_smb_creds.py`) utilisent des objets simulés qui
+reproduisent le comportement mesuré sur loopback ; aucun serveur SMB n'est lancé.
+L'écriture bloquée est testée avec la vraie classe `Tcp` (paire de sockets locale) ;
+le LOGOFF bloqué, avec un transport simulé qui reproduit le verrou d'écriture de
+smbprotocol. Les deux sont mesurés sur loopback, jamais contre un vrai serveur SMB.
+Le LOGOFF sans réponse, après succès et après session invité, est testé de façon
+déterministe, avec la durée de retour mesurée.
+Limites : dépendance à `Tcp._sock`, épinglée à smbprotocol 1.17.0 (test de contrat) ;
+comportement de `shutdown` sous Windows non validé ; Python 3.11 non testé.
+À valider en laboratoire sur un vrai serveur (Windows Server, Samba) : refus NTLM,
+compte verrouillé, session invité, signature et chiffrement SMB 3, et délais réels
+sur réseau lent.
 
 T22 n'est pas terminé. Les nouveaux protocoles, la maintenance avancée du coffre
 et les enrichissements supplémentaires du catalogue attendent la revue de ce lot.
