@@ -390,9 +390,16 @@ def test_render_failure_does_not_replace_original(pipeline, monkeypatch, origina
     monkeypatch.setattr(discovery, "fingerprint", Mock(side_effect=original))
     render = Mock(side_effect=ValueError("render failure must not escape"))
     monkeypatch.setattr(cli, "_render_scan_summary", render)
-    with pytest.raises(type(original)) as caught:
-        cli.scan(target=IPS[0], profile="normal", session=SID, yes=True)
-    assert caught.value is original
+    if type(original) is RuntimeError:
+        with pytest.raises(RuntimeError) as caught:
+            cli.scan(target=IPS[0], profile="normal", session=SID, yes=True)
+        assert caught.value is original
+    else:
+        # T25: an interruption is 130 on the scan path, and a rendering failure
+        # must not replace it. typer.Abort subclasses RuntimeError: compare exact types.
+        with pytest.raises(typer.Exit) as caught:
+            cli.scan(target=IPS[0], profile="normal", session=SID, yes=True)
+        assert caught.value.exit_code == 130
     render.assert_called_once()
     assert db.get_session(SID)["status"] == ("failed" if type(original) is RuntimeError else "partial")
 

@@ -651,7 +651,13 @@ def scan(
     ))
 
     if not yes:
-        confirmed = typer.confirm(f"Start full scan on {target} with profile '{profile}'?")
+        # Single consent for the whole scan. It also covers host discovery,
+        # which therefore never asks again (T25).
+        try:
+            confirmed = typer.confirm(f"Start full scan on {target} with profile '{profile}'?")
+        except (KeyboardInterrupt, typer.Abort):
+            display("[yellow]Scan interrompu avant tout trafic : aucune session créée.[/yellow]")
+            raise typer.Exit(code=130) from None
         if not confirmed:
             display("[yellow]Scan cancelled.[/yellow]")
             raise typer.Exit(code=0)
@@ -665,7 +671,8 @@ def scan(
         except Exception:
             # Display errors must not replace the original interruption.
             pass
-        raise
+        # Ctrl+C is 130 on the scan path, including interrupted prompts (T25).
+        raise typer.Exit(code=130) from None
     except Exception:
         try:
             if result.overall_status == "FAILED":
@@ -686,6 +693,30 @@ def scan(
 
     if result.overall_status == "FAILED":
         raise typer.Exit(code=1)
+
+
+def _host_sort_key(value: str):
+    """Numeric IP order (192.0.2.9 before 192.0.2.10); non-IP values last."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return (9, 0, str(value))
+    return (address.version, int(address), "")
+
+
+def _confirm_batch_scan(module: str, ips: List[str], ports: str, profile: str) -> bool:
+    """One consent for every active host of one scanner module (T25).
+
+    Aborts raised by Ctrl+C propagate to the pipeline, which records the
+    interrupted operations and stops.
+    """
+    display(
+        f"[bold]{module}[/bold] — {len(ips)} hôte(s) concerné(s) : "
+        f"{escape(', '.join(ips))}"
+    )
+    return typer.confirm(
+        f"[{module}] Lancer le scan sur ces hôtes (ports : {ports} ; profil : {profile}) ?"
+    )
 
 
 def _run_pipeline(
@@ -742,11 +773,15 @@ def _run_pipeline(
                 DiscoveryFailed,
                 fingerprint,
             )
-            host_findings = fingerprint(target, session_id, auto_confirm=auto_confirm)
+            # The global consent (or --yes) already covers discovery: no second prompt.
+            host_findings = fingerprint(target, session_id, auto_confirm=True)
             if host_findings:
                 discover_status = "OK"
                 persist_findings(host_findings)
-                active_ips = list({f.target_ip for f in host_findings if f.target_ip})
+                active_ips = sorted(
+                    {f.target_ip for f in host_findings if f.target_ip},
+                    key=_host_sort_key,
+                )
                 result.add("discover", "ok", f"{len(active_ips)} host(s) found")
             else:
                 discover_status = "EMPTY"
@@ -776,13 +811,31 @@ def _run_pipeline(
         all_tcp_findings = []
         if active_ips:
             from detect.tcp_scan import (
+                DEFAULT_PORTS as TCP_PORTS,
                 TcpScanCancelled,
                 TcpScanFailed,
                 tcp_scan,
             )
-            for ip in active_ips:
+            try:
+                tcp_accepted = auto_confirm or _confirm_batch_scan(
+                    "tcp_scan", active_ips, TCP_PORTS, profile,
+                )
+            except (KeyboardInterrupt, typer.Abort):
+                # Interrupted at the prompt: no TCP host was scanned, and the
+                # scan stops before UDP, which is therefore not executed either.
+                for ip in active_ips:
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_CANCELLED)
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_CANCELLED)
+                raise
+            if not tcp_accepted:
+                tcp_cancelled = len(active_ips)
+                for ip in active_ips:
+                    record_outcome(ip, "tcp_scan", SCAN_OUTCOME_CANCELLED)
+            tcp_targets = active_ips if tcp_accepted else []
+            for ip in tcp_targets:
                 try:
-                    findings = tcp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
+                    # The batch consent above covers every host: no per-host prompt.
+                    findings = tcp_scan(ip, session_id, profile=profile, auto_confirm=True)
                 except TcpScanFailed:
                     tcp_fail += 1
                     tcp_failed_hosts.append(ip)
@@ -829,13 +882,30 @@ def _run_pipeline(
         all_udp_findings = []
         if active_ips:
             from detect.udp_scan import (
+                DEFAULT_UDP_PORTS as UDP_PORTS,
                 UdpScanCancelled,
                 UdpScanFailed,
                 udp_scan,
             )
-            for ip in active_ips:
+            # Separate consent: a refused TCP batch does not decide for UDP.
+            try:
+                udp_accepted = auto_confirm or _confirm_batch_scan(
+                    "udp_scan", active_ips, UDP_PORTS, profile,
+                )
+            except (KeyboardInterrupt, typer.Abort):
+                # Interrupted at the prompt: no UDP probe was sent.
+                for ip in active_ips:
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_CANCELLED)
+                raise
+            if not udp_accepted:
+                udp_cancelled = len(active_ips)
+                for ip in active_ips:
+                    record_outcome(ip, "udp_scan", SCAN_OUTCOME_CANCELLED)
+            udp_targets = active_ips if udp_accepted else []
+            for ip in udp_targets:
                 try:
-                    findings = udp_scan(ip, session_id, profile=profile, auto_confirm=auto_confirm)
+                    # The batch consent above covers every host: no per-host prompt.
+                    findings = udp_scan(ip, session_id, profile=profile, auto_confirm=True)
                 except UdpScanFailed:
                     udp_fail += 1
                     udp_failed_hosts.append(ip)

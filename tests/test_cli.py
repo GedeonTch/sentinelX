@@ -202,19 +202,21 @@ class TestScan:
             scan_args = ["scan", "--target", target, "--profile", profile]
             if use_yes:
                 scan_args.append("--yes")
+            # Interactive: global consent, then one batch consent per scanner module.
             result = runner.invoke(
                 app,
                 scan_args,
-                input="" if use_yes else "y\n",
+                input="" if use_yes else "y\ny\ny\n",
             )
 
         assert result.exit_code == 0, result.output
         expected_status = "PARTIAL" if knowledge_base_side_effect else "SUCCESS"
         assert f"RÉSULTAT : {expected_status}" in result.output
         session_id = fingerprint.call_args.args[1]
-        fingerprint.assert_called_once_with(target, session_id, auto_confirm=use_yes)
-        tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=use_yes)
-        udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=use_yes)
+        # Discovery is covered by the global consent (or --yes): never asks again.
+        fingerprint.assert_called_once_with(target, session_id, auto_confirm=True)
+        tcp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=True)
+        udp_scan.assert_called_once_with("192.168.1.1", session_id, profile=profile, auto_confirm=True)
         if expose_mocks:
             return result, knowledge_base, score_findings, enrich_findings, detect_misconfigs, save_findings
         return result, knowledge_base, score_findings
@@ -537,7 +539,8 @@ class TestScan:
             result = runner.invoke(
                 app,
                 ["scan", "--target", "192.168.1.0/24"],
-                input="y\n",
+                # Global consent, then one batch consent for TCP and one for UDP.
+                input="y\ny\ny\n",
             )
             if expose_mocks:
                 return result, tcp_scan, udp_scan, close_session
@@ -738,14 +741,17 @@ class TestScan:
         assert explained[1].explanation == second_explanation
 
     def test_scan_shows_confirmation_prompt(self):
-        """The CLI must ask for confirmation before any active scan."""
+        """The global prompt is shown verbatim, before any traffic, and refusal stops the scan."""
         result = runner.invoke(
             app,
             ["scan", "--target", "192.168.1.1"],
             input="n\n",
         )
-        # Prompt must appear before cancellation
-        assert "?" in result.output or "confirm" in result.output.lower() or "cancel" in result.output.lower()
+        prompt = "Start full scan on 192.168.1.1 with profile 'normal'? [y/N]"
+        assert prompt in result.output
+        assert result.output.index(prompt) < result.output.index("Scan cancelled.")
+        assert result.exit_code == 0
+        assert "Session:" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -851,7 +857,8 @@ class TestScanSummary:
                 patch("core.risk_scorer.get_global_score", return_value=70.0)
             )
 
-            produced = _run_pipeline("192.168.1.1", "normal", None, False, result)
+            # --yes: this test is about persistence failures, not confirmation prompts.
+            produced = _run_pipeline("192.168.1.1", "normal", None, True, result)
 
         assert len(produced) == 2
         assert finding.id in {item.id for item in produced}
