@@ -35,6 +35,7 @@ from rich.text import Text
 from core.dependencies import (
     DependencyCheck,
     check_environment,
+    check_optional_tools,
     check_status,
     environment_ready,
 )
@@ -232,6 +233,7 @@ def doctor() -> None:
     """Verify that Python, nmap, enum4linux, and ~/.netlab/ are ready for a scan."""
     checks = check_environment()
     _render_doctor_report(checks)
+    _render_optional_tools(check_optional_tools())
     if not environment_ready(checks):
         display(
             "[red]Environment is not ready.[/red] "
@@ -257,6 +259,21 @@ def _render_doctor_report(checks: List[DependencyCheck]) -> None:
     display(table)
 
 
+def _render_optional_tools(items) -> None:
+    """Optional tools never fail the check; a missing one shows its effect."""
+    table = Table(title="Outils optionnels (reconnaissance passive)", box=box.ROUNDED)
+    table.add_column("Name", style="bold")
+    table.add_column("Present")
+    table.add_column("Si absent")
+    for check, effect in items:
+        table.add_row(
+            check.name,
+            "yes" if check.present else "no",
+            "—" if check.present else escape(effect),
+        )
+    display(table)
+
+
 def _status_markup(status: str) -> str:
     mapping = {
         "ok":            "[green]ok[/green]",
@@ -278,16 +295,166 @@ def _standalone_session_id() -> str:
 
 @app.command()
 def whois(
-    ip: str = typer.Argument(..., help="IP address or domain to enumerate via DNS/WHOIS."),
+    target: str = typer.Argument(..., help="Domaine ou IPv4 : enregistrements DNS, PTR et données d'enregistrement (RDAP + WHOIS)."),
 ) -> None:
-    """Passive DNS/WHOIS enumeration (dns_enum). Findings are displayed, not saved."""
-    from recon.dns_enum import dns_enum
+    """Passive DNS and registration lookup. Findings are displayed, not saved."""
+    from recon.dns_enum import dns_report, target_kind
 
-    findings = dns_enum(ip, _standalone_session_id())
-    if findings:
-        _render_findings_table(findings)
+    try:
+        target_kind(target)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="TARGET") from None
+    try:
+        report = dns_report(target, _standalone_session_id())
+    except KeyboardInterrupt:
+        display("[yellow]whois: interrompu.[/yellow]")
+        raise typer.Exit(code=130) from None
+    _render_domain_report(report)
+
+
+def _render_domain_report(report) -> None:
+    """Render a DomainReport. Domain/IP are always visible; no raw data is printed."""
+    from recon.dns_enum import DNS_OK, DNS_STATUS_LABELS
+    from recon.registration import field_rows, SOURCE_RDAP
+
+    max_values = 6
+    display(f"[bold]Cible :[/bold] {escape(report.target)} ({report.kind})")
+
+    dns_table = Table(title="Enregistrements DNS", box=box.ROUNDED)
+    dns_table.add_column("Type", style="bold")
+    dns_table.add_column("Statut")
+    dns_table.add_column("Valeurs")
+    for outcome in report.outcomes:
+        status = DNS_STATUS_LABELS.get(outcome.status, outcome.status)
+        if outcome.status == DNS_OK:
+            status += " — autoritative (AA)" if outcome.authoritative else " — non autoritative"
+        values = [escape(v) for v in outcome.values[:max_values]]
+        if len(outcome.values) > max_values:
+            values.append(f"… +{len(outcome.values) - max_values} autres")
+        dns_table.add_row(outcome.record_type, escape(status), "\n".join(values) or "—")
+    display(dns_table)
+
+    if report.kind == "ip":
+        if report.ptr:
+            ptr_table = Table(title="PTR", box=box.ROUNDED)
+            ptr_table.add_column("Adresse")
+            ptr_table.add_column("Nom")
+            for ip, host in report.ptr:
+                ptr_table.add_row(escape(ip), escape(host))
+            display(ptr_table)
     else:
-        display(f"[yellow]No DNS/WHOIS data for {ip}.[/yellow]")
+        if report.ptr:
+            ptr_table = Table(title="PTR des adresses A", box=box.ROUNDED)
+            ptr_table.add_column("Adresse")
+            ptr_table.add_column("Nom")
+            for ip, host in report.ptr:
+                ptr_table.add_row(escape(ip), escape(host))
+            display(ptr_table)
+        else:
+            display("PTR des adresses A : aucun nom obtenu (pas de réponse, timeout ou absence de donnée).")
+
+    if report.registration is None:
+        return
+
+    summary = report.registration
+    reg_table = Table(title=f"Enregistrement de {escape(summary.domain)}", box=box.ROUNDED)
+    reg_table.add_column("Champ", style="bold")
+    reg_table.add_column("Valeur")
+    reg_table.add_column("Source")
+    for label, value, source in field_rows(summary):
+        reg_table.add_row(escape(label), escape(value), escape(source))
+    display(reg_table)
+
+    sources_line = " ; ".join(f"{src.name} : {src.label}" for src in summary.sources)
+    display(f"Sources : {escape(sources_line)}")
+    for divergence in summary.divergences:
+        display(f"[yellow]Divergence : {escape(divergence)}[/yellow]")
+    if summary.primary_source is None:
+        display("[yellow]Aucune source n'a répondu avec des données : l'absence de réponse ne prouve pas que le domaine n'existe pas.[/yellow]")
+    elif summary.primary_source != SOURCE_RDAP:
+        display("[yellow]Données issues de WHOIS seul (RDAP non exploitable) : à confirmer.[/yellow]")
+
+
+@app.command("passive-recon")
+def passive_recon_cmd(
+    network: str = typer.Option("", "--network", "-n", help="Filtre IPv4 : CIDR (192.168.1.0/24), adresse, ou préfixe (192.168.1). Vide = tout."),
+) -> None:
+    """Local passive reconnaissance: ARP cache, /etc/hosts, optional mDNS (asks first).
+
+    No active scan is performed. mDNS sends multicast queries on the local
+    network and runs only after explicit confirmation.
+    """
+    from recon.passive_recon import collect_passive, parse_network_filter
+
+    try:
+        parse_network_filter(network)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--network") from None
+
+    mdns_allowed = _confirm_mdns()
+    try:
+        report = collect_passive(network, _standalone_session_id(), mdns_allowed=mdns_allowed)
+    except KeyboardInterrupt:
+        display("[yellow]passive-recon: interrompu.[/yellow]")
+        raise typer.Exit(code=130) from None
+    _render_passive_report(report)
+
+
+def _confirm_mdns() -> bool:
+    """Warn, then ask. Refusal is the default; no terminal means no mDNS."""
+    import sys
+    from recon.passive_recon import MDNS_WARNING
+
+    display(f"[yellow]{escape(MDNS_WARNING)}[/yellow]")
+    if not sys.stdin.isatty():
+        display("[yellow]Pas de terminal interactif : mDNS non lancé.[/yellow]")
+        return False
+    try:
+        return typer.confirm("Lancer avahi-browse maintenant ?", default=False)
+    except (KeyboardInterrupt, typer.Abort):
+        display("[yellow]passive-recon: interrompu.[/yellow]")
+        raise typer.Exit(code=130) from None
+
+
+def _render_passive_report(report) -> None:
+    from recon.passive_recon import SOURCE_MDNS, STATUS_OK
+
+    display(f"[bold]Filtre réseau :[/bold] {escape(report.network)}")
+    table = Table(title="Sources passives", box=box.ROUNDED)
+    table.add_column("Source", style="bold")
+    table.add_column("Statut")
+    table.add_column("Entrées", justify="right")
+    table.add_column("Détail")
+    for source in report.sources:
+        detail = source.detail
+        if source.name == SOURCE_MDNS and source.status == "skipped":
+            detail = "avahi-browse non lancé (refus ou confirmation absente)"
+        table.add_row(
+            escape(source.label),
+            escape(source.status_label),
+            str(source.count) if source.status == STATUS_OK else "—",
+            escape(detail or "—"),
+        )
+    display(table)
+
+    if report.ignored_ipv6:
+        display(f"IPv6 ignorées (non ciblées) : {report.ignored_ipv6}")
+    if report.findings:
+        findings_table = Table(title=f"Entrées locales ({len(report.findings)})", box=box.ROUNDED)
+        findings_table.add_column("Adresse", no_wrap=True)
+        findings_table.add_column("Source")
+        findings_table.add_column("Détail", overflow="fold")
+        for finding in report.findings:
+            findings_table.add_row(
+                escape(finding.target_ip or "—"),
+                escape(finding.target_service or "—"),
+                escape(f"{finding.service_version or '—'}\n{finding.evidence.raw}"),
+            )
+        display(findings_table)
+    elif any(s.status != STATUS_OK and s.status != "skipped" for s in report.sources):
+        display("[yellow]Aucune entrée exploitable : certaines sources n'ont pas pu être lues (voir statuts).[/yellow]")
+    else:
+        display("Aucune entrée locale pour ce filtre.")
 
 
 @app.command("smb_enum")

@@ -41,7 +41,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 
 | Étape | Rôle | Modules V1 principaux |
 |---|---|---|
-| DISCOVER | Identifier les actifs et services exposés | `device_fingerprint`, `dns_enum`, `passive_recon` |
+| DISCOVER | Identifier les actifs et services exposés | `device_fingerprint` (pipeline) ; `dns_enum` et `passive_recon` sont des commandes autonomes, non appelées par `scan` |
 | DETECT | Trouver les faiblesses et mauvaises configurations | `tcp_scan`, `udp_scan`, `service_detection`, `smb_enum`, `misconfig_detection`, `default_creds` (FTP, SNMP et SSH par mot de passe sur sélection explicite) |
 | ASSESS | Calculer le score de risque de chaque Finding | `risk_scorer` (formule inspirée CVSS, documentée), `assessment` |
 | EXPLAIN | Produire une explication en 3 angles | Base de connaissances locale (`knowledge/`) ; IA en V2 uniquement |
@@ -56,7 +56,7 @@ Dernier commit de référence : `22831668` (branche `a4-arena`). Le workflow Git
 | Domaine | Statut | Détail |
 |---|---|---|
 | Contrat Finding et base SQLite par session | ✅ Implémenté | `core/finding.py`, `core/database.py` |
-| Dépendances et `netlab doctor` | ✅ Implémenté | `core/dependencies.py` vérifie `nmap` et `enum4linux-ng` |
+| Dépendances et `netlab doctor` | ✅ Implémenté | `core/dependencies.py` vérifie `nmap` et `enum4linux-ng` ; `arp`, `ip` et `avahi-browse` sont optionnels et signalés avec leur effet |
 | Scoring | ✅ Implémenté | `core/risk_scorer.py` |
 | CLI | ✅ Implémenté | `cli.py` : scan, findings, report, sentinel, creds, config, cleanup |
 | Reconnaissance et découverte | ✅ Implémenté | `recon/` |
@@ -79,9 +79,10 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 
 | Commande | Rôle |
 |---|---|
-| `netlab doctor` | Vérifie l'environnement : Python, `nmap`, `enum4linux-ng` |
+| `netlab doctor` | Vérifie l'environnement : Python, `nmap`, `enum4linux-ng` (requis) ; `arp`, `ip`, `avahi-browse` (optionnels, effet affiché si absents) |
 | `netlab scan` | Lance le scan d'une cible autorisée, avec confirmation avant trafic actif |
-| `netlab whois <ip ou domaine>` | Enumération DNS/WHOIS passive, affichage seulement |
+| `netlab whois <ip ou domaine>` | Enregistrements DNS (A, MX, NS, TXT, CNAME), PTR, et données d'enregistrement RDAP + WHOIS ; affichage seulement, aucune donnée brute |
+| `netlab passive-recon [--network <CIDR, ip ou 192.168.1>]` | Sources locales : cache ARP (`arp -n`, repli `ip neigh`) et `/etc/hosts`. mDNS (`avahi-browse`) seulement après confirmation, refus par défaut. Aucun scan actif |
 | `netlab smb_enum --target <ip>` | Enumération SMB via `enum4linux-ng`, avec confirmation |
 | `netlab creds_check --target <ip>` | Vérification explicite des identifiants par défaut (`--service ftp\|snmp\|ssh`, `--dict`, `--profile`) ; SSH par mot de passe seulement sur `--service ssh`, premier contact accepté et mémorisé (TOFU), changement de clé bloquant |
 | `netlab creds list` / `netlab creds show <id>` | Consultation du coffre chiffré ; `show` exige une confirmation et un terminal interactif |
@@ -92,7 +93,7 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 
 ## Identifiants par défaut (T22)
 
-- **Périmètre actuel** : FTP, SNMP et SSH par mot de passe (`--service ssh` uniquement ; aucune commande distante). SMB n'est pas encore implémenté. Telnet, HTTP, HTTPS et RDP sont hors V1. Détails : `docs/T22-CREDENTIALS.md`.
+- **Périmètre actuel** : FTP, SNMP, SSH par mot de passe (`--service ssh` uniquement ; aucune commande distante) et SMB 2/3 avec NTLM (`--service smb` uniquement, session seule, sans partage ni énumération). SMB exige `--dict` : aucun candidat n'est intégré, et sans dictionnaire la commande affiche un message explicite. Telnet, HTTP, HTTPS et RDP sont hors V1. Détails : `docs/T22-CREDENTIALS.md`.
 - **Cible** : une seule adresse IPv4 par exécution. Chaque service demande sa propre confirmation ; il n'existe pas d'option `--yes` pour cette commande.
 - **Budgets** : 3 tentatives par service, 2 par compte (1 pour SNMP), 10 au total. Intervalle de 2 secondes entre tentatives. Délai maximal de 10 secondes par tentative FTP et de 5 secondes par requête SNMP.
 - **Coffre chiffré** : `~/.netlab/credentials/vault.enc`, chiffrement AES-256-GCM, dérivation de clé scrypt. Seuls les identifiants acceptés y sont enregistrés. La phrase de passe doit faire au moins 20 caractères, et l'écriture du coffre est vérifiée avant tout trafic réseau.
@@ -112,7 +113,7 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 - **Persistance** : SQLite (stdlib), un fichier par session
 - **Coffre chiffré (T22)** : `cryptography`, `portalocker`
 - **Autres dépendances** (`requirements.txt`) : `scapy`, `dnspython`, `python-whois`, `jinja2` (rapports HTML), `pyyaml`, `packaging`
-- **Outils externes** : `nmap`, `enum4linux-ng`, vérifiés par `netlab doctor`
+- **Outils externes** : `nmap`, `enum4linux-ng`, vérifiés par `netlab doctor` ; optionnels : `arp` (ou `ip`) et `avahi-browse` pour `passive-recon`. Détails de la reconnaissance passive et de `whois` : `docs/T24-RECON.md`
 
 ## Valeurs
 

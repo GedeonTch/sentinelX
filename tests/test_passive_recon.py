@@ -2,415 +2,332 @@
 tests/test_passive_recon.py — Unit tests for recon/passive_recon.py
 
 Strategy:
-- ZERO real system calls — subprocess and file reads are always mocked
-- Tests cover: ARP parsing, hosts file parsing, avahi parsing,
-  network prefix filtering, loopback exclusion, incomplete ARP entries,
-  Finding invariants (risk_score=None, explanation=None, confidence rules)
+- ZERO system calls: subprocess.run is replaced by a fake, /etc/hosts is a tmp file.
+- Covers: network filter (P1), arp/ip neigh parsing and fallback, hosts file,
+  avahi field order and grouping (P2), mDNS consent gate, per-source statuses.
 """
+
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
 
-from core.finding import (
-    Finding,
-    Category,
-    Severity,
-    Confidence,
-    Exposure,
-    FindingStatus,
-)
+from core.finding import Confidence, Exposure
 from recon.passive_recon import (
-    passive_recon,
-    _arp_table,
+    MDNS_COMMAND,
+    SOURCE_ARP,
+    SOURCE_HOSTS,
+    SOURCE_MDNS,
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
+    _in_filter,
     _parse_arp_output,
-    _arp_findings,
-    _read_hosts_file,
-    _hosts_file_findings,
-    _mdns_lookup,
     _parse_avahi_output,
-    _mdns_findings,
+    _parse_ip_neigh_output,
+    _read_hosts_file,
+    collect_passive,
+    parse_network_filter,
+    passive_recon,
 )
 
 
-# ---------------------------------------------------------------------------
-# Fixtures — static test data
-# ---------------------------------------------------------------------------
+def fake_run(outputs):
+    """Build a subprocess.run fake. Missing tools raise FileNotFoundError.
 
-ARP_OUTPUT_VALID = """\
+    outputs maps the executable name to: a stdout string (exit 0), a
+    (returncode, stdout) tuple, or an exception instance to raise.
+    """
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        name = cmd[0]
+        if name not in outputs:
+            raise FileNotFoundError(name)
+        value = outputs[name]
+        if isinstance(value, BaseException):
+            raise value
+        if isinstance(value, tuple):
+            code, stdout = value
+        else:
+            code, stdout = 0, value
+        return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr="")
+
+    run.calls = calls
+    return run
+
+
+ARP_OUT = """\
 Address                  HWtype  HWaddress           Flags Mask            Iface
-192.168.1.1              ether   aa:bb:cc:dd:ee:01   C                     enp0s25
-192.168.1.26             ether   aa:bb:cc:dd:ee:02   C                     enp0s25
-192.168.1.99             ether   (incomplete)         C                     enp0s25
+192.168.1.1              ether   aa:bb:cc:dd:ee:01   C                     eth0
+192.168.1.9              (incomplete)                                      eth0
+192.168.1.7              ether   ff:ff:ff:ff:ff:ff   C                     eth0
+192.168.10.5             ether   aa:bb:cc:dd:ee:05   C                     eth0
 """
 
-ARP_OUTPUT_WITH_BROADCAST = """\
-192.168.1.1              ether   aa:bb:cc:dd:ee:01   C                     enp0s25
-192.168.1.255            ether   ff:ff:ff:ff:ff:ff   C                     enp0s25
+IP_NEIGH_OUT = """\
+192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:01 REACHABLE
+192.168.1.2 dev eth0  FAILED
+192.168.1.3 dev eth0 lladdr aa:bb:cc:dd:ee:03 STALE
 """
 
-ARP_OUTPUT_EMPTY = "Address   HWtype  HWaddress\n"
-
-HOSTS_CONTENT = """\
-# This is a comment
-127.0.0.1   localhost
-127.0.1.1   mymachine
-::1         localhost ip6-localhost
-
-192.168.1.10    lab-server lab-server.local
-192.168.1.20    win-dc
-"""
-
-AVAHI_OUTPUT = """\
-+;eth0;IPv4;MyPrinter;_ipp._tcp;local
-=;eth0;IPv4;MyPrinter;_ipp._tcp;local;myprinter.local;192.168.1.50;631;
-=;eth0;IPv4;MacBook;_afpovertcp._tcp;local;macbook.local;192.168.1.60;548;
-+;eth0;IPv4;Unresolved;_ssh._tcp;local
-"""
-
-AVAHI_OUTPUT_EMPTY = ""
+AVAHI_OUT = (
+    "=;eth0;IPv4;My\\032Printer;_ipp._tcp;local;printer.local;192.168.1.50;631;\n"
+    "=;eth0;IPv4;My\\032Printer;_http._tcp;local;printer.local;192.168.1.50;80;\n"
+    "=;eth0;IPv6;MyPrinter;_ipp._tcp;local;printer.local;fe80::1;631;\n"
+    "+;eth0;IPv4;Unresolved;_ssh._tcp;local\n"
+    "=;incomplete\n"
+)
 
 
-# ---------------------------------------------------------------------------
-# _parse_arp_output
-# ---------------------------------------------------------------------------
-
-class TestParseArpOutput:
-    def test_parses_two_valid_entries(self):
-        result = _parse_arp_output(ARP_OUTPUT_VALID)
-        assert "192.168.1.1" in result
-        assert result["192.168.1.1"] == "aa:bb:cc:dd:ee:01"
-        assert "192.168.1.26" in result
-
-    def test_incomplete_entry_not_parsed(self):
-        """'(incomplete)' MAC does not match the regex — correctly excluded."""
-        result = _parse_arp_output(ARP_OUTPUT_VALID)
-        assert "192.168.1.99" not in result
-
-    def test_empty_output_returns_empty_dict(self):
-        result = _parse_arp_output(ARP_OUTPUT_EMPTY)
-        assert result == {}
-
-    def test_empty_string_returns_empty_dict(self):
-        result = _parse_arp_output("")
-        assert result == {}
-
-    def test_mac_stored_in_lowercase(self):
-        output = "192.168.1.1   ether   AA:BB:CC:DD:EE:FF   C   eth0\n"
-        result = _parse_arp_output(output)
-        assert result["192.168.1.1"] == "aa:bb:cc:dd:ee:ff"
+@pytest.fixture
+def hosts_file(tmp_path) -> Path:
+    path = tmp_path / "hosts"
+    path.write_text(
+        "127.0.0.1 localhost\n"
+        "192.168.1.10 nas.lan # file server\n"
+        "192.168.1.10 backup.lan\n"
+        "::1 localhost6\n"
+        "fe80::5 v6host.lan\n"
+        "10.0.0.8 router.lan\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 # ---------------------------------------------------------------------------
-# _arp_table
+# P1 — network filter
 # ---------------------------------------------------------------------------
 
-class TestArpTable:
-    def test_calls_arp_n(self):
-        mock_result = MagicMock()
-        mock_result.stdout = ARP_OUTPUT_VALID
-        with patch("recon.passive_recon.subprocess.run", return_value=mock_result) as mock_run:
-            _arp_table()
-        cmd = mock_run.call_args[0][0]
-        assert "arp" in cmd
-        assert "-n" in cmd
+class TestNetworkFilter:
+    def test_cidr_is_respected(self):
+        network = parse_network_filter("192.168.1.0/24")
+        assert _in_filter("192.168.1.50", network)
+        assert not _in_filter("192.168.2.50", network)
 
-    def test_returns_empty_on_exception(self):
-        with patch("recon.passive_recon.subprocess.run",
-                   side_effect=Exception("arp not found")):
-            result = _arp_table()
-        assert result == {}
+    def test_legacy_prefix_does_not_match_neighbouring_octet(self):
+        """Regression: startswith('192.168.1') wrongly accepted 192.168.10.5."""
+        network = parse_network_filter("192.168.1")
+        assert _in_filter("192.168.1.5", network)
+        assert not _in_filter("192.168.10.5", network)
 
+    def test_single_address_and_empty_filter(self):
+        assert _in_filter("10.0.0.1", parse_network_filter("10.0.0.1"))
+        assert not _in_filter("10.0.0.2", parse_network_filter("10.0.0.1"))
+        assert parse_network_filter("") is None
+        assert parse_network_filter("   ") is None
+        assert _in_filter("8.8.8.8", None)
 
-# ---------------------------------------------------------------------------
-# _arp_findings
-# ---------------------------------------------------------------------------
+    @pytest.mark.parametrize("value", [
+        "192.168.1.5/24",   # host bits set
+        "192.168.1.300",    # octet out of range
+        "10.0.0.0/33",      # bad prefix
+        "192.168.1.0/",     # truncated
+        "abc",              # not an address
+        "fe80::/10",        # IPv6 is not a filter target
+        "::1",
+    ])
+    def test_invalid_values_are_rejected(self, value):
+        with pytest.raises(ValueError):
+            parse_network_filter(value)
 
-class TestArpFindings:
-    def test_returns_findings_for_matching_prefix(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01",
-                                 "192.168.1.26": "aa:bb:cc:dd:ee:02"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert len(findings) == 2
-
-    def test_filters_by_network_prefix(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01",
-                                 "10.0.0.1": "ff:ee:dd:cc:bb:aa"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert len(findings) == 1
-        assert findings[0].target_ip == "192.168.1.1"
-
-    def test_empty_prefix_returns_all(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01",
-                                 "10.0.0.1": "ff:ee:dd:cc:bb:aa"}):
-            findings = _arp_findings("", "session-test")
-
-        assert len(findings) == 2
-
-    def test_excludes_broadcast_mac(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.255": "ff:ff:ff:ff:ff:ff"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings == []
-
-    def test_excludes_incomplete_entries(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.99": "(incomplete)"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings == []
-
-    def test_finding_confidence_is_confirmed(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings[0].confidence == Confidence.CONFIRMED
-
-    def test_finding_module_is_passive_recon(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings[0].module == "passive_recon"
-
-    def test_finding_category_is_network(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings[0].category == Category.NETWORK
-
-    def test_finding_risk_score_is_none(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings[0].risk_score is None
-
-    def test_finding_explanation_is_none(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert findings[0].explanation is None
-
-    def test_finding_evidence_contains_mac(self):
-        with patch("recon.passive_recon._arp_table",
-                   return_value={"192.168.1.1": "aa:bb:cc:dd:ee:01"}):
-            findings = _arp_findings("192.168.1", "session-test")
-
-        assert "aa:bb:cc:dd:ee:01" in findings[0].evidence.raw
+    def test_ipv6_addresses_never_match(self):
+        assert not _in_filter("fe80::1", None)
+        assert not _in_filter("2001:db8::1", parse_network_filter("10.0.0.0/8"))
 
 
 # ---------------------------------------------------------------------------
-# _read_hosts_file
+# ARP / neighbour cache parsing
 # ---------------------------------------------------------------------------
 
-class TestReadHostsFile:
-    def test_parses_valid_hosts_file(self, tmp_path):
-        hosts = tmp_path / "hosts"
-        hosts.write_text(HOSTS_CONTENT)
-        result = _read_hosts_file(str(hosts))
+class TestNeighbourParsing:
+    def test_arp_parses_complete_entries_only(self):
+        entries = _parse_arp_output(ARP_OUT)
+        assert entries == [
+            ("192.168.1.1", "aa:bb:cc:dd:ee:01", ""),
+            ("192.168.10.5", "aa:bb:cc:dd:ee:05", ""),
+        ]
 
-        assert "192.168.1.10" in result
-        assert result["192.168.1.10"] == "lab-server"
-        assert "192.168.1.20" in result
-
-    def test_ignores_comments(self, tmp_path):
-        hosts = tmp_path / "hosts"
-        hosts.write_text("# comment\n192.168.1.1   router\n")
-        result = _read_hosts_file(str(hosts))
-
-        assert len(result) == 1
-        assert "192.168.1.1" in result
-
-    def test_loopback_entries_included_in_raw_parse(self, tmp_path):
-        """_read_hosts_file returns all entries including loopback.
-        Filtering of 127.x is done by _hosts_file_findings, not the parser."""
-        hosts = tmp_path / "hosts"
-        hosts.write_text("127.0.0.1   localhost\n192.168.1.1  router\n")
-        result = _read_hosts_file(str(hosts))
-
-        assert "127.0.0.1" in result
-
-    def test_missing_file_returns_empty(self):
-        result = _read_hosts_file("/nonexistent/path/hosts")
-        assert result == {}
-
-    def test_empty_file_returns_empty(self, tmp_path):
-        hosts = tmp_path / "hosts"
-        hosts.write_text("")
-        result = _read_hosts_file(str(hosts))
-        assert result == {}
+    def test_ip_neigh_keeps_state_and_skips_failed(self):
+        entries = _parse_ip_neigh_output(IP_NEIGH_OUT)
+        assert ("192.168.1.1", "aa:bb:cc:dd:ee:01", "REACHABLE") in entries
+        assert ("192.168.1.3", "aa:bb:cc:dd:ee:03", "STALE") in entries
+        assert all(ip != "192.168.1.2" for ip, _, _ in entries)
 
 
-# ---------------------------------------------------------------------------
-# _hosts_file_findings
-# ---------------------------------------------------------------------------
+class TestArpSource:
+    def test_arp_findings_are_probable_and_say_presence_not_proven(self):
+        run = fake_run({"arp": ARP_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("192.168.1", "s1", hosts_path=Path("/nonexistent-hosts"))
+        arp = next(s for s in report.sources if s.name == SOURCE_ARP)
+        assert arp.status == STATUS_OK and arp.count == 1
+        arp_findings = [f for f in report.findings if f.target_service == "arp"]
+        assert [f.target_ip for f in arp_findings] == ["192.168.1.1"]
+        assert arp_findings[0].confidence == Confidence.PROBABLE
+        assert "présence actuelle non prouvée" in arp_findings[0].evidence.raw
 
-class TestHostsFileFindings:
-    def test_returns_findings_for_matching_prefix(self, tmp_path):
-        hosts = tmp_path / "hosts"
-        hosts.write_text(HOSTS_CONTENT)
-        with patch("recon.passive_recon._read_hosts_file",
-                   return_value={"192.168.1.10": "lab-server",
-                                 "192.168.1.20": "win-dc"}):
-            findings = _hosts_file_findings("192.168.1", "session-test")
+    def test_falls_back_to_ip_neigh_when_arp_missing(self):
+        run = fake_run({"ip": IP_NEIGH_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", hosts_path=Path("/nonexistent-hosts"))
+        arp = next(s for s in report.sources if s.name == SOURCE_ARP)
+        assert arp.status == STATUS_OK
+        assert arp.detail == "arp absent : repli sur ip neigh"
+        assert any(f.evidence.command == "ip -4 neigh show" for f in report.findings)
 
-        assert len(findings) == 2
+    def test_no_arp_and_no_ip_is_unavailable_not_empty(self):
+        run = fake_run({})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", hosts_path=Path("/nonexistent-hosts"))
+        arp = next(s for s in report.sources if s.name == SOURCE_ARP)
+        assert arp.status == STATUS_UNAVAILABLE
+        assert all(f.target_service != "arp" for f in report.findings)
 
-    def test_skips_loopback_127(self):
-        with patch("recon.passive_recon._read_hosts_file",
-                   return_value={"127.0.0.1": "localhost",
-                                 "192.168.1.10": "lab-server"}):
-            findings = _hosts_file_findings("", "session-test")
-
-        ips = [f.target_ip for f in findings]
-        assert "127.0.0.1" not in ips
-        assert "192.168.1.10" in ips
-
-    def test_finding_confidence_is_probable(self):
-        with patch("recon.passive_recon._read_hosts_file",
-                   return_value={"192.168.1.10": "lab-server"}):
-            findings = _hosts_file_findings("192.168.1", "session-test")
-
-        assert findings[0].confidence == Confidence.PROBABLE
-
-    def test_finding_service_contains_hostname(self):
-        with patch("recon.passive_recon._read_hosts_file",
-                   return_value={"192.168.1.10": "lab-server"}):
-            findings = _hosts_file_findings("192.168.1", "session-test")
-
-        assert "lab-server" in findings[0].service_version
+    def test_arp_timeout_is_failed(self):
+        run = fake_run({"arp": subprocess.TimeoutExpired(["arp", "-n"], 10)})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", hosts_path=Path("/nonexistent-hosts"))
+        arp = next(s for s in report.sources if s.name == SOURCE_ARP)
+        assert arp.status == STATUS_FAILED
 
 
 # ---------------------------------------------------------------------------
-# _parse_avahi_output
+# /etc/hosts
 # ---------------------------------------------------------------------------
 
-class TestParseAvahiOutput:
-    def test_parses_resolved_entries(self):
-        result = _parse_avahi_output(AVAHI_OUTPUT)
-        assert "MyPrinter" in result
-        assert result["MyPrinter"] == "192.168.1.50"
-        assert "MacBook" in result
+class TestHostsSource:
+    def test_duplicate_ip_lines_are_all_kept(self, hosts_file):
+        pairs, _ = _read_hosts_file(hosts_file)
+        assert ("192.168.1.10", "nas.lan") in pairs
+        assert ("192.168.1.10", "backup.lan") in pairs
 
-    def test_ignores_unresolved_entries(self):
-        """Lines starting with '+' (not '=') are not resolved — must be ignored."""
-        result = _parse_avahi_output(AVAHI_OUTPUT)
-        assert "Unresolved" not in result
+    def test_ipv6_lines_are_counted_not_targeted(self, hosts_file):
+        pairs, ignored_v6 = _read_hosts_file(hosts_file)
+        assert ignored_v6 == 2  # ::1 and fe80::5
+        assert all(":" not in ip for ip, _ in pairs)
 
-    def test_empty_output_returns_empty(self):
-        result = _parse_avahi_output(AVAHI_OUTPUT_EMPTY)
-        assert result == {}
+    def test_comments_and_loopback_are_handled(self, hosts_file):
+        report = collect_passive("", "s1", hosts_path=hosts_file)
+        hosts = [f for f in report.findings if f.target_service == "hosts"]
+        ips = sorted(f.target_ip for f in hosts)
+        assert ips == ["10.0.0.8", "192.168.1.10", "192.168.1.10"]
+        assert all(f.exposure == Exposure.INTERNAL for f in hosts)
 
-    def test_malformed_line_ignored(self):
-        result = _parse_avahi_output("=;incomplete\n")
-        assert result == {}
+    def test_filter_applies_to_hosts(self, hosts_file):
+        report = collect_passive("192.168.1", "s1", hosts_path=hosts_file)
+        hosts = [f for f in report.findings if f.target_service == "hosts"]
+        assert {f.target_ip for f in hosts} == {"192.168.1.10"}
 
-
-# ---------------------------------------------------------------------------
-# _mdns_findings
-# ---------------------------------------------------------------------------
-
-class TestMdnsFindings:
-    def test_returns_findings_for_matching_prefix(self):
-        with patch("recon.passive_recon._mdns_lookup",
-                   return_value={"myprinter.local": "192.168.1.50",
-                                 "macbook.local": "192.168.1.60"}):
-            findings = _mdns_findings("192.168.1", "session-test")
-
-        assert len(findings) == 2
-
-    def test_finding_confidence_is_possible(self):
-        """mDNS is self-advertised — not verified → POSSIBLE."""
-        with patch("recon.passive_recon._mdns_lookup",
-                   return_value={"printer.local": "192.168.1.50"}):
-            findings = _mdns_findings("192.168.1", "session-test")
-
-        assert findings[0].confidence == Confidence.POSSIBLE
-
-    def test_avahi_not_installed_returns_empty(self):
-        with patch("recon.passive_recon.subprocess.run",
-                   side_effect=FileNotFoundError("avahi-browse not found")):
-            from recon.passive_recon import _mdns_lookup
-            result = _mdns_lookup()
-        assert result == {}
+    def test_missing_hosts_file_is_unavailable(self, tmp_path):
+        report = collect_passive("", "s1", hosts_path=tmp_path / "absent")
+        hosts = next(s for s in report.sources if s.name == SOURCE_HOSTS)
+        assert hosts.status == STATUS_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
-# passive_recon() — integration
+# P2 — avahi / mDNS parsing
 # ---------------------------------------------------------------------------
 
-class TestPassiveRecon:
-    def test_returns_findings_from_all_sources(self):
-        arp_finding = Finding(
-            session_id="s", module="passive_recon", target_ip="192.168.1.1",
-            target_service="arp", service_version="MAC=aa:bb:cc:dd:ee:01",
-            category=Category.NETWORK, severity=Severity.INFO,
-            confidence=Confidence.CONFIRMED,
+class TestAvahiParsing:
+    def test_field_order_host_address_port_from_documented_positions(self):
+        """Regression: service name (index 3) was taken as the host."""
+        records, _ = _parse_avahi_output(AVAHI_OUT)
+        first = records[0]
+        assert first.service == "My Printer"
+        assert first.service_type == "_ipp._tcp"
+        assert first.host == "printer.local"
+        assert first.address == "192.168.1.50"
+        assert first.port == 631
+
+    def test_ipv6_is_counted_and_ignored(self):
+        records, ignored_v6 = _parse_avahi_output(AVAHI_OUT)
+        assert ignored_v6 == 1
+        assert all(r.address != "fe80::1" for r in records)
+
+    def test_unresolved_and_malformed_lines_are_ignored(self):
+        records, _ = _parse_avahi_output(AVAHI_OUT)
+        assert all(r.service != "Unresolved" for r in records)
+        assert _parse_avahi_output("=;incomplete\n") == ([], 0)
+
+    def test_several_services_on_one_host_do_not_overwrite(self):
+        run = fake_run({"avahi-browse": AVAHI_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", mdns_allowed=True, hosts_path=Path("/nonexistent-hosts"))
+        mdns = [f for f in report.findings if f.target_service == "mdns"]
+        assert len(mdns) == 1
+        assert "_ipp._tcp" in mdns[0].evidence.raw and "_http._tcp" in mdns[0].evidence.raw
+        assert mdns[0].service_version == "hostname=printer.local"
+        assert mdns[0].confidence == Confidence.POSSIBLE
+
+    def test_two_addresses_for_one_host_are_both_kept(self):
+        out = (
+            "=;eth0;IPv4;Svc;_ipp._tcp;local;printer.local;192.168.1.50;631;\n"
+            "=;eth0;IPv4;Svc;_ipp._tcp;local;printer.local;192.168.1.51;631;\n"
         )
-        hosts_finding = Finding(
-            session_id="s", module="passive_recon", target_ip="192.168.1.10",
-            target_service="hosts", service_version="hostname=lab-server",
-            category=Category.NETWORK, severity=Severity.INFO,
-            confidence=Confidence.PROBABLE,
-        )
-        mdns_finding = Finding(
-            session_id="s", module="passive_recon", target_ip="192.168.1.50",
-            target_service="mdns", service_version="hostname=printer.local",
-            category=Category.NETWORK, severity=Severity.INFO,
-            confidence=Confidence.POSSIBLE,
-        )
+        run = fake_run({"avahi-browse": out})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", mdns_allowed=True, hosts_path=Path("/nonexistent-hosts"))
+        assert sorted(f.target_ip for f in report.findings if f.target_service == "mdns") == [
+            "192.168.1.50", "192.168.1.51",
+        ]
 
-        with patch("recon.passive_recon._arp_findings", return_value=[arp_finding]), \
-             patch("recon.passive_recon._hosts_file_findings", return_value=[hosts_finding]), \
-             patch("recon.passive_recon._mdns_findings", return_value=[mdns_finding]):
-            findings = passive_recon("192.168.1", "session-test")
 
-        assert len(findings) == 3
+# ---------------------------------------------------------------------------
+# mDNS consent gate and source statuses
+# ---------------------------------------------------------------------------
 
-    def test_returns_empty_when_nothing_found(self):
-        with patch("recon.passive_recon._arp_findings", return_value=[]), \
-             patch("recon.passive_recon._hosts_file_findings", return_value=[]), \
-             patch("recon.passive_recon._mdns_findings", return_value=[]):
-            findings = passive_recon("192.168.1", "session-test")
+class TestMdnsGate:
+    def test_default_never_runs_avahi(self, hosts_file):
+        run = fake_run({"avahi-browse": AVAHI_OUT, "arp": ARP_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", hosts_path=hosts_file)
+        assert all(cmd[0] != "avahi-browse" for cmd in run.calls)
+        mdns = next(s for s in report.sources if s.name == SOURCE_MDNS)
+        assert mdns.status == STATUS_SKIPPED
+        assert "non lancé" in mdns.detail
 
-        assert findings == []
+    def test_passive_recon_wrapper_never_runs_avahi_by_default(self, hosts_file):
+        run = fake_run({"avahi-browse": AVAHI_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            findings = passive_recon("", "s1")
+        assert all(cmd[0] != "avahi-browse" for cmd in run.calls)
+        assert all(f.target_service != "mdns" for f in findings)
 
-    def test_all_findings_have_session_id(self):
-        f = Finding(
-            session_id="session-xyz", module="passive_recon",
-            target_ip="192.168.1.1", target_service="arp",
-            service_version="MAC=aa:bb:cc:dd:ee:01",
-            category=Category.NETWORK, severity=Severity.INFO,
-            confidence=Confidence.CONFIRMED,
-        )
-        with patch("recon.passive_recon._arp_findings", return_value=[f]), \
-             patch("recon.passive_recon._hosts_file_findings", return_value=[]), \
-             patch("recon.passive_recon._mdns_findings", return_value=[]):
-            findings = passive_recon("192.168.1", "session-xyz")
+    def test_avahi_missing_with_consent_is_explicit_not_empty(self, hosts_file):
+        run = fake_run({})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", mdns_allowed=True, hosts_path=hosts_file)
+        mdns = next(s for s in report.sources if s.name == SOURCE_MDNS)
+        assert mdns.status == STATUS_UNAVAILABLE
+        assert mdns.detail == "avahi-browse absent"
+        assert all(f.target_service != "mdns" for f in report.findings)
 
-        assert all(f.session_id == "session-xyz" for f in findings)
+    def test_avahi_nonzero_exit_is_failed(self, hosts_file):
+        run = fake_run({"avahi-browse": (1, "")})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", mdns_allowed=True, hosts_path=hosts_file)
+        mdns = next(s for s in report.sources if s.name == SOURCE_MDNS)
+        assert mdns.status == STATUS_FAILED
 
-    def test_all_findings_risk_score_none(self):
-        """Invariant: passive_recon never sets risk_score."""
-        f = Finding(
-            session_id="s", module="passive_recon", target_ip="192.168.1.1",
-            target_service="arp", service_version="MAC=aa:bb:cc:dd:ee:01",
-            category=Category.NETWORK, severity=Severity.INFO,
-            confidence=Confidence.CONFIRMED,
-        )
-        with patch("recon.passive_recon._arp_findings", return_value=[f]), \
-             patch("recon.passive_recon._hosts_file_findings", return_value=[]), \
-             patch("recon.passive_recon._mdns_findings", return_value=[]):
-            findings = passive_recon("192.168.1", "session-test")
+    def test_avahi_timeout_is_failed(self, hosts_file):
+        run = fake_run({"avahi-browse": subprocess.TimeoutExpired(list(MDNS_COMMAND), 20)})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            report = collect_passive("", "s1", mdns_allowed=True, hosts_path=hosts_file)
+        mdns = next(s for s in report.sources if s.name == SOURCE_MDNS)
+        assert mdns.status == STATUS_FAILED
 
-        assert all(f.risk_score is None for f in findings)
+    def test_mdns_command_is_passive_listing_not_active_scan(self):
+        assert MDNS_COMMAND[0] == "avahi-browse"
+        assert "--all" in MDNS_COMMAND and "--parsable" in MDNS_COMMAND
+        assert not any("scan" in part for part in MDNS_COMMAND)
+
+    def test_invalid_network_is_rejected_before_any_command(self, hosts_file):
+        run = fake_run({"arp": ARP_OUT})
+        with patch("recon.passive_recon.subprocess.run", side_effect=run):
+            with pytest.raises(ValueError):
+                collect_passive("192.168.1.5/24", "s1", hosts_path=hosts_file)
+        assert run.calls == []

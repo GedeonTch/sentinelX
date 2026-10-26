@@ -1451,23 +1451,6 @@ class TestCleanup:
 # ---------------------------------------------------------------------------
 
 class TestStandaloneCommands:
-    def test_whois_calls_dns_enum_and_renders(self):
-        finding = make_finding(module="dns_enum", target_port=None, target_service="ptr")
-        with patch("recon.dns_enum.dns_enum", return_value=[finding]) as dns_enum, \
-             patch("cli._render_findings_table") as render:
-            result = runner.invoke(app, ["whois", "192.168.1.1"])
-        assert result.exit_code == 0
-        dns_enum.assert_called_once()
-        assert dns_enum.call_args.args[0] == "192.168.1.1"
-        assert str(dns_enum.call_args.args[1]).startswith("standalone-")
-        render.assert_called_once_with([finding])
-
-    def test_whois_empty_shows_message(self):
-        with patch("recon.dns_enum.dns_enum", return_value=[]):
-            result = runner.invoke(app, ["whois", "10.0.0.1"])
-        assert result.exit_code == 0
-        assert "No DNS/WHOIS data" in result.output
-
     def test_smb_enum_calls_module_without_db_persist(self):
         finding = make_finding(module="smb_enum", target_port=445, target_service="smb")
         with patch("detect.smb_enum.smb_enum", return_value=[finding]) as smb, \

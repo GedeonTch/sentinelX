@@ -17,8 +17,8 @@
     },
 
     "passive_recon": {
-      "what": "Des informations sur cet hôte ont été collectées passivement depuis le cache ARP du système, le fichier /etc/hosts, ou les annonces mDNS — sans envoyer aucun paquet vers la cible.",
-      "attack": "Un attaquant sur le même réseau peut lire le cache ARP pour identifier toutes les machines actives récemment contactées. mDNS permet de découvrir des services (.local) sans requête active. Ces techniques ne déclenchent aucune alerte réseau.",
+      "what": "Des informations sur cet hôte ont été collectées passivement depuis le cache ARP du système et le fichier /etc/hosts. Les annonces mDNS, si elles ont été demandées explicitement, proviennent de requêtes multicast sur le réseau local. Aucun scan actif de la cible n'a été effectué.",
+      "attack": "Un attaquant sur le même réseau peut lire le cache ARP pour identifier toutes les machines actives récemment contactées. mDNS permet de découvrir des services (.local) par simple requête multicast sur le réseau local.",
       "defense": "Utiliser des VLANs pour isoler les segments réseau. Désactiver mDNS sur les machines sensibles (désactiver avahi-daemon). Surveiller les tables ARP pour détecter des entrées inattendues (ARP spoofing)."
     },
 

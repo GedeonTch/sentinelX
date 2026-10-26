@@ -50,7 +50,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 
 | Step | Role | Main V1 Modules |
 |---|---|---|
-| DISCOVER | Identify assets and exposed services | `device_fingerprint`, `dns_enum`, `passive_recon` |
+| DISCOVER | Identify assets and exposed services | `device_fingerprint` (pipeline) ; `dns_enum`, `passive_recon` (standalone, not called by `scan`) |
 | DETECT | Find weaknesses and misconfigurations | `tcp_scan`, `udp_scan`, `smb_enum`, `misconfig_detection`, `default_creds` |
 | ASSESS | Calculate risk score for each Finding | `risk_scorer` (documented CVSS-based formula) |
 | EXPLAIN | Produce 3-angle explanation | Local knowledge base (AI in V2 only) |
@@ -453,8 +453,8 @@ netlab creds_check --target <ip>
 | #004 | `core/risk_scorer.py` | ASSESS — tested on 5+ real cases before use |
 | #005 | `cli.py` | Typer structure — connects all modules |
 | #006 | `recon/device_fingerprint.py` | DISCOVER — first pipeline step |
-| #007 | `recon/dns_enum.py` | DISCOVER — WHOIS + DNS records |
-| #008 | `recon/passive_recon.py` | DISCOVER — no active traffic |
+| #007 | `recon/dns_enum.py` | DISCOVER — DNS records + RDAP/WHOIS (standalone) |
+| #008 | `recon/passive_recon.py` | DISCOVER (standalone) — local sources; mDNS only after confirmation; no active scan |
 | #009 | `detect/tcp_scan.py` + `udp_scan.py` | DETECT — core value |
 | #010 | `detect/service_detection.py` | DETECT — versions for CVE matching |
 | #011 | `detect/smb_enum.py` | DETECT — Windows shares (use Grok in Cursor) |

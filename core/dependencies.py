@@ -30,6 +30,13 @@ from typing import List, Optional, Tuple
 
 REQUIRED_PYTHON: Tuple[int, int] = (3, 11)
 EXTERNAL_TOOLS: Tuple[str, ...] = ("nmap", "enum4linux-ng")
+# Optional tools: never block environment_ready(). Each one maps to a
+# documented effect shown by `netlab doctor` when it is missing.
+OPTIONAL_TOOL_EFFECTS: Tuple[Tuple[str, str], ...] = (
+    ("arp", "voisinage ARP via arp -n ; absent : repli sur ip neigh"),
+    ("ip", "repli ARP via ip neigh (iproute2) si arp est absent"),
+    ("avahi-browse", "passive-recon ne peut pas interroger mDNS (la liste mDNS est indisponible, pas vide)"),
+)
 NETLAB_HOME_NAME: str = ".netlab"
 _WRITE_PROBE_NAME: str = ".doctor_write_probe"
 _VERSION_TIMEOUT_SECONDS: int = 5
@@ -233,6 +240,17 @@ def check_environment() -> List[DependencyCheck]:
         checks.append(check_external_tool(name))
     checks.append(check_netlab_dir())
     return checks
+
+
+def check_optional_tools() -> List[Tuple[DependencyCheck, str]]:
+    """Check optional tools and pair each result with its documented effect.
+
+    Missing optional tools do not make the environment unusable.
+    """
+    return [
+        (check_external_tool(name), effect)
+        for name, effect in OPTIONAL_TOOL_EFFECTS
+    ]
 
 
 def environment_ready(checks: List[DependencyCheck]) -> bool:

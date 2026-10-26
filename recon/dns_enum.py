@@ -1,195 +1,179 @@
 """
-recon/dns_enum.py — DNS enumeration and WHOIS lookup
+recon/dns_enum.py — DNS enumeration and registration lookup (standalone, not in scan).
 
-Pipeline step: DISCOVER
-Role: Resolve hostnames, DNS records, and WHOIS data for discovered targets.
+Targets:
+  - IPv4 address  → PTR lookup, forward-confirmed when possible.
+  - Domain        → A, MX, NS, TXT, CNAME records, PTR for every A address,
+                    then the registration summary (RDAP + WHOIS, see
+                    recon/registration.py).
 
-This module answers:
-  - "What hostname does this IP have?" (reverse DNS / PTR)
-  - "What DNS records exist for this domain?" (A, MX, NS, TXT, CNAME)
-  - "Who registered this domain?" (WHOIS)
+Confidence rules for records:
+  - CONFIRMED only when the answer carries the AA (authoritative) flag.
+  - PROBABLE otherwise (answer from a recursive resolver, not demonstrated authoritative).
 
-Designed to be called after device_fingerprint.py — it enriches the
-picture of what's on the network without sending active scan traffic.
+Outcomes are kept distinct: NXDOMAIN, no data (NoAnswer), timeout, resolver
+unavailable, other error. A missing answer is never presented as proof that
+a record does not exist, and no Finding is created for an error.
 
-DNS queries are passive from the perspective of the target — they go to
-DNS servers, not directly to the target machine.
-WHOIS queries go to public WHOIS servers — also passive for the target.
+Exposure: DNS and registration data are public information, not a service
+observation. No Finding is marked EXTERNAL here (no exposure is demonstrated),
+and the value stays at the Exposure default. See docs/T24-RECON.md.
 
-Rules enforced here:
-- ZERO import sqlite3
-- ZERO print() — logging via core/logger.py
-- ZERO risk_score calculation
-- ALWAYS return List[Finding]
-- No (y/n) confirmation needed — DNS/WHOIS queries are passive (no traffic
-  sent to the target itself). Active confirmation is only required for
-  direct network traffic to the target (Section B.6 of steering doc).
-
-Confidence rules:
-    CONFIRMED — PTR record exists and resolves back to the same IP (forward-confirmed)
-    PROBABLE  — PTR record exists but forward lookup was not verified
-    POSSIBLE  — hostname inferred from WHOIS or DNS A record only
+No raw DNS message or raw WHOIS/RDAP text is stored or returned.
 """
 
-import socket
-from typing import List, Optional, Dict
+from __future__ import annotations
 
+import ipaddress
+import re
+import socket
+from dataclasses import dataclass, field
+from typing import Any, Callable, List, Optional, Tuple
+
+import dns.exception
+import dns.flags
 import dns.resolver
 import dns.reversename
-import dns.exception
-import whois as whois_lib
 
 from core.finding import (
-    Finding,
-    Evidence,
     Category,
-    Severity,
     Confidence,
+    Evidence,
     Exposure,
+    Finding,
+    Severity,
 )
-from core.logger import display
+from recon.rdap import RdapClient
+from recon.registration import (
+    SOURCE_RDAP,
+    RegistrationSummary,
+    lookup_registration,
+    registration_evidence,
+)
+
+DNS_LIFETIME_SECONDS: float = 5.0
+DNS_RECORD_TYPES: Tuple[str, ...] = ("A", "MX", "NS", "TXT", "CNAME")
+MAX_PTR_LOOKUPS: int = 8
+
+# Outcome statuses for one DNS query.
+DNS_OK = "ok"
+DNS_NXDOMAIN = "nxdomain"
+DNS_NODATA = "nodata"
+DNS_TIMEOUT = "timeout"
+DNS_UNAVAILABLE = "unavailable"
+DNS_ERROR = "error"
+
+DNS_STATUS_LABELS = {
+    DNS_OK: "réponse reçue",
+    DNS_NXDOMAIN: "NXDOMAIN (nom inexistant selon le résolveur)",
+    DNS_NODATA: "aucune donnée pour ce type",
+    DNS_TIMEOUT: "timeout (pas de réponse : inconnu, pas inexistant)",
+    DNS_UNAVAILABLE: "résolveur ou serveur indisponible",
+    DNS_ERROR: "erreur DNS",
+}
+
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_TLD = r"[a-z][a-z0-9-]{0,61}[a-z0-9]"
+_DOMAIN_RE = re.compile(rf"^(?:{_LABEL}\.)+{_TLD}$")
 
 
-# DNS record types to enumerate when target is a domain name
-_DNS_RECORD_TYPES = ("A", "MX", "NS", "TXT", "CNAME")
+@dataclass
+class DnsOutcome:
+    """Result of one DNS query. ``values`` is only filled when status is 'ok'."""
+
+    record_type: str
+    status: str
+    values: List[str] = field(default_factory=list)
+    authoritative: bool = False
+
+
+@dataclass
+class DomainReport:
+    """Everything the standalone whois/dns command needs to render."""
+
+    target: str
+    kind: str  # "ip" or "domain"
+    outcomes: List[DnsOutcome] = field(default_factory=list)
+    ptr: List[Tuple[str, str]] = field(default_factory=list)  # (ip, hostname)
+    registration: Optional[RegistrationSummary] = None
+    findings: List[Finding] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Target validation
 # ---------------------------------------------------------------------------
 
-def dns_enum(target: str, session_id: str) -> List[Finding]:
-    """Enumerate DNS records and WHOIS data for a target.
-
-    Handles two cases:
-      - IP address  → reverse DNS (PTR) lookup only
-      - Domain name → PTR + A/MX/NS/TXT/CNAME records + WHOIS
-
-    No (y/n) confirmation — DNS/WHOIS queries are passive.
-    They go to DNS servers, not directly to the target.
-
-    Args:
-        target:     IP address or domain name (e.g. "192.168.1.1" or "example.com").
-        session_id: Current audit session ID.
-
-    Returns:
-        List[Finding]: One Finding per DNS record type found + one for WHOIS if available.
-                       Empty list if no DNS data found.
-    """
-    display(f"[cyan]Starting DNS enumeration for {target}...[/cyan]")
-
-    findings: List[Finding] = []
-
-    if _is_ip(target):
-        # IP target — reverse DNS only
-        findings.extend(_reverse_dns_findings(target, session_id))
-    else:
-        # Domain target — full enumeration
-        findings.extend(_reverse_dns_findings(target, session_id))
-        findings.extend(_dns_record_findings(target, session_id))
-        whois_finding = _whois_finding(target, session_id)
-        if whois_finding:
-            findings.append(whois_finding)
-
-    if findings:
-        display(f"[green]DNS enumeration complete — {len(findings)} finding(s).[/green]")
-    else:
-        display(f"[yellow]No DNS data found for {target}.[/yellow]")
-
-    return findings
-
-
-# ---------------------------------------------------------------------------
-# Reverse DNS
-# ---------------------------------------------------------------------------
-
-def _reverse_dns_findings(target: str, session_id: str) -> List[Finding]:
-    """Perform reverse DNS lookup and return a Finding if a PTR record exists.
-
-    Args:
-        target:     IP address or domain name.
-        session_id: Current audit session ID.
-
-    Returns:
-        List[Finding]: One Finding if PTR resolved, empty list otherwise.
-    """
-    hostname, confidence, raw = _reverse_dns(target)
-    if not hostname:
-        return []
-
-    return [Finding(
-        session_id=session_id,
-        module="dns_enum",
-        target_ip=target if _is_ip(target) else "",
-        target_service="dns",
-        service_version=f"PTR → {hostname}",
-        category=Category.NETWORK,
-        severity=Severity.INFO,
-        confidence=confidence,
-        exposure=Exposure.INTERNAL,
-        evidence=Evidence(
-            raw=raw,
-            command=f"dig -x {target}" if _is_ip(target) else f"dig {target} PTR",
-        ),
-        explanation=None,
-        cve_refs=[],
-    )]
-
-
-def _reverse_dns(target: str) -> tuple[str, Confidence, str]:
-    """Perform a reverse DNS (PTR) lookup for an IP or domain.
-
-    For an IP: looks up the PTR record.
-    For a domain: resolves A record, then does reverse lookup on the IP.
-
-    Confidence:
-        CONFIRMED — PTR resolved AND forward lookup of the hostname confirms
-                    it maps back to the same IP.
-        PROBABLE  — PTR resolved but forward confirmation failed or not attempted.
-
-    Args:
-        target: IP address or domain name.
-
-    Returns:
-        Tuple[str, Confidence, str]: (hostname, confidence, raw_evidence)
-        Returns ("", PROBABLE, "") if lookup fails.
-    """
+def _is_ip(target: str) -> bool:
     try:
-        if _is_ip(target):
-            rev_name = dns.reversename.from_address(target)
-            answers = dns.resolver.resolve(rev_name, "PTR")
-            hostname = str(answers[0]).rstrip(".")
-            raw = f"PTR lookup for {target}:\n" + "\n".join(str(r) for r in answers)
+        return ipaddress.ip_address(target).version == 4
+    except ValueError:
+        return False
 
-            # Forward-confirm: does the hostname resolve back to the same IP?
-            confidence = _forward_confirm(hostname, target)
-            return hostname, confidence, raw
-        else:
-            # Domain → get A record
-            answers = dns.resolver.resolve(target, "A")
-            ip = str(answers[0])
-            raw = f"A record for {target}: {ip}"
-            # Now reverse lookup the IP
-            rev_name = dns.reversename.from_address(ip)
-            ptr_answers = dns.resolver.resolve(rev_name, "PTR")
-            hostname = str(ptr_answers[0]).rstrip(".")
-            raw += f"\nPTR for {ip}: {hostname}"
-            return hostname, Confidence.PROBABLE, raw
 
-    except (dns.exception.DNSException, Exception):
-        return "", Confidence.PROBABLE, ""
+def normalize_domain(target: str) -> str:
+    """Return the lower-case domain without trailing dot, or raise ValueError."""
+    candidate = target.strip().rstrip(".").lower()
+    if len(candidate) > 253 or not _DOMAIN_RE.match(candidate):
+        raise ValueError(f"cible invalide : {target!r} (attendu : domaine ou IPv4)")
+    return candidate
+
+
+def target_kind(target: str) -> str:
+    """Classify a target as 'ip' (IPv4) or 'domain'. Raises ValueError otherwise."""
+    if ":" in target:
+        raise ValueError("IPv6 non pris en charge par cette commande")
+    if _is_ip(target):
+        return "ip"
+    normalize_domain(target)
+    return "domain"
+
+
+# ---------------------------------------------------------------------------
+# DNS queries
+# ---------------------------------------------------------------------------
+
+def _make_resolver() -> dns.resolver.Resolver:
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = DNS_LIFETIME_SECONDS
+    return resolver
+
+
+def _query(
+    name: str,
+    record_type: str,
+    resolver_factory: Optional[Callable[[], Any]] = None,
+) -> DnsOutcome:
+    """Query one name/type and classify the outcome. Never raises."""
+    try:
+        resolver = (resolver_factory or _make_resolver)()
+        answer = resolver.resolve(name, record_type, raise_on_no_answer=True)
+    except dns.resolver.NXDOMAIN:
+        return DnsOutcome(record_type, DNS_NXDOMAIN)
+    except dns.resolver.NoAnswer:
+        return DnsOutcome(record_type, DNS_NODATA)
+    except dns.resolver.NoNameservers:
+        return DnsOutcome(record_type, DNS_UNAVAILABLE)
+    except dns.resolver.LifetimeTimeout:
+        return DnsOutcome(record_type, DNS_TIMEOUT)
+    except dns.exception.Timeout:
+        return DnsOutcome(record_type, DNS_TIMEOUT)
+    except dns.exception.DNSException:
+        return DnsOutcome(record_type, DNS_ERROR)
+    except Exception:  # defensive: an unexpected resolver failure is an error status
+        return DnsOutcome(record_type, DNS_ERROR)
+
+    values = [str(item).rstrip(".") if record_type != "TXT" else str(item) for item in answer]
+    authoritative = bool(answer.response.flags & dns.flags.AA)
+    return DnsOutcome(record_type, DNS_OK, values=values, authoritative=authoritative)
+
+
+def _ptr_outcome(ip: str, resolver_factory: Optional[Callable[[], Any]] = None) -> DnsOutcome:
+    reverse = str(dns.reversename.from_address(ip))
+    return _query(reverse, "PTR", resolver_factory)
 
 
 def _forward_confirm(hostname: str, original_ip: str) -> Confidence:
-    """Check if a hostname resolves back to the expected IP.
-
-    Args:
-        hostname:    Hostname from PTR record.
-        original_ip: IP that the PTR was resolved from.
-
-    Returns:
-        Confidence.CONFIRMED if hostname → original_ip, else PROBABLE.
-    """
+    """CONFIRMED when hostname resolves back to original_ip, else PROBABLE."""
     try:
         resolved_ips = {r[4][0] for r in socket.getaddrinfo(hostname, None)}
         if original_ip in resolved_ips:
@@ -200,162 +184,152 @@ def _forward_confirm(hostname: str, original_ip: str) -> Confidence:
 
 
 # ---------------------------------------------------------------------------
-# DNS records (A, MX, NS, TXT, CNAME)
+# Findings
 # ---------------------------------------------------------------------------
 
-def _dns_record_findings(domain: str, session_id: str) -> List[Finding]:
-    """Query standard DNS record types for a domain and return Findings.
+_MAX_VALUE_CHARS = 300
 
-    Args:
-        domain:     Domain name to query.
-        session_id: Current audit session ID.
 
-    Returns:
-        List[Finding]: One Finding per record type that returns results.
-    """
-    findings = []
-    for record_type in _DNS_RECORD_TYPES:
-        records, raw = _dns_records(domain, record_type)
-        if not records:
+def _record_findings(domain: str, outcomes: List[DnsOutcome], session_id: str) -> List[Finding]:
+    findings: List[Finding] = []
+    for outcome in outcomes:
+        if outcome.status != DNS_OK or not outcome.values:
             continue
-
+        values = [v if len(v) <= _MAX_VALUE_CHARS else v[:_MAX_VALUE_CHARS] + "…" for v in outcome.values]
+        authority = "réponse autoritative (AA)" if outcome.authoritative else "réponse non autoritative"
         findings.append(Finding(
             session_id=session_id,
             module="dns_enum",
             target_ip="",
+            target_port=None,
             target_service="dns",
-            service_version=f"{record_type} records",
-            category=Category.NETWORK,
+            service_version=f"{outcome.record_type} ({len(values)})",
+            category=Category.CONFIG,
             severity=Severity.INFO,
-            confidence=Confidence.CONFIRMED,  # DNS answer is authoritative
+            confidence=Confidence.CONFIRMED if outcome.authoritative else Confidence.PROBABLE,
             exposure=Exposure.INTERNAL,
             evidence=Evidence(
-                raw=raw,
-                command=f"dig {domain} {record_type}",
+                raw=f"{domain} {outcome.record_type} — {authority}\n" + "\n".join(values),
+                command=f"dig {domain} {outcome.record_type}",
             ),
-            explanation=None,
-            cve_refs=[],
         ))
-
     return findings
 
 
-def _dns_records(domain: str, record_type: str) -> tuple[List[str], str]:
-    """Query a specific DNS record type for a domain.
+def _ptr_findings(pairs: List[Tuple[str, str]], session_id: str,
+                  confidence_for: Callable[[str, str], Confidence]) -> List[Finding]:
+    """One Finding per PTR pair. target_ip is the IP the PTR belongs to, never a domain."""
+    findings: List[Finding] = []
+    for ip, hostname in pairs:
+        findings.append(Finding(
+            session_id=session_id,
+            module="dns_enum",
+            target_ip=ip,
+            target_port=None,
+            target_service="dns",
+            service_version=f"PTR {hostname}",
+            category=Category.CONFIG,
+            severity=Severity.INFO,
+            confidence=confidence_for(hostname, ip),
+            exposure=Exposure.INTERNAL,
+            evidence=Evidence(
+                raw=f"PTR {ip} → {hostname}",
+                command=f"dig -x {ip}",
+            ),
+        ))
+    return findings
 
-    Args:
-        domain:      Domain name.
-        record_type: DNS record type (A, MX, NS, TXT, CNAME).
 
-    Returns:
-        Tuple[List[str], str]: (list of record values, raw evidence string)
-        Returns ([], "") if no records found or on error.
-    """
-    try:
-        answers = dns.resolver.resolve(domain, record_type, raise_on_no_answer=False)
-        records = [str(r) for r in answers]
-        if not records:
-            return [], ""
-        raw = f"{record_type} records for {domain}:\n" + "\n".join(records)
-        return records, raw
-    except (dns.exception.DNSException, Exception):
-        return [], ""
-
-
-# ---------------------------------------------------------------------------
-# WHOIS
-# ---------------------------------------------------------------------------
-
-def _whois_finding(domain: str, session_id: str) -> Optional[Finding]:
-    """Perform a WHOIS lookup for a domain and return a Finding.
-
-    Args:
-        domain:     Domain name.
-        session_id: Current audit session ID.
-
-    Returns:
-        Finding if WHOIS data found, None otherwise.
-    """
-    data, raw = _whois_lookup(domain)
-    if not data or not raw:
+def _registration_finding(summary: RegistrationSummary, session_id: str) -> Optional[Finding]:
+    if not summary.has_data:
         return None
-
-    # Build a readable summary for service_version
-    registrar = data.get("registrar", "")
-    creation = data.get("creation_date", "")
-    if isinstance(creation, list):
-        creation = creation[0]
-    summary = f"registrar={registrar}" if registrar else "WHOIS data available"
-
+    registrar = summary.fields.get("registrar")
+    version = f"registrar={registrar.value}" if registrar is not None and not registrar.masked else "enregistrement"
+    confidence = Confidence.CONFIRMED if summary.primary_source == SOURCE_RDAP else Confidence.PROBABLE
     return Finding(
         session_id=session_id,
         module="dns_enum",
         target_ip="",
+        target_port=None,
         target_service="whois",
-        service_version=summary,
-        category=Category.NETWORK,
+        service_version=version,
+        category=Category.CONFIG,
         severity=Severity.INFO,
-        confidence=Confidence.CONFIRMED,
+        confidence=confidence,
         exposure=Exposure.INTERNAL,
         evidence=Evidence(
-            raw=raw,
-            command=f"whois {domain}",
+            raw=registration_evidence(summary),
+            command=f"RDAP {summary.domain} + whois {summary.domain}",
         ),
-        explanation=None,
-        cve_refs=[],
     )
 
 
-def _whois_lookup(domain: str) -> tuple[Dict, str]:
-    """Perform a WHOIS lookup and return parsed data and raw text.
-
-    Args:
-        domain: Domain name.
-
-    Returns:
-        Tuple[dict, str]: (parsed whois dict, raw text evidence)
-        Returns ({}, "") on error.
-    """
-    try:
-        w = whois_lib.whois(domain)
-        if not w or not w.domain_name:
-            return {}, ""
-
-        data = {
-            "domain_name": str(w.domain_name),
-            "registrar": str(w.registrar) if w.registrar else "",
-            "creation_date": str(w.creation_date) if w.creation_date else "",
-            "expiration_date": str(w.expiration_date) if w.expiration_date else "",
-            "name_servers": str(w.name_servers) if w.name_servers else "",
-        }
-        raw = f"WHOIS for {domain}:\n"
-        for k, v in data.items():
-            if v:
-                raw += f"  {k}: {v}\n"
-
-        return data, raw
-    except Exception:
-        return {}, ""
-
-
 # ---------------------------------------------------------------------------
-# Helpers
+# Public entry points
 # ---------------------------------------------------------------------------
 
-def _is_ip(target: str) -> bool:
-    """Return True if target looks like an IPv4 address (4 octets).
+def dns_report(
+    target: str,
+    session_id: str,
+    resolver_factory: Optional[Callable[[], Any]] = None,
+    rdap_client: Optional[RdapClient] = None,
+    whois_func: Optional[Callable[..., Any]] = None,
+) -> DomainReport:
+    """Run the DNS (and, for domains, registration) lookups and build the report.
 
-    Args:
-        target: String to check.
-
-    Returns:
-        bool: True if IPv4, False otherwise.
+    Raises:
+        ValueError: when the target is neither a valid IPv4 nor a valid domain.
     """
-    parts = target.split(".")
-    if len(parts) != 4:
-        return False
-    try:
-        socket.inet_aton(target)
-        return True
-    except socket.error:
-        return False
+    kind = target_kind(target)
+    if kind == "ip":
+        outcome = _ptr_outcome(target, resolver_factory)
+        pairs = [(target, host) for host in outcome.values] if outcome.status == DNS_OK else []
+        findings = _ptr_findings(
+            pairs, session_id=session_id,
+            confidence_for=lambda host, ip: _forward_confirm(host, ip),
+        )
+        return DomainReport(target=target, kind=kind, outcomes=[outcome], ptr=pairs, findings=findings)
+
+    domain = normalize_domain(target)
+    outcomes = [_query(domain, rtype, resolver_factory) for rtype in DNS_RECORD_TYPES]
+
+    a_outcome = next(o for o in outcomes if o.record_type == "A")
+    a_ips: List[str] = []
+    for value in a_outcome.values if a_outcome.status == DNS_OK else []:
+        try:
+            if ipaddress.ip_address(value).version == 4 and value not in a_ips:
+                a_ips.append(value)
+        except ValueError:
+            continue
+
+    pairs: List[Tuple[str, str]] = []
+    for ip in a_ips[:MAX_PTR_LOOKUPS]:
+        ptr = _ptr_outcome(ip, resolver_factory)
+        if ptr.status == DNS_OK:
+            pairs.extend((ip, host) for host in ptr.values)
+
+    registration = lookup_registration(domain, rdap_client=rdap_client, whois_func=whois_func)
+
+    findings: List[Finding] = []
+    findings.extend(_record_findings(domain, outcomes, session_id))
+    findings.extend(_ptr_findings(
+        pairs, session_id=session_id,
+        confidence_for=lambda host, ip: Confidence.PROBABLE,
+    ))
+    registration_finding = _registration_finding(registration, session_id)
+    if registration_finding is not None:
+        findings.append(registration_finding)
+
+    return DomainReport(
+        target=domain,
+        kind=kind,
+        outcomes=outcomes,
+        ptr=pairs,
+        registration=registration,
+        findings=findings,
+    )
+
+
+def dns_enum(target: str, session_id: str) -> List[Finding]:
+    """Return the Findings for a target (IPv4 → PTR, domain → records + registration)."""
+    return dns_report(target, session_id).findings
