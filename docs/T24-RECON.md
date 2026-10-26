@@ -126,6 +126,9 @@ Les deux sources sont interrogées séparément, avec leur propre statut.
   Pas de masquage ni d'anonymisation supplémentaire : le registre publie ces données.
 - WHOIS : les champs sont lus dans le texte brut, avant sa suppression. Le texte brut
   n'est ni conservé ni affiché.
+- Dépendance : `python-whois>=0.9.6` (seule version acceptant `inc_raw` et `timeout` sur `whois()`).
+  Une version plus ancienne donne le statut « python-whois trop ancien », et non une erreur réseau.
+- Une source non applicable au domaine (ccTLD sans RDAP) n'est pas listée comme « non fourni ».
 - RDAP : contacts des rôles `registrant`, `administrative`, `technical`, `billing`, `abuse`
   (vCard `fn`, `org`, `adr`, `tel`, `email`, `handle`). Un rôle masqué par RFC 9537 s'affiche
   « Masqué par le registre » et **n'est jamais complété par WHOIS**.

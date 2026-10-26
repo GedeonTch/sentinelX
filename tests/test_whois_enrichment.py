@@ -170,6 +170,21 @@ def section(summary, title):
 # WHOIS raw parsing
 # ---------------------------------------------------------------------------
 
+class TestWhoisLibraryVersion:
+    def test_old_library_signature_is_reported_as_outdated_not_as_error(self):
+        def old_whois(domain, command=False, flags=0):  # python-whois 0.8.x signature
+            return {}
+
+        def call(domain, **kwargs):
+            return old_whois(domain, **kwargs)
+
+        status, fields = query_whois("example.com", call)
+        assert status.status == "library_outdated"
+        assert fields is None
+        assert "trop ancien" in status.label
+        assert "erreur" not in status.label
+
+
 class TestWhoisRawParsing:
     def test_registrant_fields_are_extracted_with_multiline_street(self):
         parsed = parse_whois_contacts(FAKE_RAW_WHOIS)["contacts"]["registrant"]
@@ -312,6 +327,17 @@ class TestPresentation:
         summary = summary_from(ok_rdap())
         summary.contacts.pop("billing", None)
         assert absence_label(summary) == "Absent du RDAP et du WHOIS"
+
+    def test_source_not_applicable_is_not_listed_as_not_provided(self):
+        # ccTLD without RDAP: WHOIS answered, RDAP does not exist for this domain.
+        summary = merge_registration(
+            "example.com",
+            RdapResult(status="tld_without_rdap"),
+            whois_status_ok(),
+            {"contacts": {}, "extra": {}, "masked": []},
+            "now",
+        )
+        assert absence_label(summary) == "Absent du WHOIS"
 
     def test_all_sources_timeout_is_timeout_not_absence(self):
         summary = merge_registration(

@@ -90,6 +90,7 @@ STATUS_LABELS: Dict[str, str] = {
     "unavailable": "service indisponible",
     "bootstrap_unavailable": "annuaire RDAP indisponible",
     "timeout": "timeout",
+    "library_outdated": "python-whois trop ancien (paramètres non supportés) : pip install -U \"python-whois>=0.9.6\"",
     "malformed": "réponse mal formée",
     "error": "erreur",
     "no_data": "aucune donnée exploitable",
@@ -97,6 +98,10 @@ STATUS_LABELS: Dict[str, str] = {
     "private_registry": "registre privé, WHOIS non disponible",
     "skipped": "non interrogé",
 }
+
+# Source not applicable to this domain (e.g. no RDAP service for a ccTLD): it is
+# not a failed query and is not listed as "non fourni".
+NOT_APPLICABLE_STATUSES = frozenset({"tld_without_rdap", "tld_unsupported", "private_registry", "skipped"})
 
 _DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 _STATUS_SPLIT_RE = re.compile(r"\s+https?://")
@@ -397,6 +402,10 @@ def query_whois(
 
 
 def _classify_whois_error(exc: BaseException) -> str:
+    if isinstance(exc, TypeError):
+        # python-whois older than 0.9.6 rejects inc_raw/timeout: an install
+        # problem, not a registry answer.
+        return "library_outdated"
     try:
         from whois.exceptions import (
             UnknownTldError,
@@ -669,7 +678,11 @@ def absence_label(summary: RegistrationSummary) -> str:
     if not answered:
         return empty_field_message(summary)
     text = "Absent du " + " et du ".join(answered)
-    missing = [f"{s.name} ({s.label})" for s in summary.sources if s.status != "ok"]
+    missing = [
+        f"{s.name} ({s.label})"
+        for s in summary.sources
+        if s.status != "ok" and s.status not in NOT_APPLICABLE_STATUSES
+    ]
     if missing:
         text += " ; non fourni par " + ", ".join(missing)
     return text
