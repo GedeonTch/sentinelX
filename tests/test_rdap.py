@@ -225,9 +225,12 @@ class TestParsing:
         data = parse_domain_object(DOMAIN_OBJECT)
         assert data.nameservers == ["a.iana-servers.net", "b.iana-servers.net"]
 
-    def test_person_name_is_not_stored(self):
+    def test_registrant_name_is_kept_for_display_but_raw_document_is_not(self):
+        # T26: public contact data is displayed by `whois` (user decision). The
+        # parsed contact is kept in memory only; the raw RDAP document is not.
         data = parse_domain_object(DOMAIN_OBJECT)
-        assert "Jane Doe" not in json.dumps(data.__dict__, default=str)
+        assert data.contacts["registrant"]["name"] == "Jane Doe"
+        assert "entities" not in data.__dict__ and "raw" not in data.__dict__
 
     def test_no_redaction_means_no_mask(self):
         assert parse_domain_object(DOMAIN_OBJECT).masked == frozenset()

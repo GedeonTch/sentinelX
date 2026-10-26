@@ -78,6 +78,8 @@ class RdapData:
     nameservers: List[str] = field(default_factory=list)
     dnssec: Optional[str] = None
     masked: FrozenSet[str] = frozenset()
+    # role ('registrant', 'admin', 'tech', 'billing', 'abuse') -> {field: value}
+    contacts: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -266,6 +268,50 @@ def _vcard_value(entity: Dict[str, Any], prop_name: str) -> Optional[str]:
     return None
 
 
+_RDAP_CONTACT_ROLES: Dict[str, str] = {
+    "registrant": "registrant",
+    "administrative": "admin",
+    "technical": "tech",
+    "billing": "billing",
+    "abuse": "abuse",
+}
+
+
+def _vcard_address(entity: Dict[str, Any]) -> Dict[str, str]:
+    """Return the vCard ``adr`` parts (RFC 6350 order), non-empty only."""
+    card = entity.get("vcardArray")
+    if not (isinstance(card, list) and len(card) == 2 and isinstance(card[1], list)):
+        return {}
+    names = ("pobox", "ext", "street", "city", "state", "postal_code", "country")
+    for prop in card[1]:
+        if isinstance(prop, list) and len(prop) >= 4 and prop[0] == "adr" and isinstance(prop[3], list):
+            parts: Dict[str, str] = {}
+            for name, value in zip(names, prop[3]):
+                if isinstance(value, list):
+                    value = " ".join(str(v) for v in value if isinstance(v, str))
+                if isinstance(value, str) and value.strip() and name not in ("pobox", "ext"):
+                    parts[name] = " ".join(value.split())
+            return parts
+    return {}
+
+
+def _rdap_contact(entity: Dict[str, Any]) -> Dict[str, str]:
+    """Contact fields of one RDAP entity (vCard + handle). Empty dict if none."""
+    card: Dict[str, str] = {}
+    for key, prop in (("name", "fn"), ("organization", "org"), ("email", "email")):
+        value = _vcard_value(entity, prop)
+        if value:
+            card[key] = value
+    phone = _vcard_value(entity, "tel")
+    if phone:
+        card["phone"] = re.sub(r"^tel:", "", phone, flags=re.IGNORECASE).strip()
+    card.update(_vcard_address(entity))
+    handle = entity.get("handle")
+    if isinstance(handle, str) and handle.strip():
+        card["handle"] = handle.strip()
+    return card
+
+
 def _walk_entities(entities: Any) -> List[Dict[str, Any]]:
     """Flatten RFC 9083 entities, including nested ones, in document order."""
     flat: List[Dict[str, Any]] = []
@@ -325,6 +371,11 @@ def parse_domain_object(document: Dict[str, Any]) -> RdapData:
             data.organization = _vcard_value(entity, "org")
         if "abuse" in roles and data.abuse_email is None:
             data.abuse_email = _vcard_value(entity, "email")
+        for rdap_role, contact_role in _RDAP_CONTACT_ROLES.items():
+            if rdap_role in roles and contact_role not in data.contacts:
+                card = _rdap_contact(entity)
+                if card:
+                    data.contacts[contact_role] = card
 
     masked = set()
     redacted = document.get("redacted")
@@ -346,5 +397,12 @@ def parse_domain_object(document: Dict[str, Any]) -> RdapData:
                 masked.add("abuse")
             if "email" in text and "registrant" not in text and "abuse" not in text:
                 masked.add("abuse")
+            for contact_role, words in (
+                ("admin", ("administrative", "admin")),
+                ("tech", ("technical", "tech")),
+                ("billing", ("billing",)),
+            ):
+                if any(word in text for word in words):
+                    masked.add(contact_role)
     data.masked = frozenset(masked)
     return data

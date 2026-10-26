@@ -117,7 +117,30 @@ Les deux sources sont interrogées séparément, avec leur propre statut.
 - Une réponse RDAP « introuvable » n'est pas remplacée silencieusement : la divergence est
   affichée, et les valeurs WHOIS portent la mention « à confirmer ».
 - Dates, statuts et serveurs de noms sont dédoublonnés entre les sources.
-- Seule l'organisation du titulaire est retenue ; les noms de personnes ne sont pas stockés.
+- Les contacts (titulaire, administratif, technique, facturation, abus) sont décrits dans
+  la section « Contacts et identifiants (T26) » ci-dessous.
+
+**Contacts et identifiants (T26)**
+- Données publiques du WHOIS et du RDAP, affichées par `whois` : nom, organisation, adresse
+  (rue, ville, état, code postal, pays), téléphone, fax, e-mail, identifiant de contact.
+  Pas de masquage ni d'anonymisation supplémentaire : le registre publie ces données.
+- WHOIS : les champs sont lus dans le texte brut, avant sa suppression. Le texte brut
+  n'est ni conservé ni affiché.
+- RDAP : contacts des rôles `registrant`, `administrative`, `technical`, `billing`, `abuse`
+  (vCard `fn`, `org`, `adr`, `tel`, `email`, `handle`). Un rôle masqué par RFC 9537 s'affiche
+  « Masqué par le registre » et **n'est jamais complété par WHOIS**.
+- Fusion : RDAP d'abord, WHOIS complète champ par champ. Les écarts de contacts ne sont pas
+  listés comme divergences, pour que les données personnelles n'entrent pas dans la preuve
+  des Findings.
+- Libellés d'un champ de contact : valeur ; `Masqué par le registre` ;
+  `Absent du WHOIS` ou `Absent du RDAP` (une source a répondu sans ce champ) ; `non fourni par …`
+  (une source n'a pas répondu) ; `Source en timeout` si aucune source n'a répondu.
+- Identifiants du registre : `Identifiant du domaine (registre)` et `Serveur WHOIS du registre`.
+- Affichage seulement, sans Finding : compte à rebours d'expiration (« dans N jour(s) »), ligne
+  d'information si l'expiration est dans moins de 180 jours ou dépassée, et écart entre les
+  serveurs de noms du DNS et ceux du registre (« à vérifier »).
+- Les contacts n'entrent ni dans `registration_evidence`, ni dans un Finding, ni dans une
+  sauvegarde : `whois` ne persiste rien.
 
 **Confiance du Finding d'enregistrement** : `CONFIRMED` si RDAP a répondu, `PROBABLE` si
 seul WHOIS a fourni des données.
@@ -161,6 +184,8 @@ n'échoue pas le diagnostic. Le tableau indique l'effet d'une absence :
 - `tests/test_dns_enum.py` : statuts DNS, AA, valeurs conservées, PTR, cible du Finding.
 - `tests/test_rdap.py` : bootstrap HTTPS, cache, statuts, parsing RFC 9083, masquage RFC 9537.
 - `tests/test_registration.py` : fusion champ par champ, masquage, divergences, WHOIS.
+- `tests/test_whois_enrichment.py` : contacts WHOIS et RDAP (fictifs), fusion par rôle, libellés,
+  écart NS, expiration, preuve sans contact, rendu CLI.
 - `tests/test_t24_recon_cli.py` : rendu réel de `whois`, `passive-recon` et `doctor`.
 
 Aucun test n'utilise le réseau, `/etc/hosts` réel, ni `avahi-browse` réel.

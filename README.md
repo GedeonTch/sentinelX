@@ -81,7 +81,7 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 |---|---|
 | `netlab doctor` | Vérifie l'environnement : Python, `nmap`, `enum4linux-ng` (requis) ; `arp`, `ip`, `avahi-browse` (optionnels, effet affiché si absents) |
 | `netlab scan` | Lance le scan d'une cible autorisée, avec confirmation avant trafic actif |
-| `netlab whois <ip ou domaine>` | Enregistrements DNS (A, MX, NS, TXT, CNAME), PTR, et données d'enregistrement RDAP + WHOIS ; affichage seulement, aucune donnée brute |
+| `netlab whois <ip ou domaine>` | Enregistrements DNS (A, MX, NS, TXT, CNAME), PTR, et données d'enregistrement RDAP + WHOIS : titulaire, serveurs de noms, contacts administratif, technique, facturation et abus (nom, organisation, adresse, téléphone, e-mail), identifiants du registre ; données publiques affichées, aucune donnée brute, rien n'est sauvegardé |
 | `netlab passive-recon [--network <CIDR, ip ou 192.168.1>]` | Sources locales : cache ARP (`arp -n`, repli `ip neigh`) et `/etc/hosts`. mDNS (`avahi-browse`) seulement après confirmation, refus par défaut. Aucun scan actif |
 | `netlab smb_enum --target <ip>` | Enumération SMB via `enum4linux-ng`, avec confirmation |
 | `netlab creds_check --target <ip>` | Vérification explicite des identifiants par défaut (`--service ftp\|snmp\|ssh`, `--dict`, `--profile`) ; SSH par mot de passe seulement sur `--service ssh`, premier contact accepté et mémorisé (TOFU), changement de clé bloquant |

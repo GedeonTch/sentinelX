@@ -315,7 +315,13 @@ def whois(
 def _render_domain_report(report) -> None:
     """Render a DomainReport. Domain/IP are always visible; no raw data is printed."""
     from recon.dns_enum import DNS_OK, DNS_STATUS_LABELS
-    from recon.registration import field_rows, SOURCE_RDAP
+    from recon.registration import (
+        SOURCE_RDAP,
+        contact_sections,
+        domain_rows,
+        expiry_notice,
+        nameserver_gap,
+    )
 
     max_values = 6
     display(f"[bold]Cible :[/bold] {escape(report.target)} ({report.kind})")
@@ -361,9 +367,31 @@ def _render_domain_report(report) -> None:
     reg_table.add_column("Champ", style="bold")
     reg_table.add_column("Valeur")
     reg_table.add_column("Source")
-    for label, value, source in field_rows(summary):
+    for label, value, source in domain_rows(summary):
         reg_table.add_row(escape(label), escape(value), escape(source))
     display(reg_table)
+
+    dns_ns = [
+        value
+        for outcome in report.outcomes
+        if outcome.record_type == "NS" and outcome.status == DNS_OK
+        for value in outcome.values
+    ]
+    gap = nameserver_gap(summary, dns_ns)
+    if gap:
+        display(f"[yellow]{escape(gap)}[/yellow]")
+    notice = expiry_notice(summary)
+    if notice:
+        display(f"[yellow]{escape(notice)}[/yellow]")
+
+    for title, rows in contact_sections(summary):
+        contact_table = Table(title=escape(title), box=box.ROUNDED)
+        contact_table.add_column("Champ", style="bold")
+        contact_table.add_column("Valeur")
+        contact_table.add_column("Source")
+        for label, value, source in rows:
+            contact_table.add_row(escape(label), escape(value), escape(source))
+        display(contact_table)
 
     sources_line = " ; ".join(f"{src.name} : {src.label}" for src in summary.sources)
     display(f"Sources : {escape(sources_line)}")
