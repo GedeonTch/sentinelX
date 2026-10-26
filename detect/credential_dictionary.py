@@ -9,7 +9,8 @@ MAX_BYTES = 1024 * 1024
 MAX_LINE = 16 * 1024
 MAX_ENTRIES = 500
 KNOWN = frozenset(('ftp', 'snmp', 'ssh', 'telnet', 'http', 'https', 'smb', 'rdp'))
-SUPPORTED = frozenset(('ftp', 'snmp'))
+# SMB stays out of V1: no candidate, no verification path.
+SUPPORTED = frozenset(('ftp', 'snmp', 'ssh'))
 CATALOG = Path(__file__).parent.parent / 'knowledge' / 'default_credentials.json'
 
 
@@ -29,6 +30,9 @@ class CatalogProvenance:
     profile_id: str
     catalog_version: str
     references: tuple[DocumentaryReference, ...]
+    # SSH Finding evidence only (see applicability_evidence): a readable title and applicability conditions.
+    title: str = ''
+    applicability: str = ''
 
     def as_evidence(self) -> dict:
         return {
@@ -36,6 +40,10 @@ class CatalogProvenance:
             'catalog_version': self.catalog_version,
             'documentation': [{'url': ref.url, 'section': ref.section} for ref in self.references],
         }
+
+    def applicability_evidence(self) -> dict:
+        """Replaces profile_id: the raw profile id may embed an account name, so SSH evidence never carries it."""
+        return {'profile_id': self.title, 'applicability': self.applicability}
 
 
 @dataclass(frozen=True, repr=False)
@@ -49,7 +57,16 @@ class Candidate:
     provenance: Optional[CatalogProvenance] = None
 
     def identity(self) -> tuple:
-        # This is the conservative *attempt* identity, not the exact vault identity.
+        # Result identity used to skip repeats after success. SSH is exact (Admin != admin);
+        # the other services keep their historical case-folded identity.
+        if self.service == 'snmp':
+            return ('snmp', self.community)
+        if self.service == 'ssh':
+            return ('account', '', self.username)
+        return ('account', self.domain.casefold(), self.username.casefold())
+
+    def budget_identity(self) -> tuple:
+        # Case-folded on purpose: 'Admin' and 'admin' must not bypass the per-account budget.
         return ('snmp', self.community) if self.service == 'snmp' else ('account', self.domain.casefold(), self.username.casefold())
 
     def secret(self) -> str:
@@ -90,6 +107,8 @@ def _candidate(row: object) -> Candidate:
             raise DictionaryError('An identity is required')
         if service == 'ftp' and (not row['username'].isascii() or not row['password'].isascii()):
             raise DictionaryError('FTP requires ASCII in this version')
+        if service == 'ssh' and (not row['username'].isascii() or not row['password'].isascii()):
+            raise DictionaryError('SSH requires ASCII in this version')
         if service == 'ftp' and row['username'].lower() in ('anonymous', 'ftp-anonymous'):
             raise DictionaryError('Anonymous access is not a credential check')
     return Candidate(**row)
@@ -164,7 +183,10 @@ def load_catalog(profile: Optional[str] = None) -> tuple[Candidate, ...]:
             version = document['catalog_version']
             if not isinstance(version, str) or not version:
                 raise ValueError
-            provenance = CatalogProvenance(key, version, tuple(references))
+            title, applicability = selected.get('title', ''), selected.get('applicability', '')
+            if not isinstance(title, str) or not isinstance(applicability, str):
+                raise ValueError
+            provenance = CatalogProvenance(key, version, tuple(references), title, applicability)
         from dataclasses import replace
         return tuple(replace(_candidate(row), qualified=provenance is not None, provenance=provenance)
                      for row in selected['candidates'])

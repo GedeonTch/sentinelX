@@ -352,6 +352,9 @@ def _render_credential_summary(report: CheckReport) -> None:
         display(Text("Protocol evidence (attempts): " + str(dict(item.details))))
         display(Text("Not tested (candidates): " + str(dict(item.skipped))))
         display(Text("Repetitions not performed (budget or deadline; observed timeouts are in Outcomes): " + str(dict(item.retry_stopped))))
+        if item.service == "ssh":
+            display(Text(f"SSH host keys accepted on first contact and saved: {item.host_keys_learned} "
+                         "(TOFU: not a proof of the server's identity)"))
     if any(item.save_uncertain for item in report.services):
         display("[yellow]Vault write outcome uncertain: testing stopped. "
                 "Inspect the vault before retrying; the last record may already exist.[/yellow]")
@@ -365,10 +368,10 @@ def _render_credential_summary(report: CheckReport) -> None:
 def creds_check_cmd(
     target: str = typer.Option(..., "--target", "-t", help="Single authorized IPv4 address."),
     dictionary: Optional[str] = typer.Option(None, "--dict", help="UTF-8 JSON Lines candidate file; replaces the built-in catalog."),
-    service: Optional[List[str]] = typer.Option(None, "--service", help="Repeatable: ftp or snmp. Default: both."),
+    service: Optional[List[str]] = typer.Option(None, "--service", help="Repeatable: ftp, snmp or ssh (SSH: password only). Default: ftp and snmp."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Applicable built-in product profile; incompatible with --dict."),
 ) -> None:
-    """Check FTP/SNMP explicitly. Accepted secrets go only to the encrypted vault."""
+    """Check FTP and SNMP (default) or SSH (--service ssh, password only). Accepted secrets go only to the encrypted vault."""
     from pathlib import Path
     from core.credential_vault import VaultError
     from detect.credential_dictionary import DictionaryError, prepare_candidates
@@ -385,6 +388,12 @@ def creds_check_cmd(
             display("Confirmed authentications will be saved in the encrypted vault only. "
                     "No identities or secrets enter Findings or reports. "
                     "Budgets: 3/service, 2/account, 10 total; lockout risk remains.")
+            if not service:
+                display("No --service given: FTP and SNMP are checked. SSH runs only with --service ssh.")
+            if "ssh" in selected:
+                display("SSH: password only; no command, terminal or session channel is opened. "
+                        "On first contact the server host key is accepted and saved in ~/.netlab/ssh_known_hosts "
+                        "(this does not verify the server's identity); a changed key blocks the check.")
             if profile:
                 display("The selected catalog profile must match this authorized product; "
                         "its applicability is not automatically detected.")

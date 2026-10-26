@@ -1,7 +1,8 @@
 # T22 — Fondations du dictionnaire, coffre et FTP/SNMP
 
-Ce lot ne rend pas T22 terminé. SSH, Telnet, HTTP(S), SMB et RDP ne sont pas
-activés. Aucun test automatique n'effectue de connexion à une cible réelle.
+Ce lot ne rend pas T22 terminé. Services pris en charge : FTP, SNMP et SSH par
+mot de passe (SSH uniquement sur `--service ssh`). SMB, Telnet, HTTP(S) et RDP ne
+sont pas activés. Aucun test automatique n'effectue de connexion à une cible réelle.
 
 ## Commande historique et autorisation
 
@@ -10,6 +11,7 @@ netlab creds_check --target 192.0.2.10
 netlab creds_check -t 192.0.2.10 --dict "mes dictionnaires/labo.txt"
 netlab creds_check -t 192.0.2.10 --service ftp --dict labo.txt
 netlab creds_check -t 192.0.2.10 --service snmp --profile cisco-wlc-7.4
+netlab creds_check -t 192.0.2.10 --service ssh --profile dell-idrac-legacy-root
 ```
 
 Une seule IPv4 explicite, ports FTP 21/TCP et SNMP 161/UDP. Pas de résolution DNS,
@@ -18,6 +20,53 @@ SNMP sont sélectionnés. L'option est répétable et remplace cette sélection.
 Chaque service testable demande sa propre confirmation. Aucun `--yes` ajouté.
 La commande reste autonome : les Findings ne sont pas enregistrés dans SQLite.
 Seuls les succès d'authentification sont conservés dans un coffre séparé.
+
+## SSH par mot de passe
+
+- **Explicite** : SSH n'est contrôlé que par `--service ssh`. Sans `--service`, seuls
+  FTP et SNMP sont contrôlés. Sans candidat SSH (catalogue intégré sans profil SSH,
+  ou `--dict` sans ligne `ssh`), la commande échoue explicitement : aucun succès n'est
+  présenté.
+- **Mot de passe seul.** Aucun terminal, canal de session, commande distante, agent
+  SSH ni clé privée. Le contrôle s'arrête après l'authentification ou le refus. Un
+  succès n'autorise aucune autre action.
+- **Premier contact (TOFU)** : si aucune clé n'est connue pour cet hôte et ce port,
+  la clé d'hôte est acceptée et enregistrée dans `~/.netlab/ssh_known_hosts`, avant
+  tout envoi de mot de passe. Ce fichier appartient à SentinelX : `~/.ssh/known_hosts`
+  n'est jamais lu ni modifié. Ce choix **ne garantit pas l'identité réelle du serveur**
+  lors du premier contact ; le rapport le signale. Les lectures et écritures de ce
+  fichier sont sérialisées par un verrou dédié `~/.netlab/ssh_known_hosts.lock` (jamais
+  supprimé) : deux premiers contacts simultanés ne peuvent pas enregistrer deux clés
+  pour le même hôte et port.
+- **Clé modifiée** : une clé différente pour le même hôte et port produit
+  `SSH_HOST_KEY_CHANGED`. Aucun mot de passe n'est envoyé et la clé n'est jamais
+  remplacée automatiquement. Vérifier hors bande avant toute suppression manuelle.
+- **Fichier de confiance illisible ou non inscriptible** : blocage sans mot de passe.
+- **Fichier ou dossier `.netlab` non sûr** (lien symbolique, objet non régulier, propriétaire
+  autre que l'utilisateur, écriture par groupe ou autres) : `SSH_TRUST_FILE_UNSAFE`, blocage
+  sans mot de passe. Les permissions ne sont jamais réparées automatiquement, car `~/.netlab`
+  contient aussi le coffre. Sous Linux uniquement pour les contrôles de permissions.
+- **Résultats** : au plus trois tentatives par candidat ; relance seulement après un
+  timeout avant l'envoi du mot de passe ; un timeout après envoi n'est jamais relancé.
+  Refus explicite = négatif. Méthode indisponible ou authentification partielle =
+  indéterminé. Une fermeture de connexion observée avant l'expiration du délai est signalée
+  comme `ERROR` (`SSH_NEGOTIATION_FAILED` avant l'envoi du mot de passe,
+  `CONNECTION_CLOSED_DURING_AUTH` après) : résultat non assimilé à `NO_MATCH`, service
+  arrêté sur cet équipement. Si le délai expire avant que la fermeture ou la réponse
+  soit observée, le résultat est un timeout (`TIMEOUT_BEFORE_PASSWORD` ou
+  `TIMEOUT_AFTER_PASSWORD`, selon la phase), jamais un mot de passe incorrect. Après le
+  début de l'appel d'authentification par mot de passe, aucune nouvelle tentative
+  automatique n'est effectuée. `Admin` et `admin` ont
+  des résultats distincts, mais partagent le budget du compte (casse ignorée).
+- **Catalogue SSH** : un seul profil confirmé, `dell-idrac-legacy-root` (nom de
+  sélection), source Dell KB 000133536, section « Legacy Password ». Il ne s'applique
+  que si l'option de mot de passe legacy a été choisie ou restaurée (l'usine iDRAC9
+  utilise un mot de passe unique). La page source ne dit pas que SSH est activé :
+  vérifier le service sur la cible. Le Finding SSH de ce profil porte la formulation
+  d'applicabilité « Profil Dell iDRAC Legacy » dans sa preuve, sans identifiant ni nom
+  de profil brut ; le succès ne vaut pas pour les autres équipements Dell.
+- **Dépendance** : `paramiko>=5.1,<6` (`requirements.txt`). Erreur d'import = message
+  explicite, aucun contrôle SSH.
 
 ## Dictionnaire personnalisé
 
@@ -52,8 +101,8 @@ ni ne l'efface. Le protéger et gérer sa rétention appartient à son propriét
 
 ## Catalogue, provenance et qualification
 
-`knowledge/default_credentials.json`, version **2026-10-10.2**, contient
-**9 profils, 19 entrées et 14 combinaisons uniques** (8 FTP, 6 SNMP), contre
+`knowledge/default_credentials.json`, version **2026-10-26.1**, contient
+**10 profils, 20 entrées et 15 combinaisons uniques** (8 FTP, 6 SNMP et 1 SSH), contre
 5 combinaisons uniques dans la première livraison. Aucun import de wordlist.
 Les champs `product_family`, `versions`, `limits`, `source` et, si nécessaire,
 `corroborating_sources` précisent la portée documentaire de chaque profil.
@@ -74,6 +123,7 @@ conservable (règle ci-dessous).
 | `carel-pcoweb-web-files` | pCOWeb PCO1**0WB0 / PCO10*0W*0, fiche +050003238, révision liée 1.2 ; login FTP web-administrateur explicite. Pas d'autre compte ajouté : notamment divergence du tableau root entre traductions. Firmware non précisé. |
 | `apc-nmc2-ftp` | NMC2 AP9630/AP9631/AP9635, FA156047, Manual (via FTP) / NMC2, étapes 1–4 ; FTP déjà activé, restrictions particulières AP9635 à vérifier, aucune extension NMC3/NMC4. |
 | `brocade-fos-legacy-snmp` | **Non qualifiant** : six communautés documentées, mais portée des défauts contradictoire entre Web Tools 9.2.x et Command Reference. Aucune assertion de défaut usine sur une installation 9.x neuve ni d'historique de mise à niveau vérifié. |
+| `dell-idrac-legacy-root` | Service **SSH** ; un candidat (identifiant et mot de passe par défaut publiés par le fabricant, voir la source). Dell KB 000133536, section « Legacy Password ». Applicable uniquement si le mode de mot de passe Legacy est activé ou restauré sur l'iDRAC, et si SSH est activé sur la cible (la source ne le dit pas). Ne pas l'étendre à tous les équipements Dell ; applicabilité hors Dell non confirmée. |
 
 Références fabricant consultées le 10 octobre 2026, avec sections et limites
 également enregistrées dans le catalogue :

@@ -95,7 +95,7 @@ def test_catalog_honest_provenance():
 
 def test_catalog_expanded_product_sources_and_safe_provenance():
     document = json.loads(CATALOG.read_text())
-    assert document['catalog_version'] == '2026-10-10.2'
+    assert document['catalog_version'] == '2026-10-26.1'
     unique = set()
     for key, profile in document['profiles'].items():
         candidates = load_catalog(key)
@@ -109,14 +109,14 @@ def test_catalog_expanded_product_sources_and_safe_provenance():
                 assert c.provenance.references[0].section == profile['source']['section']
             else:
                 assert not c.qualified and c.provenance is None
-    assert len(document['profiles']) == 9 and len(unique) == 14
+    assert len(document['profiles']) == 10 and len(unique) == 15  # + dell-idrac-legacy-root (one SSH candidate)
     assert len({row for row in unique if row[0] == 'ftp'}) == 8
     assert len({row for row in unique if row[0] == 'snmp'}) == 6
     assert len(load_catalog()) == 5  # never implicit merging
 
 
 @pytest.mark.parametrize('field,value', [('qualified', True), ('provenance', {'profile_id': 'cisco-wlc-7.4'}),
-                                         ('catalog_version', '2026-10-10.2')])
+                                         ('catalog_version', '2026-10-20.1')])
 def test_custom_cannot_supply_provenance(tmp_path, field, value):
     row = dict(service='ftp', username='synthetic', password='synthetic')
     row[field] = value

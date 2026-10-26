@@ -42,7 +42,7 @@ DISCOVER → DETECT → ASSESS → EXPLAIN → LEARN → REMEDIATE → VERIFY
 | Étape | Rôle | Modules V1 principaux |
 |---|---|---|
 | DISCOVER | Identifier les actifs et services exposés | `device_fingerprint`, `dns_enum`, `passive_recon` |
-| DETECT | Trouver les faiblesses et mauvaises configurations | `tcp_scan`, `udp_scan`, `service_detection`, `smb_enum`, `misconfig_detection`, `default_creds` (FTP et SNMP) |
+| DETECT | Trouver les faiblesses et mauvaises configurations | `tcp_scan`, `udp_scan`, `service_detection`, `smb_enum`, `misconfig_detection`, `default_creds` (FTP, SNMP et SSH par mot de passe sur sélection explicite) |
 | ASSESS | Calculer le score de risque de chaque Finding | `risk_scorer` (formule inspirée CVSS, documentée), `assessment` |
 | EXPLAIN | Produire une explication en 3 angles | Base de connaissances locale (`knowledge/`) ; IA en V2 uniquement |
 | LEARN | Former l'utilisateur de façon interactive | Zone Apprentissage — V2 uniquement |
@@ -69,7 +69,7 @@ Dernier commit de référence : `22831668` (branche `a4-arena`). Le workflow Git
 | LEARN (Zone Apprentissage) | ⚪ V2 | Hors V1 |
 | REMEDIATE automatisé | ⚪ V2+ | Hors V1 |
 
-**Travaux restants sur T22** (à mettre à jour à chaque lot) : règle des trois timeouts, SSH avec mot de passe, SMB. Telnet, HTTP, HTTPS et RDP sont reportés hors V1.
+**Travaux restants sur T22** (à mettre à jour à chaque lot) : SMB. Telnet, HTTP, HTTPS et RDP sont reportés hors V1.
 
 Détail des tickets : `.kiro/steering/sentinelX.md` (identifiants #001 à #020). Documentation complémentaire : `docs/SENTINEL-FINDINGS.md`, `docs/SENTINEL-LIFECYCLE.md`, `docs/SENTINEL-NOTIFICATIONS.md`, `docs/T22-CREDENTIALS.md`.
 
@@ -83,7 +83,7 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 | `netlab scan` | Lance le scan d'une cible autorisée, avec confirmation avant trafic actif |
 | `netlab whois <ip ou domaine>` | Enumération DNS/WHOIS passive, affichage seulement |
 | `netlab smb_enum --target <ip>` | Enumération SMB via `enum4linux-ng`, avec confirmation |
-| `netlab creds_check --target <ip>` | Vérification explicite des identifiants par défaut (`--service ftp\|snmp`, `--dict`, `--profile`) |
+| `netlab creds_check --target <ip>` | Vérification explicite des identifiants par défaut (`--service ftp\|snmp\|ssh`, `--dict`, `--profile`) ; SSH par mot de passe seulement sur `--service ssh`, premier contact accepté et mémorisé (TOFU), changement de clé bloquant |
 | `netlab creds list` / `netlab creds show <id>` | Consultation du coffre chiffré ; `show` exige une confirmation et un terminal interactif |
 | `netlab findings list\|show\|explain\|rescan` | Consultation des Findings et revérification (`rescan --session <id>`) |
 | `netlab report generate --session <id> --format html\|json` | Génération d'un rapport |
@@ -92,7 +92,7 @@ Les commandes ci-dessous utilisent le préfixe `netlab`, nom de la CLI principal
 
 ## Identifiants par défaut (T22)
 
-- **Périmètre actuel** : FTP et SNMP. SSH par mot de passe et SMB sont prévus en V1 mais ne sont pas encore implémentés. Telnet, HTTP, HTTPS et RDP sont hors V1.
+- **Périmètre actuel** : FTP, SNMP et SSH par mot de passe (`--service ssh` uniquement ; aucune commande distante). SMB n'est pas encore implémenté. Telnet, HTTP, HTTPS et RDP sont hors V1. Détails : `docs/T22-CREDENTIALS.md`.
 - **Cible** : une seule adresse IPv4 par exécution. Chaque service demande sa propre confirmation ; il n'existe pas d'option `--yes` pour cette commande.
 - **Budgets** : 3 tentatives par service, 2 par compte (1 pour SNMP), 10 au total. Intervalle de 2 secondes entre tentatives. Délai maximal de 10 secondes par tentative FTP et de 5 secondes par requête SNMP.
 - **Coffre chiffré** : `~/.netlab/credentials/vault.enc`, chiffrement AES-256-GCM, dérivation de clé scrypt. Seuls les identifiants acceptés y sont enregistrés. La phrase de passe doit faire au moins 20 caractères, et l'écriture du coffre est vérifiée avant tout trafic réseau.

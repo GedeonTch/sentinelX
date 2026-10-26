@@ -385,7 +385,7 @@ def test_real_catalog_provenance_reaches_evidence_without_candidate_reference(mo
     expected = candidates[0].provenance.as_evidence()
     assert evidence['provenance'] == [expected]
     assert expected['profile_id'] == profile
-    assert expected['catalog_version'] == '2026-10-10.2'
+    assert expected['catalog_version'] == '2026-10-26.1'
     assert all(ref['url'].startswith('https://') and ref['section'] for ref in expected['documentation'])
     assert set(evidence) == {'service', 'authentication', 'qualified_success_count', 'qualified_proofs', 'proof_scope', 'provenance'}
     for forbidden in ('username', 'password', 'community', 'candidate_id', 'candidate_index', 'secret_hash', 'vault_id'):

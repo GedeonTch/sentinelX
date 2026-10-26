@@ -1,22 +1,28 @@
-"""Explicit bounded FTP/SNMP checks, with mandatory ready secret sink.
+"""Explicit bounded FTP/SNMP/SSH (password only) checks, with mandatory ready secret sink.
 
 No session DB, scoring, transcripts or credentials in Findings. The public scan
 still returns List[Finding]; the CLI supplies a vault and an assainised report.
 """
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+import errno
 import ftplib
 import ipaddress
 import json
+import os
+from pathlib import Path
 import socket
+import stat
+import threading
 import time
-from typing import List, Optional, Protocol, Sequence
+from typing import Iterator, List, Optional, Protocol, Sequence
 
 import typer
 from core.finding import Category, Confidence, Evidence, Exposure, Finding, Severity
 from core.credential_vault import VaultError, VaultWriteUncertain
 from core.logger import display
-from detect.credential_dictionary import Candidate, load_catalog
+from detect.credential_dictionary import Candidate, SUPPORTED, load_catalog
 from detect.credential_snmp import build_get, classify_response, InvalidResponse, new_request_id
 
 MODULE_NAME = 'default_creds'
@@ -34,6 +40,13 @@ MAX_CONTROL_TRIES = 3
 # Any other TIMEOUT (e.g. FTP after PASS) is never repeated and stops the service on this device.
 TIMEOUT_BEFORE_PASSWORD, TIMEOUT_AFTER_PASSWORD, SNMP_NO_RESPONSE = 'TIMEOUT_BEFORE_PASSWORD', 'TIMEOUT_AFTER_PASSWORD', 'NO_RESPONSE'
 RETRIABLE_TIMEOUTS = frozenset({TIMEOUT_BEFORE_PASSWORD, SNMP_NO_RESPONSE})
+SERVICE_PORTS = {'ftp': 21, 'snmp': 161, 'ssh': 22}
+SERVICE_CONTEXT = {'ftp': 'ftp-password', 'snmp': 'snmpv1-sysDescr', 'ssh': 'ssh-password'}
+# SSH host keys: a SentinelX-owned file, never ~/.ssh/known_hosts (which is not modified).
+SSH_TRUST_FILE = 'ssh_known_hosts'
+SSH_HOST_KEY_LEARNED, SSH_HOST_KEY_CHANGED = 'SSH_HOST_KEY_LEARNED', 'SSH_HOST_KEY_CHANGED'
+# Poll step while waiting on paramiko events. Tests set it to 0 and drive a fake clock.
+_SSH_POLL_SECONDS = 0.1
 
 
 class Recorder(Protocol):
@@ -68,6 +81,8 @@ class ServiceReport:
     candidates_tested: int = 0
     # Repetitions cut short by a budget or deadline (never counted as observed timeouts).
     retry_stopped: Counter = field(default_factory=Counter)
+    # SSH only: host keys accepted on first contact and saved (trust on first use, not identity proof).
+    host_keys_learned: int = 0
 
 
 @dataclass
@@ -192,6 +207,287 @@ def _try_ftp_login(target_ip: str, username: str, password: str) -> CredentialPr
                 pass
 
 
+def ssh_trust_path() -> Path:
+    """SentinelX-owned trust file (Path.home() / '.netlab'); ~/.ssh/known_hosts is never read or written."""
+    return Path.home() / '.netlab' / SSH_TRUST_FILE
+
+
+class TrustFileUnsafe(OSError):
+    """The trust directory or file is a link or not a plain object, or someone else can change it."""
+
+
+def _ssh_owner_mode_ok(st: os.stat_result, what: str) -> None:
+    """POSIX: owned by the current user and not writable by group or others. Never repaired automatically."""
+    if not hasattr(os, 'getuid'):
+        return  # Windows has no POSIX owner/mode bits; the link checks still apply
+    if st.st_uid != os.getuid():
+        raise TrustFileUnsafe(f'SSH trust {what} is not owned by the current user')
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise TrustFileUnsafe(f'SSH trust {what} is writable by group or others')
+
+
+def _ssh_check_directory(st: os.stat_result) -> None:
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise TrustFileUnsafe('SSH trust directory is a link or not a directory')
+    _ssh_owner_mode_ok(st, 'directory')
+
+
+def _ssh_check_file(st: os.stat_result) -> None:
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise TrustFileUnsafe('SSH trust file is a link or not a regular file')
+    _ssh_owner_mode_ok(st, 'file')
+
+
+def _ssh_read_trust(path: Path) -> Optional[bytes]:
+    """Raw content, or None when the directory or the file is absent. Never follows a link."""
+    try:
+        directory = os.lstat(path.parent)
+    except FileNotFoundError:
+        return None
+    _ssh_check_directory(directory)
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    _ssh_check_file(before)
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # O_NOFOLLOW refused a link swapped in after the lstat above
+            raise TrustFileUnsafe('SSH trust file is a symbolic link') from None
+        raise
+    with os.fdopen(descriptor, 'rb') as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise TrustFileUnsafe('SSH trust file changed while being checked')
+        _ssh_check_file(opened)
+        return handle.read()
+
+
+def _ssh_load_trust(path: Path, host_id: str, name: str, key_b64: str) -> str:
+    """Return 'unknown', 'known' or 'changed'. Read or parse problems raise, which blocks the check."""
+    raw = _ssh_read_trust(path)
+    if raw is None:
+        return 'unknown'
+    stored = []
+    for line in raw.decode('utf-8').splitlines():
+        if not line.strip() or line.startswith('#'):
+            continue
+        fields = line.split()
+        if len(fields) != 3:
+            raise ValueError('Malformed trust file line')
+        if fields[0] == host_id:
+            stored.append((fields[1], fields[2]))
+    if not stored:
+        return 'unknown'
+    return 'known' if (name, key_b64) in stored else 'changed'
+
+
+def _ssh_store_trust(path: Path, host_id: str, name: str, key_b64: str) -> None:
+    """Append one entry: temp file 0600, fsync, atomic replace, then read back. Any failure raises."""
+    try:
+        os.lstat(path.parent)
+    except FileNotFoundError:
+        path.parent.mkdir(mode=0o700, parents=True)  # created by us: 0700; an existing directory keeps its mode
+    existing = _ssh_read_trust(path) or b''          # refuses unsafe directory or file before any write
+    if existing and not existing.endswith(b'\n'):
+        existing += b'\n'
+    content = existing + f'{host_id} {name} {key_b64}\n'.encode('ascii')
+    temp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)  # replaces a name, never writes through one
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+    if _ssh_load_trust(path, host_id, name, key_b64) != 'known':
+        raise OSError('Trust file read-back failed')
+
+
+@contextmanager
+def _ssh_trust_lock(path: Path) -> Iterator[None]:
+    """Exclusive blocking lock on '<trust file>.lock', held only for local file work (no network inside).
+    The lock file is never unlinked, never followed, and gets the same link/owner/mode checks as the trust file."""
+    import portalocker
+    lock = path.with_name(path.name + '.lock')
+    try:
+        os.lstat(path.parent)
+    except FileNotFoundError:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # created by us: 0700
+    _ssh_check_directory(os.lstat(path.parent))
+    try:
+        before = os.lstat(lock)
+    except FileNotFoundError:
+        before = None
+    if before is not None:
+        _ssh_check_file(before)
+    try:
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # O_NOFOLLOW refused a link swapped in after the lstat above
+            raise TrustFileUnsafe('SSH trust lock is a symbolic link') from None
+        raise
+    with os.fdopen(descriptor, 'r+b') as handle:
+        opened = os.fstat(handle.fileno())
+        if before is not None and (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise TrustFileUnsafe('SSH trust lock changed while being checked')
+        _ssh_check_file(opened)
+        portalocker.lock(handle, portalocker.LOCK_EX)
+        try:
+            yield
+        finally:
+            portalocker.unlock(handle)
+
+
+def _ssh_trust_decision(path: Path, host_id: str, name: str, key_b64: str) -> str:
+    """Return 'known', 'learned' or 'changed'. Under the lock: re-read, decide, store only if unknown, read back.
+    A changed key is never stored over the existing entry."""
+    with _ssh_trust_lock(path):
+        trust = _ssh_load_trust(path, host_id, name, key_b64)
+        if trust == 'unknown':
+            _ssh_store_trust(path, host_id, name, key_b64)
+            return 'learned'
+        return trust
+
+
+def _open_ssh_transport(target_ip: str, timeout: float):
+    import paramiko
+    sock = socket.create_connection((target_ip, SERVICE_PORTS['ssh']), timeout=timeout)
+    try:
+        return sock, paramiko.Transport(sock)
+    except BaseException:
+        sock.close()
+        raise
+
+
+def _ssh_left(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise socket.timeout()
+    return left
+
+
+def _ssh_wait(event, transport, deadline: float) -> str:
+    """'set' when the event fires before the deadline, 'inactive' if the transport ended before the deadline,
+    'timeout' once the deadline has passed.
+
+    The deadline is checked before the transport state, so an expiry is never reported as a closed connection.
+    An event observed after the deadline is a timeout: it may be a late answer, so it is never accepted as a result.
+    """
+    while True:
+        if event.wait(_SSH_POLL_SECONDS) or event.is_set():
+            return 'set' if time.monotonic() < deadline else 'timeout'
+        if time.monotonic() >= deadline:
+            return 'timeout'
+        if not transport.is_active():
+            return 'inactive'
+
+
+def _ssh_session(paramiko, target_ip: str, username: str, password: str, deadline: float,
+                 state: dict) -> CredentialProbeResult:
+    """Password-only exchange. state['phase'] is 'password' from the auth_password call onward:
+    paramiko sends the password only after SERVICE_ACCEPT, so any later timeout counts as possibly submitted."""
+    # PartialAuthentication is not exported at paramiko's top level; import it from its module explicitly.
+    from paramiko.ssh_exception import BadAuthenticationType, PartialAuthentication
+    sock, transport = _open_ssh_transport(target_ip, _ssh_left(deadline))
+    state['sock'], state['transport'] = sock, transport
+    negotiated = threading.Event()
+    transport.start_client(event=negotiated)
+    waited = _ssh_wait(negotiated, transport, deadline)
+    if waited == 'timeout':
+        return CredentialProbeResult('ssh', TIMEOUT, TIMEOUT_BEFORE_PASSWORD)
+    if waited != 'set' or not transport.is_active():
+        return CredentialProbeResult('ssh', ERROR, 'SSH_NEGOTIATION_FAILED')
+    try:
+        host_key = transport.get_remote_server_key()
+        name, key_b64 = host_key.get_name(), host_key.get_base64()
+    except paramiko.SSHException:
+        return CredentialProbeResult('ssh', ERROR, 'SSH_HOST_KEY_UNAVAILABLE')
+    # Trust decision BEFORE any password is sent. Unknown key: accept and save (TOFU). Changed key: block.
+    host_id, path = f'[{target_ip}]:{SERVICE_PORTS["ssh"]}', ssh_trust_path()
+    try:
+        trust = _ssh_trust_decision(path, host_id, name, key_b64)
+        if trust == 'changed':
+            return CredentialProbeResult('ssh', ERROR, SSH_HOST_KEY_CHANGED)
+        if trust == 'learned':
+            state['learned'] = True
+    except TrustFileUnsafe:
+        return CredentialProbeResult('ssh', ERROR, 'SSH_TRUST_FILE_UNSAFE')
+    except (OSError, ValueError, RuntimeError):
+        return CredentialProbeResult('ssh', ERROR, 'SSH_TRUST_STORE_UNAVAILABLE')
+    if deadline - time.monotonic() <= 0:
+        return CredentialProbeResult('ssh', TIMEOUT, TIMEOUT_BEFORE_PASSWORD)
+    authenticated = threading.Event()
+    state['phase'] = 'password'
+    transport.auth_password(username, password, event=authenticated)
+    waited = _ssh_wait(authenticated, transport, deadline)
+    if waited == 'timeout':
+        return CredentialProbeResult('ssh', TIMEOUT, TIMEOUT_AFTER_PASSWORD)
+    if waited != 'set':
+        return CredentialProbeResult('ssh', ERROR, 'CONNECTION_CLOSED_DURING_AUTH')
+    if transport.is_authenticated():
+        # Authenticated only: no channel, no command, no further action.
+        return CredentialProbeResult('ssh', SUCCESS, 'AUTHENTICATED')
+    exc = transport.get_exception()
+    if isinstance(exc, PartialAuthentication):
+        return CredentialProbeResult('ssh', INCONCLUSIVE, 'ADDITIONAL_AUTH_REQUIRED')
+    if isinstance(exc, BadAuthenticationType):
+        return CredentialProbeResult('ssh', INCONCLUSIVE, 'PASSWORD_METHOD_UNAVAILABLE')
+    if exc is None:
+        # paramiko reports an explicit password refusal through the event alone, with the transport still up.
+        if transport.is_active():
+            return CredentialProbeResult('ssh', NO_MATCH, 'AUTH_REJECTED')
+        return CredentialProbeResult('ssh', ERROR, 'CONNECTION_CLOSED_DURING_AUTH')
+    # Inspect only in memory. Never copy server text to any result, log or exception.
+    if any(word in str(exc).lower() for word in ('locked', 'lockout', 'too many')):
+        return CredentialProbeResult('ssh', LOCKED, 'ACCOUNT_RESTRICTION')
+    return CredentialProbeResult('ssh', ERROR, 'PROTOCOL_ERROR')
+
+
+def _try_ssh_login(target_ip: str, username: str, password: str) -> tuple[CredentialProbeResult, bool]:
+    """Returns (result, host_key_learned). Never opens a channel, agent, key, command or terminal."""
+    try:
+        import paramiko
+    except ImportError:
+        return CredentialProbeResult('ssh', ERROR, 'SSH_DEPENDENCY_MISSING'), False
+    deadline = time.monotonic() + ATTEMPT_SECONDS
+    state = {'phase': 'connect', 'learned': False}
+    try:
+        return _ssh_session(paramiko, target_ip, username, password, deadline, state), state['learned']
+    except socket.timeout:
+        detail = TIMEOUT_AFTER_PASSWORD if state['phase'] == 'password' else TIMEOUT_BEFORE_PASSWORD
+        return CredentialProbeResult('ssh', TIMEOUT, detail), state['learned']
+    except (ConnectionRefusedError, ConnectionResetError):
+        return CredentialProbeResult('ssh', INACCESSIBLE, 'CONNECTION_FAILED'), state['learned']
+    except (OSError, EOFError, paramiko.SSHException):
+        return CredentialProbeResult('ssh', ERROR, 'PROTOCOL_ERROR'), state['learned']
+    finally:
+        # close() only: no QUIT, no channel, nothing sent after the decision.
+        for key in ('transport', 'sock'):
+            handle = state.get(key)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+
+def _probe(target_ip: str, candidate: Candidate) -> tuple[CredentialProbeResult, bool]:
+    if candidate.service == 'ftp':
+        return _try_ftp_login(target_ip, candidate.username, candidate.password), False
+    if candidate.service == 'snmp':
+        return _try_snmp_community(target_ip, candidate.community), False
+    return _try_ssh_login(target_ip, candidate.username, candidate.password)
+
+
 def _build_snmp_v1_get(community: str, request_id: int = 1) -> bytes:
     return build_get(community, request_id)
 
@@ -233,7 +529,7 @@ def _try_snmp_community(target_ip: str, community: str) -> CredentialProbeResult
 
 def _make_finding(session_id: str, target_ip: str, service: str, count: int, proofs: Counter, provenance: list[dict]) -> Finding:
     return Finding(session_id=session_id, module=MODULE_NAME, target_ip=target_ip,
-        target_port=21 if service == 'ftp' else 161, target_service=RULE_ID,
+        target_port=SERVICE_PORTS[service], target_service=RULE_ID,
         category=Category.CREDENTIAL, severity=Severity.HIGH, confidence=Confidence.CONFIRMED,
         exposure=Exposure.INTERNAL,
         evidence=Evidence(raw=json.dumps({'service': service, 'authentication': 'confirmed',
@@ -255,7 +551,7 @@ def check_default_creds(target_ip: str, session_id: str, *,
         raise ValueError('A single IPv4 target is required') from None
     if recorder is None or not recorder.ready:
         raise VaultError('A write-verified vault is required before testing')
-    if any(s not in ('ftp', 'snmp') for s in services):
+    if any(s not in SUPPORTED for s in services):
         raise ValueError('Unsupported service')
     items = tuple(dict.fromkeys(candidates if candidates is not None else load_catalog()))
     report = report if report is not None else CheckReport()
@@ -289,8 +585,9 @@ def check_default_creds(target_ip: str, session_id: str, *,
             stop_service = False
             stop_timeout = False
             for candidate in pool:
+                # Result identity (exact for SSH) versus budget key (case-folded): see Candidate.
                 identity = candidate.identity()
-                account = (target_ip, *identity)
+                account = (target_ip, *candidate.budget_identity())
                 reason = None
                 if stop_all:
                     reason = 'STOPPED'
@@ -320,15 +617,16 @@ def check_default_creds(target_ip: str, session_id: str, *,
                     result.attempts += 1
                     total += 1
                     last_attempt = time.monotonic()
+                    learned = False
                     try:
-                        outcome = (_try_ftp_login(target_ip, candidate.username, candidate.password)
-                                   if candidate.service == 'ftp' else _try_snmp_community(target_ip, candidate.community))
+                        outcome, learned = _probe(target_ip, candidate)
                     except (KeyboardInterrupt, typer.Abort):
                         result.outcomes['CANCELLED'] += 1
                         raise
                     except Exception:
                         # Do not expose arbitrary backend exceptions with credentials.
                         outcome = CredentialProbeResult(candidate.service, ERROR, 'UNEXPECTED_BACKEND_ERROR')
+                    result.host_keys_learned += int(learned)
                     result.outcomes[outcome.status] += 1
                     result.details[outcome.detail] += 1
                     if outcome.status != TIMEOUT or outcome.detail not in RETRIABLE_TIMEOUTS or tries >= MAX_CONTROL_TRIES:
@@ -350,11 +648,15 @@ def check_default_creds(target_ip: str, session_id: str, *,
                     if candidate.qualified and candidate.provenance is not None:
                         qualified += 1
                         qualified_proofs[outcome.detail] += 1
-                        qualified_provenance[candidate.provenance] = candidate.provenance.as_evidence()
+                        evidence = candidate.provenance.as_evidence()
+                        if candidate.service == 'ssh':
+                            # SSH only: the catalogue's applicability text travels with the Finding.
+                            evidence.update(candidate.provenance.applicability_evidence())
+                        qualified_provenance[candidate.provenance] = evidence
                     try:
                         created = recorder.record(service=candidate.service,
-                            endpoint=f'{target_ip}:{21 if candidate.service == "ftp" else 161}',
-                            context='ftp-password' if candidate.service == 'ftp' else 'snmpv1-sysDescr',
+                            endpoint=f'{target_ip}:{SERVICE_PORTS[candidate.service]}',
+                            context=SERVICE_CONTEXT[candidate.service],
                             username=candidate.username, domain=candidate.domain,
                             secret=candidate.secret(), kind='community' if candidate.service == 'snmp' else 'password',
                             proof=outcome.detail)
