@@ -166,12 +166,14 @@ class TestStatus:
             "gateway_ip": "",
             "gateway_mac": "",
         }) as get_state, patch(
-            "sentinel.sentinel_manager.sentinel_get_assets", return_value=[]
-        ) as get_assets:
+            "sentinel.sentinel_manager.sentinel_identity_machine_counts", return_value=(0, 0)
+        ) as get_counts:
             result = status(SESSION)
         get_state.assert_called_once_with(SESSION)
-        get_assets.assert_called_once_with(SESSION)
+        # The counts are read for the identity recorded in the state, "" included.
+        get_counts.assert_called_once_with(SESSION, "192.168.1.0/24", "", "")
         assert result["network_id"] == SESSION
+        assert (result["known_hosts"], result["active_hosts"]) == (0, 0)
 
 
 # ---------------------------------------------------------------------------

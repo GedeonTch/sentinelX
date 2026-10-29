@@ -42,8 +42,8 @@ from core.database import (
     save_session,
     list_sentinel_network_ids,
     sentinel_count_unresolved_events,
-    sentinel_get_assets,
     sentinel_get_state,
+    sentinel_identity_machine_counts,
     sentinel_has_conflicting_baseline,
     sentinel_update_state,
     close_session,
@@ -390,6 +390,21 @@ def _resolve_status_network_id(network_id: Optional[str] = None) -> str:
     return known[0]
 
 
+def _state_identity(state: dict) -> Optional[tuple]:
+    """Return the NetworkIdentity recorded in the sentinel state, or None if incomplete.
+
+    The state row is the only record of the identity this DB serves. gateway_ip
+    and gateway_mac may legitimately be "" (route or ARP unavailable), so only
+    NULL means "never recorded". target_network must be a non-empty CIDR.
+    """
+    target = state.get("target_network")
+    gateway_ip = state.get("gateway_ip")
+    gateway_mac = state.get("gateway_mac")
+    if not target or gateway_ip is None or gateway_mac is None:
+        return None
+    return (target, gateway_ip, gateway_mac)
+
+
 def status(network_id: Optional[str] = None) -> dict:
     """Return Sentinel status for a network, never for an audit session."""
     network_id = _resolve_status_network_id(network_id)
@@ -405,9 +420,15 @@ def status(network_id: Optional[str] = None) -> dict:
     gateway_mac = state.get("gateway_mac", "")
 
     display_state = _compute_display_state(sentinel_state, last_check, interval)
-    assets = sentinel_get_assets(network_id)
-    known_hosts = len(assets)
-    active_hosts = sum(1 for a in assets if a.get("active", 1))
+    # Machines are the hosts of this identity's baseline (spec §8: actives/connues).
+    # An incomplete identity or an unreadable count is unavailable (None), never 0.
+    identity = _state_identity(state)
+    known_hosts = active_hosts = None
+    if identity is not None:
+        try:
+            known_hosts, active_hosts = sentinel_identity_machine_counts(network_id, *identity)
+        except Exception:
+            known_hosts = active_hosts = None
 
     try:
         unresolved = sentinel_count_unresolved_events(network_id)
@@ -451,7 +472,10 @@ def display_status(network_id: Optional[str] = None) -> None:
     state_color = {"ACTIF": "green", "DÉGRADÉ": "yellow", "INACTIF": "dim"}.get(state, "white")
 
     network = s.get("target_network") or "—"
-    machines = f"{s.get('active_hosts', '?')}/{s.get('known_hosts', '?')} machines"
+    if s.get("known_hosts") is None or s.get("active_hosts") is None:
+        machines = "machines indisponibles"
+    else:
+        machines = f"{s['active_hosts']}/{s['known_hosts']} machines"
     unresolved = s.get("unresolved_alerts")
     alerts = "indisponible" if unresolved is None else unresolved
     changes = "—"  # total changes requires session event count — omitted for compactness

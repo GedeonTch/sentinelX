@@ -29,7 +29,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:
     import pwd
@@ -1419,6 +1419,32 @@ def sentinel_get_baseline_entries(
             d["ports"] = json.loads(d.get("ports", "[]"))
             result.append(d)
         return result
+    finally:
+        conn.close()
+
+
+def sentinel_identity_machine_counts(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> Tuple[int, int]:
+    """Return ``(known, active)`` machines of one NetworkIdentity baseline.
+
+    known:  distinct IPs that have a baseline row for this exact identity. A
+            host is counted once, however many rows or assets carry its IP.
+    active: the known hosts whose asset still has ``active=1``.
+    Assets kept only for their events are not in the baseline, so they are not
+    counted. Rows of other identities in the same DB are not counted either.
+    """
+    conn = get_sentinel_connection(network_id)
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*), COALESCE(SUM(active_any), 0) FROM (
+                   SELECT a.ip AS ip, MAX(a.active) AS active_any
+                   FROM baseline b JOIN assets a ON a.id = b.asset_id
+                   WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
+                   GROUP BY a.ip)""",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchone()
+        return int(row[0]), int(row[1])
     finally:
         conn.close()
 

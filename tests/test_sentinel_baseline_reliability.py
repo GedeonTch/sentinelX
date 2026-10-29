@@ -10,6 +10,7 @@ the SQLite databases are temporary, and HOME is isolated.
 
 import sqlite3
 import subprocess
+from unittest.mock import Mock
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
@@ -537,9 +538,12 @@ NOW = "2026-10-29T10:00:00+00:00"
 
 @pytest.fixture
 def status_network(monkeypatch):
-    """Let status() find the temporary network, and give it a state row."""
+    """Let status() find the temporary network, with the identity recorded as the daemon does."""
     monkeypatch.setattr(manager, "list_sentinel_network_ids", lambda: [SESSION])
-    db.sentinel_update_state(SESSION, "active", last_check_time=NOW)
+    db.sentinel_update_state(SESSION, "active", last_check_time=NOW,
+                             target_network=IDENTITY.target_network,
+                             gateway_ip=IDENTITY.gateway_ip,
+                             gateway_mac=IDENTITY.gateway_mac)
 
 
 def asset_rows(ip):
@@ -562,9 +566,7 @@ class TestB6ActiveAndHistory:
         assert asset_rows("192.168.1.10")[0][1] == 1
         status = manager.status(SESSION)
         assert status["active_hosts"] == 1
-        # known_hosts keeps the current definition, len(assets): this value is the
-        # open product decision recorded in the report, not a settled contract.
-        assert status["known_hosts"] == 2
+        assert status["known_hosts"] == 1  # the retired host is not a baseline machine
 
     def test_returning_host_reuses_its_inactive_asset(self, status_network):
         assert learn({
@@ -582,6 +584,7 @@ class TestB6ActiveAndHistory:
 
         assert asset_rows("192.168.1.11") == [(retired, 1)]
         assert manager.status(SESSION)["active_hosts"] == 2
+        assert manager.status(SESSION)["known_hosts"] == 2
 
     def test_legacy_historical_asset_still_flagged_active_is_deactivated(self, status_network):
         """Assets left over from before the fix (active=1, no baseline row, an event) are cleared."""
@@ -594,6 +597,7 @@ class TestB6ActiveAndHistory:
         assert raw("SELECT active FROM assets WHERE id='legacy-old'") == [(0,)]
         assert raw("SELECT asset_id FROM events WHERE id='evt-legacy'") == [("legacy-old",)]
         assert manager.status(SESSION)["active_hosts"] == 1
+        assert manager.status(SESSION)["known_hosts"] == 1
 
     def test_other_identity_assets_are_not_deactivated(self, status_network):
         """A DB may hold another identity's baseline: relearning one never touches the other's assets."""
@@ -664,3 +668,119 @@ class TestSentinelFixtureConsistency:
     def test_invalid_expected_scope_is_a_programming_error(self):
         with pytest.raises(ValueError):
             parse(nmap_tcp_xml(open_ports=[22]), expected="1-99999")
+
+
+# ---------------------------------------------------------------------------
+# known_hosts = machines of the identity recorded in the state (spec §8)
+# ---------------------------------------------------------------------------
+
+OTHER = NetworkIdentity(NET, "192.168.1.1", "bb:bb:bb:bb:bb:bb")
+
+
+def set_state_identity(identity):
+    db.sentinel_update_state(SESSION, "active", last_check_time=NOW,
+                             target_network=identity.target_network,
+                             gateway_ip=identity.gateway_ip,
+                             gateway_mac=identity.gateway_mac)
+
+
+class TestKnownHostsIdentity:
+    def test_two_identities_in_one_db_are_counted_separately(self, status_network):
+        """Only the identity recorded in the state is counted; the other one stays out."""
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        db.sentinel_replace_baseline(
+            SESSION, OTHER.target_network, OTHER.gateway_ip, OTHER.gateway_mac,
+            [{"ip": "192.168.1.20", "mac": "", "ports": [80]},
+             {"ip": "192.168.1.21", "mac": "", "ports": [443]}], NOW, replace=True,
+        )
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (1, 1)
+
+        set_state_identity(OTHER)
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (2, 2)
+
+    def test_host_retired_but_kept_by_an_event_is_not_a_machine(self, status_network):
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }) is True
+        retired = asset_rows("192.168.1.11")[0][0]
+        db.sentinel_save_event(SESSION, "evt-retired", "new_port", NOW, retired, {}, False)
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}, force=True) is True
+
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (1, 1)
+        assert raw("SELECT COUNT(*) FROM assets WHERE id=?", (retired,)) == [(1,)]
+
+    def test_historical_asset_flagged_active_does_not_inflate_counts(self, status_network):
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        db.sentinel_save_asset(SESSION, "hist-1", "192.168.1.30", NOW, mac=None, active=True)
+        db.sentinel_save_event(SESSION, "evt-hist", "new_port", NOW, "hist-1", {}, False)
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (1, 1)
+
+    def test_host_returning_reuses_its_asset_without_double_count(self, status_network):
+        both = {
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }
+        assert learn(both) is True
+        asset = asset_rows("192.168.1.11")[0][0]
+        db.sentinel_save_event(SESSION, "evt-back", "new_port", NOW, asset, {}, False)
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}, force=True) is True
+        assert manager.status(SESSION)["known_hosts"] == 1
+        assert learn(both, force=True) is True
+        assert asset_rows("192.168.1.11") == [(asset, 1)]
+        assert manager.status(SESSION)["known_hosts"] == 2
+
+    def test_same_ip_in_two_baseline_rows_counts_once(self, status_network):
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        # A non-forced relearn appends rows: the same host now has two baseline rows.
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        assert raw("SELECT COUNT(*) FROM baseline")[0][0] == 2
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (1, 1)
+
+    def test_empty_gateway_values_are_a_valid_identity(self, status_network):
+        """gateway_ip "" and gateway_mac "" are real values (route or ARP unavailable), not missing."""
+        empty = NetworkIdentity(NET, "", "")
+        db.sentinel_replace_baseline(
+            SESSION, empty.target_network, "", "",
+            [{"ip": "192.168.1.10", "mac": "", "ports": []}], NOW, replace=True,
+        )
+        set_state_identity(empty)
+        status = manager.status(SESSION)
+        assert (status["known_hosts"], status["active_hosts"]) == (1, 1)
+
+    def test_incomplete_state_identity_is_unavailable_not_zero(self, monkeypatch):
+        monkeypatch.setattr(manager, "list_sentinel_network_ids", lambda: [SESSION])
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        # A state row written without the identity (e.g. a stop before any start).
+        db.sentinel_update_state(SESSION, "inactive")
+        status = manager.status(SESSION)
+        assert status["known_hosts"] is None
+        assert status["active_hosts"] is None
+        shown = Mock()
+        monkeypatch.setattr(manager, "display", shown)
+        manager.display_status(SESSION)
+        assert any("machines indisponibles" in str(c.args[0]) for c in shown.call_args_list)
+
+    def test_unreadable_count_is_unavailable_and_keeps_other_fields(self, status_network, monkeypatch):
+        def failing(*args):
+            raise sqlite3.OperationalError("injected")
+        monkeypatch.setattr(manager, "sentinel_identity_machine_counts", failing)
+        status = manager.status(SESSION)
+        assert status["known_hosts"] is None and status["active_hosts"] is None
+        assert status["sentinel_state"] == "active"
+        assert status["target_network"] == NET
+
+    def test_display_shows_actives_over_known(self, status_network, monkeypatch):
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }) is True
+        shown = Mock()
+        monkeypatch.setattr(manager, "display", shown)
+        manager.display_status(SESSION)
+        assert any("2/2 machines" in " ".join(str(c.args[0]).split()) for c in shown.call_args_list)
