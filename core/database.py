@@ -1483,21 +1483,23 @@ def sentinel_replace_baseline(
     ``entries`` are validated dicts ``{"ip", "mac", "ports"}``. With ``replace``,
     the identity's previous rows are deleted in the same transaction, so any
     failure rolls everything back and the previous baseline stays intact.
-    Assets are reused per IP; assets referenced by nothing (no baseline row and
-    no event) are pruned. Returns the number of replaced baseline rows.
+    Assets are reused per IP. With ``replace``, every asset that no baseline row
+    references any more is marked ``active=0``: it is historical. It is kept only
+    while an event references it, and pruned once nothing references it. Assets
+    of other identities are protected by their own baseline rows.
+    Returns the number of replaced baseline rows.
     """
     subject = "baseline non modifiée"
     conn = _open_sentinel_event_connection(network_id, subject)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        previous = {
-            row["ip"]: row["asset_id"]
-            for row in conn.execute(
-                "SELECT a.ip, b.asset_id FROM baseline b JOIN assets a ON a.id = b.asset_id "
-                "WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=? ORDER BY b.rowid",
-                (target_network, gateway_ip, gateway_mac),
-            ).fetchall()
-        }
+        previous: dict = {}
+        for row in conn.execute(
+            "SELECT a.ip, b.asset_id FROM baseline b JOIN assets a ON a.id = b.asset_id "
+            "WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=? ORDER BY b.rowid",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchall():
+            previous.setdefault(row["ip"], row["asset_id"])
         removed = 0
         if replace:
             removed = conn.execute(
@@ -1513,6 +1515,14 @@ def sentinel_replace_baseline(
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 (str(uuid.uuid4()), asset_id, target_network, gateway_ip, gateway_mac,
                  json.dumps(entry["ports"]), "{}", mac, last_scan),
+            )
+        if replace:
+            # Historical assets (no baseline row left) are never active. Their
+            # rows stay only while an event references them; see the DELETE below.
+            conn.execute(
+                """UPDATE assets SET active=0
+                   WHERE active=1
+                     AND id NOT IN (SELECT asset_id FROM baseline WHERE asset_id IS NOT NULL)"""
             )
         conn.execute(
             """DELETE FROM assets

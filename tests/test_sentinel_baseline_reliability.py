@@ -32,6 +32,7 @@ REAL_GET_ARP_MAC = _get_arp_mac
 SESSION = "session-baseline-reliability"
 NET = "192.168.1.0/24"
 IDENTITY = NetworkIdentity(NET, "192.168.1.1", "aa:aa:aa:aa:aa:aa")
+SENTINEL_PORTS = "1-1024,3389,5432,3306,1433,8080,8443"  # the Sentinel TCP scope
 PLANNED = 1030  # 1-1024 plus the 6 extra Sentinel ports
 
 
@@ -63,7 +64,8 @@ def isolated_env(tmp_path, monkeypatch):
 def nmap_tcp_xml(ip="192.168.1.10", open_ports=(), planned=PLANNED, *,
                  finished="success", host_state="up", timedout=False,
                  omit_extraports=False, extra_host_ip=None, duplicate_port=None,
-                 port_id_override=None, omit_runstats=False, omit_ports=False):
+                 port_id_override=None, omit_runstats=False, omit_ports=False,
+                 services=SENTINEL_PORTS):
     """A nmap TCP XML run; complete by default (zero open ports is valid)."""
     open_ports = sorted(open_ports)
     port_xml = "".join(
@@ -86,7 +88,7 @@ def nmap_tcp_xml(ip="192.168.1.10", open_ports=(), planned=PLANNED, *,
                  '<ports></ports></host>')
     runstats = "" if omit_runstats else f'<runstats><finished exit="{finished}"/></runstats>'
     return ('<?xml version="1.0"?>\n<nmaprun>'
-            f'<scaninfo type="connect" protocol="tcp" numservices="{planned}" services="1-1024"/>'
+            f'<scaninfo type="connect" protocol="tcp" numservices="{planned}" services="{services}"/>'
             f'{host}{runstats}</nmaprun>')
 
 
@@ -381,10 +383,20 @@ class TestC1ArpFallback:
             mac = REAL_GET_ARP_MAC(self.IP)
         return mac, calls
 
-    def test_arp_entry_is_used_and_ip_neigh_not_consulted(self):
+    def test_arp_entry_is_used_and_ip_neigh_not_consulted(self, capsys):
         mac, calls = self._mac({"arp": (0, f"{self.IP} ether AA:BB:CC:DD:EE:01 C eth0\n")})
         assert mac == "aa:bb:cc:dd:ee:01"
         assert calls == ["arp"]
+        assert "MAC" not in capsys.readouterr().out  # no warning on a reliable answer
+
+    def test_arp_non_zero_exit_falls_back_to_ip_neigh(self):
+        """A failed arp is unusable: its stdout is never trusted, even with a MAC in it."""
+        mac, calls = self._mac({
+            "arp": (1, f"{self.IP} ether aa:bb:cc:dd:ee:04 C eth0\n"),
+            "ip": (0, f"{self.IP} dev eth0 lladdr aa:bb:cc:dd:ee:02 REACHABLE\n"),
+        })
+        assert mac == "aa:bb:cc:dd:ee:02"
+        assert calls == ["arp", "ip"]
 
     def test_missing_arp_falls_back_to_ip_neigh(self):
         mac, calls = self._mac({
@@ -394,19 +406,21 @@ class TestC1ArpFallback:
         assert mac == "aa:bb:cc:dd:ee:02"
         assert calls == ["arp", "ip"]
 
-    def test_ip_neigh_entry_for_another_ip_is_ignored(self):
+    def test_ip_neigh_entry_for_another_ip_is_ignored_with_warning(self, capsys):
         mac, _ = self._mac({
             "arp": FileNotFoundError("arp"),
             "ip": (0, "192.168.1.7 dev eth0 lladdr aa:bb:cc:dd:ee:03 STALE\n"),
         })
         assert mac == ""
+        assert "No reliable ARP entry" in capsys.readouterr().out
 
-    def test_ip_neigh_failed_or_incomplete_entries_are_unknown(self):
+    def test_ip_neigh_failed_or_incomplete_entries_are_unknown_with_warning(self, capsys):
         mac, _ = self._mac({
             "arp": FileNotFoundError("arp"),
             "ip": (0, f"{self.IP} dev eth0  FAILED\n{self.IP} dev eth0  INCOMPLETE\n"),
         })
         assert mac == ""
+        assert "No reliable ARP entry" in capsys.readouterr().out
 
     def test_no_arp_and_no_ip_is_unknown_with_message(self, capsys):
         mac, _ = self._mac({
@@ -416,21 +430,36 @@ class TestC1ArpFallback:
         assert mac == ""
         assert "No usable ARP tool" in capsys.readouterr().out
 
-    def test_ip_neigh_error_is_unknown(self):
-        mac, _ = self._mac({"arp": FileNotFoundError("arp"), "ip": (1, "")})
+    def test_both_tools_failing_is_unknown_with_message(self, capsys):
+        mac, calls = self._mac({"arp": (1, ""), "ip": (1, "")})
         assert mac == ""
+        assert calls == ["arp", "ip"]
+        assert "No usable ARP tool" in capsys.readouterr().out
 
-    def test_arp_without_entry_does_not_fall_back(self):
-        mac, calls = self._mac({"arp": (1, f"{self.IP} (192.168.1.1) -- no entry\n")})
+    def test_arp_zero_exit_without_entry_is_unknown_with_warning_and_no_fallback(self, capsys):
+        mac, calls = self._mac({"arp": (0, f"{self.IP} (192.168.1.1) -- no entry\n")})
         assert mac == ""
         assert calls == ["arp"]
+        assert "No reliable ARP entry" in capsys.readouterr().out
 
-    def test_conflicting_arp_entries_are_unknown(self):
+    def test_conflicting_arp_entries_are_unknown_with_warning(self, capsys):
         mac, _ = self._mac({"arp": (0, (
             f"{self.IP} ether aa:bb:cc:dd:ee:01 C eth0\n"
             f"{self.IP} ether aa:bb:cc:dd:ee:09 C wlan0\n"
         ))})
         assert mac == ""
+        assert "Conflicting ARP entries" in capsys.readouterr().out
+
+    def test_conflicting_ip_neigh_entries_are_unknown_with_warning(self, capsys):
+        mac, _ = self._mac({
+            "arp": FileNotFoundError("arp"),
+            "ip": (0, (
+                f"{self.IP} dev eth0 lladdr aa:bb:cc:dd:ee:01 REACHABLE\n"
+                f"{self.IP} dev wlan0 lladdr aa:bb:cc:dd:ee:09 STALE\n"
+            )),
+        })
+        assert mac == ""
+        assert "Conflicting ARP entries" in capsys.readouterr().out
 
     def test_learn_stores_the_fallback_mac(self):
         run, _ = neigh_run({
@@ -495,3 +524,143 @@ class TestSentinelScanContract:
 
     def test_monitor_non_numeric_port_id_is_unknown(self):
         assert monitor_open_ports(_done(nmap_tcp_xml(open_ports=[22], port_id_override="abc"))) is None
+
+
+# ---------------------------------------------------------------------------
+# B6 follow-up — historical assets, the active flag and the status counters
+# ---------------------------------------------------------------------------
+
+from sentinel import sentinel_manager as manager  # noqa: E402  (grouped with the B6 tests)
+
+NOW = "2026-10-29T10:00:00+00:00"
+
+
+@pytest.fixture
+def status_network(monkeypatch):
+    """Let status() find the temporary network, and give it a state row."""
+    monkeypatch.setattr(manager, "list_sentinel_network_ids", lambda: [SESSION])
+    db.sentinel_update_state(SESSION, "active", last_check_time=NOW)
+
+
+def asset_rows(ip):
+    return raw("SELECT id, active FROM assets WHERE ip=? ORDER BY rowid", (ip,))
+
+
+class TestB6ActiveAndHistory:
+    def test_retired_host_with_event_is_kept_and_marked_inactive(self, status_network):
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }) is True
+        retired = asset_rows("192.168.1.11")[0][0]
+        db.sentinel_save_event(SESSION, "evt-keep", "new_port", NOW, retired, {}, False)
+
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}, force=True) is True
+
+        assert asset_rows("192.168.1.11") == [(retired, 0)]
+        assert raw("SELECT asset_id FROM events WHERE id='evt-keep'") == [(retired,)]
+        assert asset_rows("192.168.1.10")[0][1] == 1
+        status = manager.status(SESSION)
+        assert status["active_hosts"] == 1
+        # known_hosts keeps the current definition, len(assets): this value is the
+        # open product decision recorded in the report, not a settled contract.
+        assert status["known_hosts"] == 2
+
+    def test_returning_host_reuses_its_inactive_asset(self, status_network):
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }) is True
+        retired = asset_rows("192.168.1.11")[0][0]
+        db.sentinel_save_event(SESSION, "evt-keep", "new_port", NOW, retired, {}, False)
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}, force=True) is True
+
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }, force=True) is True
+
+        assert asset_rows("192.168.1.11") == [(retired, 1)]
+        assert manager.status(SESSION)["active_hosts"] == 2
+
+    def test_legacy_historical_asset_still_flagged_active_is_deactivated(self, status_network):
+        """Assets left over from before the fix (active=1, no baseline row, an event) are cleared."""
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        db.sentinel_save_asset(SESSION, "legacy-old", "192.168.1.11", NOW, mac=None, active=True)
+        db.sentinel_save_event(SESSION, "evt-legacy", "new_port", NOW, "legacy-old", {}, False)
+
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}, force=True) is True
+
+        assert raw("SELECT active FROM assets WHERE id='legacy-old'") == [(0,)]
+        assert raw("SELECT asset_id FROM events WHERE id='evt-legacy'") == [("legacy-old",)]
+        assert manager.status(SESSION)["active_hosts"] == 1
+
+    def test_other_identity_assets_are_not_deactivated(self, status_network):
+        """A DB may hold another identity's baseline: relearning one never touches the other's assets."""
+        identity_b = NetworkIdentity(NET, "192.168.1.1", "bb:bb:bb:bb:bb:bb")
+        db.sentinel_replace_baseline(
+            SESSION, NET, identity_b.gateway_ip, identity_b.gateway_mac,
+            [{"ip": "192.168.1.20", "mac": "", "ports": [80]}], NOW, replace=True,
+        )
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22])}) is True
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[443])}, force=True) is True
+
+        assert asset_rows("192.168.1.20")[0][1] == 1
+        assert baseline_exists(SESSION, identity_b) is True
+        assert stored_ports() == {"192.168.1.10": [443]}
+
+    def test_relearn_with_failed_scan_leaves_activity_unchanged(self, status_network):
+        assert learn({
+            "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
+            "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
+        }) is True
+        before = assets_snapshot()
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22]), "192.168.1.11": None}, force=True) is False
+        assert assets_snapshot() == before
+        assert raw("SELECT active FROM assets WHERE ip='192.168.1.11'") == [(1,)]
+
+
+# ---------------------------------------------------------------------------
+# Sentinel XML fixtures: complete runs are accepted, inconsistent ones refused
+# ---------------------------------------------------------------------------
+
+def parse(xml, expected=SENTINEL_PORTS, ip="192.168.1.10"):
+    from detect.tcp_scan import parse_sentinel_open_ports
+    return parse_sentinel_open_ports(xml, ip, expected)
+
+
+class TestSentinelFixtureConsistency:
+    def test_complete_fixture_over_the_sentinel_list_is_accepted(self):
+        assert parse(nmap_tcp_xml(open_ports=[22, 3389])) == [22, 3389]
+        assert parse(nmap_tcp_xml()) == []
+
+    def test_services_in_another_order_with_overlapping_ranges_is_accepted(self):
+        xml = nmap_tcp_xml(open_ports=[22], services="8443,8080,1433,3306,5432,3389,1-512,500-1024")
+        assert parse(xml) == [22]
+
+    def test_services_not_matching_the_sentinel_list_is_refused(self):
+        # The historical fixture shape: services 1-1024 with numservices 1030.
+        xml = nmap_tcp_xml(open_ports=[22], services="1-1024")
+        assert parse(xml) is None
+
+    def test_numservices_not_matching_the_list_is_refused(self):
+        xml = nmap_tcp_xml(open_ports=[22], planned=1024)
+        assert parse(xml) is None
+
+    def test_missing_services_attribute_is_refused(self):
+        xml = nmap_tcp_xml(open_ports=[22]).replace(f'services="{SENTINEL_PORTS}"', "")
+        assert parse(xml) is None
+
+    def test_malformed_services_is_refused(self):
+        assert parse(nmap_tcp_xml(open_ports=[22], services="1-1024,abc")) is None
+        assert parse(nmap_tcp_xml(open_ports=[22], services="70000")) is None
+
+    def test_open_port_outside_the_planned_list_is_refused(self):
+        assert parse(nmap_tcp_xml(open_ports=[22, 9999])) is None
+
+    def test_a_different_expected_scope_is_refused(self):
+        assert parse(nmap_tcp_xml(open_ports=[22]), expected="1-1024") is None
+
+    def test_invalid_expected_scope_is_a_programming_error(self):
+        with pytest.raises(ValueError):
+            parse(nmap_tcp_xml(open_ports=[22]), expected="1-99999")

@@ -154,7 +154,7 @@ def _get_open_ports(ip: str) -> Optional[List[int]]:
     try:
         from detect.tcp_scan import _run_nmap_tcp, parse_sentinel_open_ports
         xml = _run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS, strict=True)
-        return parse_sentinel_open_ports(xml, ip)
+        return parse_sentinel_open_ports(xml, ip, SENTINEL_TCP_PORTS)
     except Exception:
         return None
 

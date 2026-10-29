@@ -213,12 +213,12 @@ PING_XML_ONE = """<nmaprun>
   <host><status state="up"/><address addr="192.168.1.10" addrtype="ipv4"/></host>
 </nmaprun>"""
 
-# Complete nmap run for 192.168.1.10: port 22 open, 1029 other planned ports
-# closed (1030 = 1-1024 plus the 6 extra Sentinel ports). Incomplete XML is
-# unknown state and is refused by the baseline (see test_sentinel_baseline_reliability).
+# Complete nmap run for 192.168.1.10 over the Sentinel port list
+# (1-1024,3389,5432,3306,1433,8080,8443 = 1030 ports): port 22 open, 1029 closed.
+# Incomplete XML is unknown state (see test_sentinel_baseline_reliability).
 PORT_XML_ONE = """<?xml version="1.0"?>
 <nmaprun>
-  <scaninfo type="connect" protocol="tcp" numservices="1030" services="1-1024"/>
+  <scaninfo type="connect" protocol="tcp" numservices="1030" services="1-1024,3389,5432,3306,1433,8080,8443"/>
   <host>
     <status state="up" reason="echo-reply"/>
     <address addr="192.168.1.10" addrtype="ipv4"/>
@@ -347,3 +347,10 @@ class TestComputeNetworkId:
         # Baseline still found after restart
         assert db.sentinel_baseline_exists(nid_after_restart, IDENTITY_A.target_network,
                                            IDENTITY_A.gateway_ip, IDENTITY_A.gateway_mac)
+
+
+def test_port_xml_one_is_a_complete_sentinel_run():
+    """The learning fixture is a complete run over the Sentinel scope: port 22 is open."""
+    from detect.tcp_scan import parse_sentinel_open_ports
+    from sentinel.baseline import SENTINEL_TCP_PORTS
+    assert parse_sentinel_open_ports(PORT_XML_ONE, "192.168.1.10", SENTINEL_TCP_PORTS) == [22]

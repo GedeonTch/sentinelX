@@ -241,6 +241,8 @@ def _arp_tool_macs(ip: str) -> Optional[List[str]]:
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    if result.returncode != 0:
+        return None  # the tool ran but failed: unusable, so ip neigh is tried
     macs: List[str] = []
     for line in result.stdout.splitlines():
         tokens = line.split()
@@ -295,7 +297,10 @@ def _get_arp_mac(ip: str) -> str:
     if len(unique) > 1:
         display(f"[yellow]Conflicting ARP entries for {ip}: MAC unknown.[/yellow]")
         return ""
-    return unique[0] if unique else ""
+    if not unique:
+        display(f"[yellow]No reliable ARP entry for {ip}: MAC unknown.[/yellow]")
+        return ""
+    return unique[0]
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +419,9 @@ def learn_baseline(
     now = datetime.datetime.now(timezone.utc).isoformat()
     new_entries: List[dict] = []
     for ip in active_ips:
-        ports = parse_sentinel_open_ports(_run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS), ip)
+        ports = parse_sentinel_open_ports(
+            _run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS), ip, SENTINEL_TCP_PORTS,
+        )
         if ports is None:
             display(
                 f"[red]Port state of {ip} is unknown (scan failed or incomplete). "

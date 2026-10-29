@@ -529,22 +529,74 @@ def _parse_tcp_xml(
     return findings
 
 
-def parse_sentinel_open_ports(xml_output: Optional[str], target: str) -> Optional[List[int]]:
+_PORT_SPEC_TOKEN_RE = re.compile(r"([0-9]+)(?:-([0-9]+))?")
+_MAX_PORT_NUMBER = 65535
+
+
+def _expand_port_spec(spec: Optional[str]) -> Optional[frozenset]:
+    """Expand an nmap port list such as ``1-1024,3389`` into its set of ports.
+
+    Returns None when the list is absent or malformed, or when a port is out of
+    1-65535. Order and overlapping ranges do not matter.
+    """
+    if not spec:
+        return None
+    ports: set = set()
+    for token in spec.split(","):
+        match = _PORT_SPEC_TOKEN_RE.fullmatch(token.strip())
+        if match is None:
+            return None
+        low = int(match.group(1))
+        high = int(match.group(2)) if match.group(2) is not None else low
+        if not 1 <= low <= high <= _MAX_PORT_NUMBER:
+            return None
+        ports.update(range(low, high + 1))
+    return frozenset(ports)
+
+
+def parse_sentinel_open_ports(
+    xml_output: Optional[str],
+    target: str,
+    expected_ports: str,
+) -> Optional[List[int]]:
     """Return the open TCP ports of a proven complete scan of ``target``, else None.
 
     Sentinel contract. ``[]`` means the scan is proven complete and no port is
     open. ``None`` means the port state is unknown: no output, invalid or
-    incomplete XML, a host other than ``target`` or several hosts, or any
-    failed validation of _check_tcp_xml. ``None`` is never read as zero open
-    ports. The shared parser _parse_tcp_xml is not changed for other callers.
+    incomplete XML, several hosts, another address, a scan of a port set other
+    than ``expected_ports``, or any failed validation of _check_tcp_xml. ``None``
+    is never read as zero open ports. The shared parser _parse_tcp_xml is not
+    changed for other callers.
+
+    Args:
+        xml_output:     Raw nmap XML, or None.
+        target:         IP that was scanned.
+        expected_ports: The nmap port list that was requested, e.g.
+                        ``"1-1024,3389,5432"``. The XML must have scanned exactly
+                        this set: scaninfo services and numservices must agree.
     """
+    expected = _expand_port_spec(expected_ports)
+    if expected is None:
+        raise ValueError(f"invalid expected port list: {expected_ports!r}")
     if not xml_output:
         return None
     try:
         root = ET.fromstring(xml_output)
-        if len(root.findall("host")) != 1:
+        hosts = root.findall("host")
+        if len(hosts) != 1:
             return None
         _check_tcp_xml(xml_output, target)
+        if _planned_port_count(root, target) != len(expected):
+            return None
+        tcp_scaninfo = [info for info in root.findall("scaninfo") if info.get("protocol") == "tcp"]
+        if not tcp_scaninfo or any(
+            _expand_port_spec(info.get("services")) != expected for info in tcp_scaninfo
+        ):
+            return None
+        ports_elem = hosts[0].find("ports")
+        for port_elem in ports_elem.findall("port") if ports_elem is not None else []:
+            if port_elem.get("protocol") == "tcp" and int(port_elem.get("portid", "")) not in expected:
+                return None
         findings, _ = _parse_tcp_xml_with_states(xml_output, target, "sentinel")
     except (TcpScanFailed, ET.ParseError, ValueError):
         return None
