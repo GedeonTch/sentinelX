@@ -1248,6 +1248,66 @@ def get_sentinel_connection(network_id: str) -> sqlite3.Connection:
     return conn
 
 
+# Busy timeout of the Sentinel event, state and count path (D3) and of the
+# unconfirmed-session closure (D4). Other readers keep get_sentinel_connection.
+SENTINEL_STORAGE_BUSY_TIMEOUT = 1.0
+
+
+class SentinelStorageError(RuntimeError):
+    """A Sentinel event/state/count operation failed. The native error is __cause__."""
+
+    def __init__(self, message: str, *, contention: bool):
+        super().__init__(message)
+        self.contention = contention
+
+
+def _sqlite_contention_name(exc) -> Optional[str]:
+    """Return SQLITE_BUSY or SQLITE_LOCKED from the primary code (code & 0xff).
+
+    Extended codes keep their primary code in the low byte. Messages are never
+    inspected, and an absent code is not evidence of contention.
+    """
+    code = getattr(exc, 'sqlite_errorcode', None)
+    primary = code & 0xff if isinstance(code, int) else None
+    if primary == sqlite3.SQLITE_BUSY:
+        return 'SQLITE_BUSY'
+    if primary == sqlite3.SQLITE_LOCKED:
+        return 'SQLITE_LOCKED'
+    return None
+
+
+def _sentinel_storage_error(exc, subject: str) -> SentinelStorageError:
+    """Build a safe message: no SQLite text, no path, only the classified code."""
+    name = _sqlite_contention_name(exc)
+    if name is not None:
+        return SentinelStorageError(
+            f"Stockage Sentinel indisponible : contention/verrouillage ({name}) ; {subject}",
+            contention=True,
+        )
+    code = getattr(exc, 'sqlite_errorcode', None)
+    label = str(code) if isinstance(code, int) else 'inconnu'
+    return SentinelStorageError(
+        f"Stockage Sentinel en erreur hors contention (code SQLite {label}) ; {subject}",
+        contention=False,
+    )
+
+
+def _open_sentinel_event_connection(network_id: str, subject: str) -> sqlite3.Connection:
+    """Open the event/state/count connection with an explicit 1.0 s busy timeout."""
+    db_path = get_sentinel_db_path(network_id)
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=SENTINEL_STORAGE_BUSY_TIMEOUT)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.close()
+        raise _sentinel_storage_error(exc, subject) from exc
+    return conn
+
+
 def init_sentinel_db(network_id: str) -> None:
     """Create sentinel DB tables if they do not exist. Safe to call multiple times."""
     conn = get_sentinel_connection(network_id)
@@ -1400,13 +1460,16 @@ def sentinel_save_event(
     asset_id: Optional[str], details: dict, resolved: bool = False,
 ) -> None:
     """Insert a Sentinel event into the sentinel DB."""
-    conn = get_sentinel_connection(network_id)
+    subject = "événement non enregistré"
+    conn = _open_sentinel_event_connection(network_id, subject)
     try:
         conn.execute(
             "INSERT OR IGNORE INTO events (id,timestamp,type,asset_id,details,resolved) VALUES (?,?,?,?,?,?)",
             (event_id, timestamp, event_type, asset_id, json.dumps(details), int(resolved)),
         )
         conn.commit()
+    except sqlite3.Error as exc:
+        raise _sentinel_storage_error(exc, subject) from exc
     finally:
         conn.close()
 
@@ -1437,10 +1500,16 @@ def sentinel_get_events(
 
 
 def sentinel_count_unresolved_events(network_id: str) -> int:
-    """Return count of unresolved events in the sentinel DB."""
-    conn = get_sentinel_connection(network_id)
+    """Return count of unresolved events in the sentinel DB.
+
+    Raises SentinelStorageError on failure: an unreadable count is never zero.
+    """
+    subject = "comptage des alertes indisponible"
+    conn = _open_sentinel_event_connection(network_id, subject)
     try:
         return conn.execute("SELECT COUNT(*) FROM events WHERE resolved=0").fetchone()[0]
+    except sqlite3.Error as exc:
+        raise _sentinel_storage_error(exc, subject) from exc
     finally:
         conn.close()
 
@@ -1463,7 +1532,8 @@ def sentinel_update_state(
     import datetime
     from datetime import timezone
     now = datetime.datetime.now(timezone.utc).isoformat()
-    conn = get_sentinel_connection(network_id)
+    subject = "état non mis à jour"
+    conn = _open_sentinel_event_connection(network_id, subject)
     try:
         existing = conn.execute(
             "SELECT network_id FROM sentinel_state WHERE network_id=?", (network_id,)
@@ -1501,6 +1571,8 @@ def sentinel_update_state(
                  target_network, gateway_ip, gateway_mac, now, network_id),
             )
         conn.commit()
+    except sqlite3.Error as exc:
+        raise _sentinel_storage_error(exc, subject) from exc
     finally:
         conn.close()
 
@@ -1767,7 +1839,8 @@ def sentinel_fail_unconfirmed_session(session_id):
     from datetime import timezone
     conn = None
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0.2)
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True,
+                               timeout=SENTINEL_STORAGE_BUSY_TIMEOUT)
         with conn:
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").fetchone():
                 return False
@@ -1775,7 +1848,14 @@ def sentinel_fail_unconfirmed_session(session_id):
                 WHERE id=?""", (datetime.datetime.now(timezone.utc).isoformat(), session_id))
             return result.rowcount == 1
     except sqlite3.Error as exc:
-        raise SentinelControlError("Session non confirmée : clôture impossible") from exc
+        # Never report a closure that was not persisted; the native cause stays chained.
+        name = _sqlite_contention_name(exc)
+        if name is not None:
+            detail = f"contention/verrouillage ({name})"
+        else:
+            code = getattr(exc, 'sqlite_errorcode', None)
+            detail = f"erreur hors contention (code SQLite {code if isinstance(code, int) else 'inconnu'})"
+        raise SentinelControlError(f"Session non confirmée : clôture impossible ({detail})") from exc
     finally:
         if conn is not None:
             conn.close()

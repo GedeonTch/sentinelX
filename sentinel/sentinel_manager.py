@@ -36,6 +36,7 @@ import typer
 
 from core import database as _database
 from core.database import (
+    SentinelStorageError,
     init_db,
     init_sentinel_db,
     save_session,
@@ -317,11 +318,6 @@ def _do_check(
             baseline=baseline,
         )
         now = datetime.datetime.now(timezone.utc).isoformat()
-        sentinel_update_state(
-            network_id=network_id,
-            sentinel_status="active",
-            last_check_time=now,
-        )
         if changes:
             process_changes(
                 changes=changes,
@@ -330,6 +326,14 @@ def _do_check(
                 whitelist=whitelist,
                 counter=counter,
             )
+        # D1: the check is recorded only after its changes were persisted. A
+        # storage failure above raises before this point, so last_check_time
+        # is not advanced and the cycle is not reported as successful.
+        sentinel_update_state(
+            network_id=network_id,
+            sentinel_status="active",
+            last_check_time=now,
+        )
         counter.phase('attente', finished=True)
     except ScanDegradedError as exc:
         # Partial check: process observed changes, but do not update
@@ -357,7 +361,11 @@ def _do_check(
         except Exception:
             pass  # rendering must not replace the original failure
         # Unexpected failures leave through the common owner finalizer.
-        display(f"[yellow]Monitor check failed ({type(exc).__name__}); arrêt de la surveillance.[/yellow]")
+        if isinstance(exc, SentinelStorageError):
+            # Safe classified message only; the native SQLite error stays chained.
+            display(f"[yellow]Monitor: {exc} ; arrêt de la surveillance.[/yellow]")
+        else:
+            display(f"[yellow]Monitor check failed ({type(exc).__name__}); arrêt de la surveillance.[/yellow]")
         raise
 
 
@@ -404,7 +412,8 @@ def status(network_id: Optional[str] = None) -> dict:
     try:
         unresolved = sentinel_count_unresolved_events(network_id)
     except Exception:
-        unresolved = 0
+        # D2: an unreadable count is unavailable (None), never a false zero.
+        unresolved = None
 
     seconds_since = None
     seconds_until = None
@@ -443,7 +452,8 @@ def display_status(network_id: Optional[str] = None) -> None:
 
     network = s.get("target_network") or "—"
     machines = f"{s.get('active_hosts', '?')}/{s.get('known_hosts', '?')} machines"
-    alerts = s.get("unresolved_alerts", 0)
+    unresolved = s.get("unresolved_alerts")
+    alerts = "indisponible" if unresolved is None else unresolved
     changes = "—"  # total changes requires session event count — omitted for compactness
 
     line1 = (
