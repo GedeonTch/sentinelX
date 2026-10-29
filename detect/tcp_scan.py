@@ -529,6 +529,30 @@ def _parse_tcp_xml(
     return findings
 
 
+def parse_sentinel_open_ports(xml_output: Optional[str], target: str) -> Optional[List[int]]:
+    """Return the open TCP ports of a proven complete scan of ``target``, else None.
+
+    Sentinel contract. ``[]`` means the scan is proven complete and no port is
+    open. ``None`` means the port state is unknown: no output, invalid or
+    incomplete XML, a host other than ``target`` or several hosts, or any
+    failed validation of _check_tcp_xml. ``None`` is never read as zero open
+    ports. The shared parser _parse_tcp_xml is not changed for other callers.
+    """
+    if not xml_output:
+        return None
+    try:
+        root = ET.fromstring(xml_output)
+        if len(root.findall("host")) != 1:
+            return None
+        _check_tcp_xml(xml_output, target)
+        findings, _ = _parse_tcp_xml_with_states(xml_output, target, "sentinel")
+    except (TcpScanFailed, ET.ParseError, ValueError):
+        return None
+    if any(finding.target_ip != target for finding in findings):
+        return None
+    return sorted({finding.target_port for finding in findings if finding.target_port is not None})
+
+
 def _extract_service(
     service_elem: Optional[ET.Element],
 ) -> tuple[str, str, Confidence]:

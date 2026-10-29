@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from sentinel.arp_probe import ArpProbeStatus, arp_probe
-from sentinel.baseline import BaselineEntry, NetworkIdentity
+from sentinel.baseline import SENTINEL_TCP_PORTS, BaselineEntry, NetworkIdentity
 
 
 class ScanFailedError(Exception):
@@ -150,14 +150,11 @@ def _get_active_hosts(target_network: str) -> Optional[List[str]]:
 
 
 def _get_open_ports(ip: str) -> Optional[List[int]]:
-    """Run a TCP port scan; None means the scan failed."""
+    """Open TCP ports of a proven complete scan; None means the state is unknown."""
     try:
-        from detect.tcp_scan import _run_nmap_tcp, _parse_tcp_xml
-        xml = _run_nmap_tcp(ip, "normal", "1-1024,3389,5432,3306,1433,8080,8443")
-        if xml is None:
-            return None
-        findings = _parse_tcp_xml(xml, ip, "sentinel-monitor")
-        return [f.target_port for f in findings if f.target_port is not None]
+        from detect.tcp_scan import _run_nmap_tcp, parse_sentinel_open_ports
+        xml = _run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS, strict=True)
+        return parse_sentinel_open_ports(xml, ip)
     except Exception:
         return None
 

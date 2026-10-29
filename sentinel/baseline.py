@@ -24,9 +24,9 @@ Dependencies:
 from __future__ import annotations
 
 import datetime
+import re
 import socket
 import subprocess
-import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
@@ -35,11 +35,10 @@ from typing import Dict, List, Optional
 import typer
 
 from core.database import (
+    SentinelStorageError,
     sentinel_baseline_exists as db_baseline_exists,
-    sentinel_delete_baseline_for_identity,
     sentinel_get_baseline_entries,
-    sentinel_save_asset,
-    sentinel_save_baseline_entry,
+    sentinel_replace_baseline,
 )
 from core.logger import display
 
@@ -81,19 +80,19 @@ def _run_nmap_ping(target: str):
     return _real(target)
 
 
+# Ports scanned for every Sentinel host (baseline and monitor share this scope).
+SENTINEL_TCP_PORTS = "1-1024,3389,5432,3306,1433,8080,8443"
+
+
 def _run_nmap_tcp(target: str, profile: str, ports: str):
+    # Strict mode: a non-zero nmap exit code yields None, never partial output.
     from detect.tcp_scan import _run_nmap_tcp as _real
-    return _real(target, profile, ports)
+    return _real(target, profile, ports, strict=True)
 
 
 def _parse_active_hosts(xml: str):
     from recon.device_fingerprint import _parse_active_hosts as _real
     return _real(xml)
-
-
-def _parse_tcp_xml(xml: str, ip: str, session_id: str):
-    from detect.tcp_scan import _parse_tcp_xml as _real
-    return _real(xml, ip, session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -230,27 +229,73 @@ def _get_gateway_ip(target_network: str) -> str:
     return ""
 
 
+_MAC_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+_NEIGH_UNUSABLE_STATES = frozenset({"FAILED", "INCOMPLETE"})
+
+
+def _arp_tool_macs(ip: str) -> Optional[List[str]]:
+    """MACs listed for ``ip`` by ``arp -n``, or None when the tool is unusable."""
+    try:
+        result = subprocess.run(
+            ["arp", "-n", ip], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    macs: List[str] = []
+    for line in result.stdout.splitlines():
+        tokens = line.split()
+        if not tokens or not (tokens[0] == ip or f"({ip})" in tokens[:2]):
+            continue
+        macs.extend(
+            token.lower() for token in tokens[1:]
+            if _MAC_TOKEN_RE.match(token) and token.lower() != "ff:ff:ff:ff:ff:ff"
+        )
+    return macs
+
+
+def _ip_neigh_macs(ip: str) -> Optional[List[str]]:
+    """MACs listed for ``ip`` by ``ip -4 neigh``, or None when the tool is unusable."""
+    from recon.passive_recon import _parse_ip_neigh_output
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "neigh", "show", "to", ip],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return [
+        mac for entry_ip, mac, state in _parse_ip_neigh_output(result.stdout)
+        if entry_ip == ip and state not in _NEIGH_UNUSABLE_STATES
+    ]
+
+
 def _get_arp_mac(ip: str) -> str:
-    """Look up a MAC address from the OS ARP cache for a given IP.
+    """Return the neighbour-cache MAC of exactly ``ip``, or "" when it is unknown.
+
+    Reads ``arp -n``; ``ip -4 neigh`` is consulted only when the ``arp`` tool is
+    missing or unusable. No probe is sent. An empty answer (no usable entry,
+    conflicting MACs, no tool) means "MAC unknown": the host is stored without
+    a MAC, and that absence is never read as a change.
 
     Args:
         ip: IP address to look up.
 
     Returns:
-        str: MAC address (lowercase), or "" if not in ARP cache.
+        str: MAC address (lowercase), or "" when it is not reliably known.
     """
-    import re
-    try:
-        result = subprocess.run(
-            ["arp", "-n", ip],
-            capture_output=True, text=True, timeout=10,
-        )
-        match = re.search(r"([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})", result.stdout)
-        if match:
-            return match.group(1).lower()
-    except Exception:
-        pass
-    return ""
+    macs = _arp_tool_macs(ip)
+    if macs is None:
+        macs = _ip_neigh_macs(ip)
+    if macs is None:
+        display(f"[yellow]No usable ARP tool (arp, ip neigh): MAC of {ip} unknown.[/yellow]")
+        return ""
+    unique = sorted(set(macs))
+    if len(unique) > 1:
+        display(f"[yellow]Conflicting ARP entries for {ip}: MAC unknown.[/yellow]")
+        return ""
+    return unique[0] if unique else ""
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +373,10 @@ def learn_baseline(
     """Discover active hosts and their open ports, store as baseline.
 
     Stores in the persistent sentinel DB (~/.netlab/sentinel/<network_id>.db).
-    Atomic relearn: old baseline deleted ONLY after successful discovery.
+    Learning is all-or-nothing: every active host needs a proven complete port
+    scan (an unknown host aborts it, with no partial baseline). With
+    force_relearn, the old baseline is replaced in the same transaction as the
+    new one, so a failure leaves the previous baseline untouched.
 
     Args:
         target_network: CIDR to scan.
@@ -339,79 +387,59 @@ def learn_baseline(
     Returns:
         bool: True if baseline was successfully learned and stored.
     """
+    from detect.tcp_scan import parse_sentinel_open_ports
+    from recon.device_fingerprint import DiscoveryFailed
+
     display(f"[cyan]Learning baseline for {identity}...[/cyan]")
 
-    # Step 1 — discover active hosts via module-level wrappers (patchable in tests)
-    ping_xml = _run_nmap_ping(target_network)
-    if not ping_xml:
-        display("[yellow]No hosts found during baseline ping scan.[/yellow]")
+    # Step 1 — discover active hosts. A failed or unreadable ping scan is an
+    # unknown state, never an empty network.
+    try:
+        ping_xml = _run_nmap_ping(target_network)
+        if not ping_xml:
+            display("[yellow]No hosts found during baseline ping scan. Baseline not changed.[/yellow]")
+            return False
+        active_ips = _parse_active_hosts(ping_xml)
+    except DiscoveryFailed as exc:
+        display(f"[yellow]Baseline ping scan failed ({exc}). Baseline not changed.[/yellow]")
         return False
-
-    active_ips = _parse_active_hosts(ping_xml)
     if not active_ips:
-        display("[yellow]No active hosts — baseline not stored.[/yellow]")
+        display("[yellow]No active hosts. Baseline not changed.[/yellow]")
         return False
 
     display(f"[green]{len(active_ips)} host(s) found.[/green]")
 
-    # Step 2 — scan ports per host using module-level wrappers
-    try:
-        pass  # wrappers already defined at module level
-    except ImportError:
-        display("[red]tcp_scan module not available.[/red]")
-        return False
-
+    # Step 2 — every host needs a proven complete port scan. One unknown host
+    # aborts the whole learning: no partial baseline is ever stored.
     now = datetime.datetime.now(timezone.utc).isoformat()
     new_entries: List[dict] = []
-
     for ip in active_ips:
-        port_xml = _run_nmap_tcp(ip, "normal", "1-1024,3389,5432,3306,1433,8080,8443")
-        ports: List[int] = []
-        if port_xml:
-            findings = _parse_tcp_xml(port_xml, ip, network_id)
-            ports = [f.target_port for f in findings if f.target_port is not None]
-
-        asset_id = str(uuid.uuid4())
-        mac = _get_arp_mac(ip)
-        new_entries.append({
-            "asset_id": asset_id,
-            "ip": ip,
-            "mac": mac,
-            "ports": ports,
-        })
+        ports = parse_sentinel_open_ports(_run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS), ip)
+        if ports is None:
+            display(
+                f"[red]Port state of {ip} is unknown (scan failed or incomplete). "
+                "Baseline not stored; previous baseline unchanged.[/red]"
+            )
+            return False
+        new_entries.append({"ip": ip, "mac": _get_arp_mac(ip), "ports": ports})
         display(f"  [dim]{ip:15} — {len(ports)} port(s)[/dim]")
 
-    # Step 3 — atomic store
-    # Delete old baseline ONLY after successful discovery
-    if force_relearn and baseline_exists(network_id, identity):
-        deleted = sentinel_delete_baseline_for_identity(
+    # Step 3 — one transaction: the old baseline goes only if the new one is stored.
+    try:
+        replaced = sentinel_replace_baseline(
             network_id,
             identity.target_network,
             identity.gateway_ip,
             identity.gateway_mac,
+            new_entries,
+            now,
+            replace=force_relearn,
         )
-        display(f"[dim]Replaced {deleted} old baseline entry(ies).[/dim]")
+    except SentinelStorageError as exc:
+        display(f"[red]{exc}[/red]")
+        return False
 
-    for entry in new_entries:
-        # Ensure asset is in sentinel DB
-        sentinel_save_asset(
-            network_id=network_id,
-            asset_id=entry["asset_id"],
-            ip=entry["ip"],
-            first_seen=now,
-            mac=entry["mac"] or None,
-        )
-        sentinel_save_baseline_entry(
-            network_id=network_id,
-            entry_id=str(uuid.uuid4()),
-            asset_id=entry["asset_id"],
-            target_network=identity.target_network,
-            gateway_ip=identity.gateway_ip,
-            gateway_mac=identity.gateway_mac,
-            ports=entry["ports"],
-            mac=entry["mac"] or None,
-            last_scan=now,
-        )
-
+    if force_relearn and replaced:
+        display(f"[dim]Replaced {replaced} old baseline entry(ies).[/dim]")
     display(f"[green]Baseline stored — {len(new_entries)} host(s), identity: {identity}[/green]")
     return True

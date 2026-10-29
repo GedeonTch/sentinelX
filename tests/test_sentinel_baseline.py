@@ -213,16 +213,24 @@ PING_XML_ONE = """<nmaprun>
   <host><status state="up"/><address addr="192.168.1.10" addrtype="ipv4"/></host>
 </nmaprun>"""
 
-PORT_XML_ONE = """<nmaprun>
+# Complete nmap run for 192.168.1.10: port 22 open, 1029 other planned ports
+# closed (1030 = 1-1024 plus the 6 extra Sentinel ports). Incomplete XML is
+# unknown state and is refused by the baseline (see test_sentinel_baseline_reliability).
+PORT_XML_ONE = """<?xml version="1.0"?>
+<nmaprun>
+  <scaninfo type="connect" protocol="tcp" numservices="1030" services="1-1024"/>
   <host>
+    <status state="up" reason="echo-reply"/>
     <address addr="192.168.1.10" addrtype="ipv4"/>
     <ports>
       <port protocol="tcp" portid="22">
-        <state state="open"/>
+        <state state="open" reason="syn-ack"/>
         <service name="ssh" method="probed"/>
       </port>
+      <extraports state="closed" count="1029"/>
     </ports>
   </host>
+  <runstats><finished exit="success" elapsed="1.20"/><hosts up="1" down="0" total="1"/></runstats>
 </nmaprun>"""
 
 

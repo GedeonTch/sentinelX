@@ -27,6 +27,7 @@ import sqlite3
 from contextlib import contextmanager
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -1453,6 +1454,83 @@ def sentinel_delete_baseline_for_identity(
         conn.close()
 
 
+def _reuse_or_create_asset(conn, ip: str, previous_id: Optional[str], mac: Optional[str], now: str) -> str:
+    """Return the asset id for an IP: the identity's previous asset, else an unreferenced one, else a new one."""
+    if previous_id is None:
+        row = conn.execute(
+            "SELECT id FROM assets WHERE ip=? AND id NOT IN (SELECT asset_id FROM baseline) "
+            "ORDER BY rowid LIMIT 1",
+            (ip,),
+        ).fetchone()
+        previous_id = row[0] if row else None
+    if previous_id is not None:
+        conn.execute("UPDATE assets SET mac=?, active=1 WHERE id=?", (mac, previous_id))
+        return previous_id
+    asset_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO assets (id,ip,mac,hostname,os,first_seen,active) VALUES (?,?,?,NULL,NULL,?,1)",
+        (asset_id, ip, mac, now),
+    )
+    return asset_id
+
+
+def sentinel_replace_baseline(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+    entries: List[dict], last_scan: str, replace: bool,
+) -> int:
+    """Store one identity's complete baseline in a single transaction.
+
+    ``entries`` are validated dicts ``{"ip", "mac", "ports"}``. With ``replace``,
+    the identity's previous rows are deleted in the same transaction, so any
+    failure rolls everything back and the previous baseline stays intact.
+    Assets are reused per IP; assets referenced by nothing (no baseline row and
+    no event) are pruned. Returns the number of replaced baseline rows.
+    """
+    subject = "baseline non modifiée"
+    conn = _open_sentinel_event_connection(network_id, subject)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        previous = {
+            row["ip"]: row["asset_id"]
+            for row in conn.execute(
+                "SELECT a.ip, b.asset_id FROM baseline b JOIN assets a ON a.id = b.asset_id "
+                "WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=? ORDER BY b.rowid",
+                (target_network, gateway_ip, gateway_mac),
+            ).fetchall()
+        }
+        removed = 0
+        if replace:
+            removed = conn.execute(
+                "DELETE FROM baseline WHERE target_network=? AND gateway_ip=? AND gateway_mac=?",
+                (target_network, gateway_ip, gateway_mac),
+            ).rowcount
+        for entry in entries:
+            mac = entry["mac"] or None
+            asset_id = _reuse_or_create_asset(conn, entry["ip"], previous.get(entry["ip"]), mac, last_scan)
+            conn.execute(
+                """INSERT INTO baseline
+                   (id,asset_id,target_network,gateway_ip,gateway_mac,ports,services,mac,last_scan)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), asset_id, target_network, gateway_ip, gateway_mac,
+                 json.dumps(entry["ports"]), "{}", mac, last_scan),
+            )
+        conn.execute(
+            """DELETE FROM assets
+               WHERE id NOT IN (SELECT asset_id FROM baseline WHERE asset_id IS NOT NULL)
+                 AND id NOT IN (SELECT asset_id FROM events WHERE asset_id IS NOT NULL)"""
+        )
+        conn.commit()
+        return removed
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise _sentinel_storage_error(exc, subject) from exc
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # Sentinel — events
 
 def sentinel_save_event(
@@ -1924,7 +2002,6 @@ def sentinel_read_finding(session_id: str, finding_id: str) -> Finding:
     This cannot recover provenance whose every marker was historically erased.
     """
     import re
-    import uuid
     if (not isinstance(session_id, str)
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', session_id)
             or re.fullmatch(r'(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])', session_id, re.I)):

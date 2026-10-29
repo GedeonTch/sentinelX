@@ -964,8 +964,9 @@ class TestTcpRunnerContracts:
         with pytest.raises(RuntimeError, match="programming error"):
             self._run(True, side_effect=RuntimeError("programming error"))
 
-    def test_legacy_non_zero_exit_keeps_historical_output(self):
-        # Sentinel/baseline contract unchanged: exit 2 with stdout is still returned.
+    def test_non_sentinel_non_strict_exit_2_keeps_historical_output(self):
+        # Callers outside Sentinel keep the non-strict contract. Sentinel and the
+        # baseline no longer use it: see test_sentinel_baseline_wrapper_is_strict.
         out = self._run(False, return_value=self._completed(2, TCP_XML_UP_NO_OPEN_PORTS))
         assert out == TCP_XML_UP_NO_OPEN_PORTS
 
@@ -975,10 +976,14 @@ class TestTcpRunnerContracts:
     def test_legacy_known_error_returns_none(self):
         assert self._run(False, side_effect=FileNotFoundError("nmap")) is None
 
-    def test_sentinel_baseline_wrapper_keeps_legacy_contract(self):
+    def test_sentinel_baseline_wrapper_is_strict(self):
+        # Baseline (Sentinel) contract: exit 2 is a failed scan, never its partial output.
         from sentinel.baseline import _run_nmap_tcp as baseline_run
         with patch("detect.tcp_scan.subprocess.run",
                    return_value=self._completed(2, TCP_XML_UP_NO_OPEN_PORTS)):
+            assert baseline_run("192.168.1.1", "normal", "1-1024") is None
+        with patch("detect.tcp_scan.subprocess.run",
+                   return_value=self._completed(0, TCP_XML_UP_NO_OPEN_PORTS)):
             assert baseline_run("192.168.1.1", "normal", "1-1024") == TCP_XML_UP_NO_OPEN_PORTS
 
     def test_sentinel_monitor_open_ports_keeps_legacy_contract(self):
