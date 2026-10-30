@@ -17,13 +17,16 @@ Le groupe Sentinel existant est réutilisé, sans refonte du CLI général.
 
 ## Monitor
 
-La session réellement utilisée apparaît au-dessus de la liste. Chaque alerte
-émise porte un UUID complet et une sévérité, sans commande par alerte.
-Un seul pied contient la commande générique, avec la session réelle déjà remplie.
-En TTY, il appartient au rendu courant ; les rafraîchissements redessinent cet
-écran, ils ne constituent pas de nouvelles instructions. En non-TTY, le pied est
-émis une seule fois à la fermeture, y compris Ctrl+C traité proprement.
-Une terminaison forcée ne garantit pas cette finalisation.
+La session réellement utilisée figure dans l'en-tête et dans la commande du pied.
+Chaque alerte émise porte un UUID complet et une sévérité, sans commande par alerte.
+En TTY, elle est imprimée une seule fois au-dessus du cadre Live, à son émission ;
+le cadre ne contient ni liste ni UUID. Il reste borné à la hauteur du terminal
+(une ligne libre) ; si tous les hôtes ne tiennent pas, le nombre d'hôtes non
+affichés est indiqué. Un seul pied appartient au cadre courant : les
+rafraîchissements le redessinent sur place, ils ne constituent pas de nouvelles
+instructions. En non-TTY, l'en-tête et le tableau des hôtes sont émis une fois au
+démarrage, chaque alerte une fois, et le pied une fois à la fermeture, y compris
+Ctrl+C traité proprement. Une terminaison forcée ne garantit pas cette finalisation.
 
 Les UUID sont affichés hors des bordures des tableaux, sans ellipsis ni perte de
 caractère. En dessous de 36 colonnes, un UUID doit se replier sur plusieurs lignes ;

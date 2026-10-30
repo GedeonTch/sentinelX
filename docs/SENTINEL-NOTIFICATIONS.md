@@ -67,12 +67,15 @@ réellement terminé pendant cette exécution. L'heure de démarrage n'est plus
 écrite comme heure du dernier contrôle réussi. Un contrôle partiel/échoué ne
 met pas à jour `last_check_time` comme s'il avait réussi.
 
-En TTY, Rich affiche les 20 dernières notifications de cette exécution et les
-compteurs de tous les hôtes présents dans l'historique. La vue réévalue les
-échéances pendant l'attente sans changer le polling lifecycle. Sur petit terminal,
-les colonnes sont présentées en paires libellé/valeur. Beaucoup d'hôtes peuvent
-nécessiter du défilement. En non-TTY, chaque notification est écrite une seule fois,
-puis des instantanés de phase/compteurs, sans animation ni répétition des détails.
+En TTY, chaque notification de cette exécution est imprimée une seule fois au-dessus
+du cadre Live, à son émission. Le cadre affiche l'état du moniteur, le compteur des
+notifications de cette exécution et les compteurs des hôtes présents dans
+l'historique ; il est borné à la hauteur du terminal et indique combien d'hôtes ne
+sont pas affichés. La vue réévalue les échéances pendant l'attente sans changer le
+polling lifecycle. Sur petit terminal, les colonnes sont présentées en paires
+libellé/valeur. En non-TTY, l'en-tête et le tableau des hôtes sont écrits une fois au
+démarrage, chaque notification une fois, et le pied une fois à la fermeture, sans
+instantané à chaque changement de phase ni répétition des détails.
 
 Les alertes masquées n'apparaissent jamais individuellement dans cette vue.
 Les compteurs « affichées » et « masquées » couvrent 60 minutes ; les réserves sont

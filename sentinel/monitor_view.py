@@ -1,4 +1,4 @@
-"""Presentation only. Shared Rich console, bounded live history, plain log mode."""
+"""Presentation only. Shared Rich console, bounded live frame, plain log mode."""
 from collections import deque
 import unicodedata
 from rich.console import Group
@@ -15,9 +15,9 @@ def safe_text(value):
 
 
 # Plain-log mode: the section title is written once per execution, before the
-# first notification. TTY keeps its live list title unchanged.
+# first notification. TTY notifications are printed above the live frame, which
+# never contains them (no list, no UUID): see MonitorView.emit.
 NON_TTY_ALERTS_TITLE = 'Alertes de cette exécution'
-TTY_ALERTS_TITLE = 'Alertes affichées — 20 dernières de cette exécution'
 NO_NOTIFICATION_LINE = 'Aucune notification affichée pendant cette exécution.'
 
 
@@ -26,7 +26,7 @@ class MonitorView:
         self.network, self.interval, self.window = network, interval, window
         self.session_id = session_id
         self.footer_written = False
-        self.emitted = 0  # plain-log notifications actually written to the terminal
+        self.emitted = 0  # notifications actually written to the terminal, TTY or plain log
         self.console = console or get_console()
         self.rows = deque(maxlen=20)
         self.phase = 'attente'
@@ -63,20 +63,15 @@ class MonitorView:
         return Group(table, Text('UUID du Finding :', style='dim'),
                      Text(finding_id, overflow='fold'))
 
-    def alerts(self, rows):
-        items = [Text(TTY_ALERTS_TITLE)]
-        if not rows:
-            items.append(Text('Aucune notification affichée'))
-        for row in rows:
-            items.append(self.notification(row))
-        return Group(*items)
-
     def hosts(self):
+        return self._host_table(sorted(self.window.summary().items()))
+
+    def _host_table(self, items):
         if self.console.width < 60:
             table = Table(title='Hôtes — 60 min', show_header=False, expand=True)
             table.add_column(width=8)
             table.add_column(overflow='fold')
-            for host, row in sorted(self.window.summary().items()):
+            for host, row in items:
                 for key, value in [('Hôte', host), ('Affichées', row['displayed']),
                                    ('Masquées', row['masked']), ('Réserves', row['reserved']),
                                    ('État', row['state'])]:
@@ -85,16 +80,47 @@ class MonitorView:
         table = Table(title='État des hôtes — fenêtre glissante de 60 min', expand=True)
         for column in ('Hôte', 'Affichées (60 min)', 'Masquées (60 min)', 'État'):
             table.add_column(column, overflow='fold')
-        for host, row in sorted(self.window.summary().items()):
+        for host, row in items:
             state = row['state']
             if row['reserved']:
                 state += f" · {row['reserved']} réserve(s), dont {row['unknown']} inconnue(s)"
             table.add_row(Text(safe_text(host)), str(row['displayed']), str(row['masked']), Text(state))
         return table
 
+    def _frame(self, hosts, hidden):
+        parts = [self.header(),
+                 Text(f'Notifications affichées cette exécution : {self.emitted}'),
+                 self._host_table(hosts)]
+        if hidden:
+            parts.append(Text(f'{hidden} hôte(s) non affiché(s) dans ce cadre : hauteur du terminal insuffisante.',
+                              style='dim'))
+        parts.append(self.footer())
+        return Group(*parts)
+
     def __rich_console__(self, console, options):
-        # Re-evaluate expiry against the clock on refresh, no DB access/threaded writes.
-        yield Group(self.header(), self.alerts(list(self.rows)), self.hosts(), self.footer())
+        # Re-evaluated on each refresh (expiry against the clock), no DB access.
+        # The frame never exceeds the terminal height: the host table keeps as many
+        # hosts as fit (binary search on the rendered height; height grows with hosts)
+        # and the hidden ones are announced. Notifications are not part of the frame.
+        hosts = sorted(self.window.summary().items())
+        # One row stays free: Live.stop() ends with a newline, and a frame using the
+        # full height would scroll its own header into the scrollback.
+        budget = options.size.height - 1
+
+        def frame(count):
+            return self._frame(hosts[:count], len(hosts) - count)
+
+        def height(count):
+            return len(console.render_lines(frame(count), options, pad=False))
+
+        low, high, best = 0, len(hosts), 0
+        while low <= high:
+            middle = (low + high) // 2
+            if height(middle) <= budget:
+                best, low = middle, middle + 1
+            else:
+                high = middle - 1
+        yield frame(best)
 
     def __enter__(self):
         if self.console.is_terminal:
@@ -136,10 +162,9 @@ class MonitorView:
         self.phase = phase
         if finished is not None:
             self.last_finished = finished
+        # Plain log: no snapshot on phase change (the start header and the closing footer are the only ones).
         if self.live is not None:
             self.live.refresh()
-        else:
-            self.console.print(self.header(), self.hosts())  # never replay old alerts
 
     def emit(self, when, change, finding: Finding):
         if finding.session_id != self.session_id:
@@ -148,12 +173,12 @@ class MonitorView:
                finding.id, finding.severity.value.upper())
         self.rows.append(row)
         try:
+            # Written once, at emission. In TTY, Rich prints it above the live frame and
+            # redraws the frame below it; in plain log, this block alone is written.
+            self.console.print(self.notification(row))
+            self.emitted += 1
             if self.live is not None:
-                self.live.refresh()
-            else:
-                # Plain log: this notification block only; the title is already written.
-                self.console.print(self.notification(row))
-                self.emitted += 1
+                self.live.refresh()  # updates the notification counter in the frame
             self.console.file.flush()
         except BaseException:
             self.rows.pop()

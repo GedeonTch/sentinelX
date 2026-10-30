@@ -1,6 +1,7 @@
 """Rich and offline HTML acceptance; no real probes or user databases."""
 import hashlib
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -230,7 +231,7 @@ def test_monitor_displays_high_severity_from_finding(store):
 # ---------------------------------------------------------------------------
 
 NON_TTY_TITLE = 'Alertes de cette exécution'
-TTY_TITLE = 'Alertes affichées — 20 dernières de cette exécution'
+TTY_LIST_TITLE = 'Alertes affichées — 20 dernières de cette exécution'  # removed from the frame (T23-A fix)
 FOOTER_COMMAND = f'sentinel findings show <UUID_COMPLET> -s {RUN}'
 
 
@@ -285,17 +286,18 @@ def test_non_tty_footer_and_title_once_after_ctrl_c(store):
     assert text.count(emitted[0].id) == 1
 
 
-def test_tty_title_and_footer_unchanged(store):
+def test_tty_notification_printed_once_above_frame_without_list_title(store):
     output = io.StringIO()
     c = AlertCounter(clock=store)
     c.bind(NET)
     with MonitorView(NET, 60, c, Console(file=output, force_terminal=True, width=120), session_id=RUN) as view:
         c.view = view
-        send(c)
+        finding, = send(c)
         view.set_phase('attente')
     text = output.getvalue()
-    assert TTY_TITLE in text
+    assert TTY_LIST_TITLE not in text  # the live frame no longer holds the alert list
     assert NON_TTY_TITLE not in text
+    assert text.count(finding.id) == 1
     assert text.count('sentinel findings show') >= 1
 
 
@@ -316,3 +318,111 @@ def test_start_with_absent_gateway_warns_and_runs_normally(store, monkeypatch):
     assert not any('Échec' in m or 'failed' in m.lower() for m in messages)
     assert db.get_session('gateway-absent')['status'] == 'completed'
     assert db.sentinel_get_state(network)['sentinel_status'] == 'inactive'
+
+
+# ---------------------------------------------------------------------------
+# T23-A correction — bounded live frame, notifications printed once above it
+# ---------------------------------------------------------------------------
+
+HOST_ROW_RE = re.compile(r'192\.0\.2\.\d+')
+HIDDEN_RE = re.compile(r'(\d+) hôte\(s\) non affiché')
+
+
+def _frame_text(view, width, height):
+    buffer = io.StringIO()
+    Console(file=buffer, width=width, height=height).print(view)
+    return buffer.getvalue()
+
+
+def _frame_height(view, width, height):
+    console = Console(file=io.StringIO(), force_terminal=True, width=width, height=height)
+    return len(console.render_lines(view, console.options, pad=False))
+
+
+def _fourteen_hosts_twenty_notifications(c):
+    emitted = []
+    for i in range(10, 24):  # 14 hosts, one notification each
+        emitted.extend(send(c, NetworkChange('new_host', f'192.0.2.{i}', 'new host detected', 'test')))
+    for i in range(10, 16):  # 6 more notifications on known hosts (quota allows 3 per host)
+        emitted.extend(send(c, NetworkChange('new_host', f'192.0.2.{i}', 'new host detected', 'test')))
+    assert len(emitted) == 20
+    return emitted
+
+
+@pytest.mark.parametrize('rows,cols', [(24, 80), (30, 169)])
+def test_tty_frame_bounded_and_notifications_outside_frame(store, rows, cols):
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=cols, height=rows)
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, console, session_id=RUN) as view:
+        c.view = view
+        emitted = _fourteen_hosts_twenty_notifications(c)
+        # Height never reaches the terminal height: Live.stop() ends with a newline.
+        assert _frame_height(view, cols, rows) <= rows - 1
+        frame = _frame_text(view, cols, rows)
+        # Notifications are not in the frame; hidden hosts are counted, never silently dropped.
+        for finding in emitted:
+            assert finding.id not in ''.join(frame.split())
+        shown = len(HOST_ROW_RE.findall(frame))
+        hidden = int(HIDDEN_RE.search(frame).group(1)) if HIDDEN_RE.search(frame) else 0
+        assert shown + hidden == 14
+        assert 'Notifications affichées cette exécution : 20' in frame
+        assert frame.count('sentinel findings show') == 1
+    text = output.getvalue()
+    for finding in emitted:  # written exactly once, at emission
+        assert text.count(finding.id) == 1
+
+
+def test_tty_tall_terminal_shows_every_host_without_note(store):
+    cols, rows = 140, 60
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=True, width=cols, height=rows), session_id=RUN) as view:
+        c.view = view
+        _fourteen_hosts_twenty_notifications(c)
+        frame = _frame_text(view, cols, rows)
+    assert len(HOST_ROW_RE.findall(frame)) == 14
+    assert 'non affiché' not in frame
+    assert _frame_height(view, cols, rows) <= rows - 1
+
+
+def test_tty_refresh_without_notification_redraws_frame_in_place(store):
+    cols, rows = 80, 24
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, width=cols, height=rows)
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, console, session_id=RUN) as view:
+        c.view = view
+        _fourteen_hosts_twenty_notifications(c)
+        height = _frame_height(view, cols, rows)
+        for _ in range(3):
+            before = len(output.getvalue())
+            view.live.refresh()  # no new notification
+            redraw = output.getvalue()[before:]
+            # Each redraw moves the cursor back to the top of the frame and rewrites it:
+            # no line is added to the output, hence nothing accumulates above the frame.
+            assert redraw.count('\x1b[1A') == height - 1
+            assert redraw.count('\n') == height - 1
+            assert 'UUID du Finding' not in redraw
+
+
+def test_non_tty_phase_transitions_print_snapshot_once(store):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=100), session_id=RUN) as view:
+        c.view = view
+        emitted = _fourteen_hosts_twenty_notifications(c)
+        for phase in ('contrôle', 'attente', 'contrôle', 'attente'):
+            view.set_phase(phase, store().isoformat())
+    text = output.getvalue()
+    assert text.count('SENTINEL ● SURVEILLANCE ACTIVE') == 1
+    assert text.count('État des hôtes') == 1
+    assert text.count(NON_TTY_TITLE) == 1
+    assert text.count('sentinel findings show') == 1
+    assert '\x1b' not in text
+    for finding in emitted:
+        assert text.count(finding.id) == 1

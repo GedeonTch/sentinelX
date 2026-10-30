@@ -39,20 +39,18 @@ def test_final_footer_uuid_and_session(store, tty, width, count, interrupt):
             if count == 3:
                 assert send(c, NetworkChange('new_port', HOST, 'MASKED_FINAL_CANARY', 'test')) == []
             view.set_phase('attente')
-            # TTY redrawing repeats bytes, not instructions within a visible frame.
+            # The live frame carries the footer and the session, never a notification UUID:
+            # each UUID is written once, above the frame, when it is emitted.
             for _ in range(2):
                 frame = io.StringIO()
                 Console(file=frame, width=width).print(view)
                 text = frame.getvalue()
                 assert text.count('sentinel findings show') == 1
-                assert text.rfind('sentinel findings show') > text.rfind('UUID du Finding')
+                assert text.rfind('sentinel findings show') > text.rfind('État des hôtes')
                 assert f'-s{RUN}' in ''.join(text.split())
                 assert 'netlab' not in text
-                assert ''.join(text.split()).index(RUN) < ''.join(text.split()).index(emitted[0].id)
                 for finding in emitted:
-                    assert finding.id in ''.join(text.split())  # all 36 characters; no borders/ellipsis
-                    if width >= 36:
-                        assert finding.id in text
+                    assert finding.id not in ''.join(text.split())
                 assert 'MASKED_FINAL_CANARY' not in text
             if not tty:
                 assert 'sentinel findings show' not in output.getvalue()
@@ -62,10 +60,10 @@ def test_final_footer_uuid_and_session(store, tty, width, count, interrupt):
         assert interrupt
     raw = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', output.getvalue())
     assert ''.join(raw.split()).endswith(f'sentinelfindingsshow<UUID_COMPLET>-s{RUN}')
+    for finding in emitted:  # TTY redraws never repeat a notification
+        assert ''.join(raw.split()).count(finding.id) == 1
     if not tty:
         assert raw.count('sentinel findings show') == 1
-        for finding in emitted:
-            assert ''.join(raw.split()).count(finding.id) == 1
     else:
         assert not view.live.is_started
     if count == 3:
