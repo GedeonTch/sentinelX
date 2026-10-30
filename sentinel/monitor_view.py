@@ -14,11 +14,19 @@ def safe_text(value):
     return ''.join(c if not unicodedata.category(c).startswith('C') else ' ' for c in str(value))
 
 
+# Plain-log mode: the section title is written once per execution, before the
+# first notification. TTY keeps its live list title unchanged.
+NON_TTY_ALERTS_TITLE = 'Alertes de cette exécution'
+TTY_ALERTS_TITLE = 'Alertes affichées — 20 dernières de cette exécution'
+NO_NOTIFICATION_LINE = 'Aucune notification affichée pendant cette exécution.'
+
+
 class MonitorView:
     def __init__(self, network, interval, window, console=None, *, session_id):
         self.network, self.interval, self.window = network, interval, window
         self.session_id = session_id
         self.footer_written = False
+        self.emitted = 0  # plain-log notifications actually written to the terminal
         self.console = console or get_console()
         self.rows = deque(maxlen=20)
         self.phase = 'attente'
@@ -42,20 +50,25 @@ class MonitorView:
                  overflow='fold'),
         )
 
+    def notification(self, row):
+        """One notification block: no command, full UUID, severity. Never a title."""
+        when, host, kind, detail, finding_id, severity = row
+        table = Table(show_header=False, expand=True)
+        table.add_column(width=8)
+        table.add_column(overflow='fold')
+        for key, value in [('Heure', when), ('Hôte', host), ('Type', kind),
+                           ('Détail', detail), ('Sévérité', severity)]:
+            table.add_row(key, Text(safe_text(value)))
+        # No borders or ellipsis; narrow terminals wrap without losing characters.
+        return Group(table, Text('UUID du Finding :', style='dim'),
+                     Text(finding_id, overflow='fold'))
+
     def alerts(self, rows):
-        items = [Text('Alertes affichées — 20 dernières de cette exécution')]
+        items = [Text(TTY_ALERTS_TITLE)]
         if not rows:
             items.append(Text('Aucune notification affichée'))
-        for when, host, kind, detail, finding_id, severity in rows:
-            table = Table(show_header=False, expand=True)
-            table.add_column(width=8)
-            table.add_column(overflow='fold')
-            for key, value in [('Heure', when), ('Hôte', host), ('Type', kind),
-                               ('Détail', detail), ('Sévérité', severity)]:
-                table.add_row(key, Text(safe_text(value)))
-            items.extend([table, Text('UUID du Finding :', style='dim'),
-                          # No borders or ellipsis; narrow terminals wrap without losing characters.
-                          Text(finding_id, overflow='fold')])
+        for row in rows:
+            items.append(self.notification(row))
         return Group(*items)
 
     def hosts(self):
@@ -97,7 +110,7 @@ class MonitorView:
                     pass
                 raise
         else:
-            self.console.print(self.header(), self.alerts([]), self.hosts())
+            self.console.print(self.header(), Text(NON_TTY_ALERTS_TITLE), self.hosts())
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -110,6 +123,8 @@ class MonitorView:
                 self.live.stop()
             elif not self.footer_written:
                 self.footer_written = True
+                if self.emitted == 0:
+                    self.console.print(Text(NO_NOTIFICATION_LINE))
                 self.console.print(self.footer())
                 self.console.file.flush()
         except BaseException:
@@ -136,7 +151,9 @@ class MonitorView:
             if self.live is not None:
                 self.live.refresh()
             else:
-                self.console.print(self.alerts([row]))
+                # Plain log: this notification block only; the title is already written.
+                self.console.print(self.notification(row))
+                self.emitted += 1
             self.console.file.flush()
         except BaseException:
             self.rows.pop()

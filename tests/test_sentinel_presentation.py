@@ -223,3 +223,96 @@ def test_monitor_displays_high_severity_from_finding(store):
         finding, = send(c)
     assert finding.id[:8] in output.getvalue()
     assert 'HIGH' in output.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# T23-A — UX du moniteur (docs/SENTINEL-FINDINGS.md, section Monitor)
+# ---------------------------------------------------------------------------
+
+NON_TTY_TITLE = 'Alertes de cette exécution'
+TTY_TITLE = 'Alertes affichées — 20 dernières de cette exécution'
+FOOTER_COMMAND = f'sentinel findings show <UUID_COMPLET> -s {RUN}'
+
+
+@pytest.mark.parametrize('count', [1, 3])
+def test_non_tty_title_once_and_each_notification_once(store, count):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=100), session_id=RUN) as view:
+        c.view = view
+        emitted = []
+        for _ in range(count):
+            emitted.extend(send(c))
+        view.set_phase('attente')
+    text = output.getvalue()
+    assert text.count(NON_TTY_TITLE) == 1
+    assert '20 dernières' not in text
+    assert text.count('sentinel findings show') == 1
+    assert text.rstrip().endswith(FOOTER_COMMAND)
+    assert len(emitted) == count
+    for finding in emitted:
+        assert text.count(finding.id) == 1  # emitted exactly once, full UUID
+
+
+def test_non_tty_zero_notification_is_explicit_once(store):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=100), session_id=RUN) as view:
+        c.view = view
+    text = output.getvalue()
+    assert text.count(NON_TTY_TITLE) == 1
+    assert text.count('Aucune notification affichée pendant cette exécution.') == 1
+    assert text.count('sentinel findings show') == 1
+    assert text.rstrip().endswith(FOOTER_COMMAND)
+
+
+def test_non_tty_footer_and_title_once_after_ctrl_c(store):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    emitted = []
+    with pytest.raises(KeyboardInterrupt):
+        with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=100), session_id=RUN) as view:
+            c.view = view
+            emitted.extend(send(c))
+            raise KeyboardInterrupt
+    text = output.getvalue()
+    assert text.count(NON_TTY_TITLE) == 1
+    assert text.count('sentinel findings show') == 1
+    assert text.rstrip().endswith(FOOTER_COMMAND)
+    assert text.count(emitted[0].id) == 1
+
+
+def test_tty_title_and_footer_unchanged(store):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=True, width=120), session_id=RUN) as view:
+        c.view = view
+        send(c)
+        view.set_phase('attente')
+    text = output.getvalue()
+    assert TTY_TITLE in text
+    assert NON_TTY_TITLE not in text
+    assert text.count('sentinel findings show') >= 1
+
+
+def test_start_with_absent_gateway_warns_and_runs_normally(store, monkeypatch):
+    from sentinel import sentinel_manager as manager
+    from sentinel.baseline import NetworkIdentity, compute_network_id
+    identity = NetworkIdentity('192.0.2.0/24', '', '')
+    network = compute_network_id(identity)
+    messages, loops = [], []
+    monkeypatch.setattr(manager, 'display', lambda *args, **kwargs: messages.append(str(args[0]) if args else ''))
+    monkeypatch.setattr(manager, 'detect_network_identity', lambda target: identity)
+    monkeypatch.setattr(manager, 'baseline_exists', lambda *args: True)
+    monkeypatch.setattr(manager, '_run_loop', lambda **kwargs: loops.append(kwargs['identity']))
+    manager.start('192.0.2.0/24', 'gateway-absent')
+    assert loops == [identity]  # the monitor cycle still starts
+    assert any('could not determine gateway IP' in m for m in messages)
+    assert any('Network identity is partial' in m for m in messages)
+    assert not any('Échec' in m or 'failed' in m.lower() for m in messages)
+    assert db.get_session('gateway-absent')['status'] == 'completed'
+    assert db.sentinel_get_state(network)['sentinel_status'] == 'inactive'
