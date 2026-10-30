@@ -27,6 +27,9 @@ rafraîchissements le redessinent sur place, ils ne constituent pas de nouvelles
 instructions. En non-TTY, l'en-tête et le tableau des hôtes sont émis une fois au
 démarrage, chaque alerte une fois, et le pied une fois à la fermeture, y compris
 Ctrl+C traité proprement. Une terminaison forcée ne garantit pas cette finalisation.
+Après chaque contrôle terminé, une ligne de progression (`[HH:MM:SS] Contrôle terminé — …`)
+indique le nombre de notifications affichées pendant ce contrôle ; un contrôle partiel ou en échec
+n'est jamais annoncé comme terminé avec succès. Cette ligne n'existe qu'en non-TTY.
 
 Les UUID sont affichés hors des bordures des tableaux, sans ellipsis ni perte de
 caractère. En dessous de 36 colonnes, un UUID doit se replier sur plusieurs lignes ;

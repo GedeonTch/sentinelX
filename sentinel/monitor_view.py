@@ -1,5 +1,6 @@
 """Presentation only. Shared Rich console, bounded live frame, plain log mode."""
 from collections import deque
+from datetime import datetime
 import unicodedata
 from rich.console import Group
 from rich.live import Live
@@ -19,6 +20,13 @@ def safe_text(value):
 # never contains them (no list, no UUID): see MonitorView.emit.
 NON_TTY_ALERTS_TITLE = 'Alertes de cette exécution'
 NO_NOTIFICATION_LINE = 'Aucune notification affichée pendant cette exécution.'
+# A check that ended, by outcome. Only 'attente' with a finished timestamp is a success:
+# 'dégradé' and 'erreur' ended without recording last_check_time, so they never say "terminé".
+CHECK_OUTCOMES = {
+    'attente': 'Contrôle terminé',
+    'dégradé': 'Contrôle partiel, non enregistré comme réussi',
+    'erreur': 'Contrôle en échec, non enregistré comme réussi',
+}
 
 
 class MonitorView:
@@ -27,6 +35,7 @@ class MonitorView:
         self.session_id = session_id
         self.footer_written = False
         self.emitted = 0  # notifications actually written to the terminal, TTY or plain log
+        self.cycle_emitted = 0  # notifications written during the current check cycle
         self.console = console or get_console()
         self.rows = deque(maxlen=20)
         self.phase = 'attente'
@@ -162,9 +171,27 @@ class MonitorView:
         self.phase = phase
         if finished is not None:
             self.last_finished = finished
-        # Plain log: no snapshot on phase change (the start header and the closing footer are the only ones).
         if self.live is not None:
             self.live.refresh()
+        if phase == 'contrôle':
+            self.cycle_emitted = 0  # a new cycle starts; count only its own notifications
+        elif finished is not None and phase in CHECK_OUTCOMES:
+            # The check ended. TTY shows it in the frame; plain log gets exactly one line for it.
+            if self.live is None:
+                self._progress_line(phase, finished)
+            self.cycle_emitted = 0
+
+    def _progress_line(self, phase, finished):
+        try:
+            when = datetime.fromisoformat(finished).astimezone().strftime('%H:%M:%S')
+        except (TypeError, ValueError):
+            when = 'heure inconnue'
+        count = self.cycle_emitted
+        summary = (f'{count} notification(s) affichée(s) pendant ce contrôle' if count
+                   else 'aucune notification affichée pendant ce contrôle')
+        # soft_wrap: one check = one physical line, whatever the redirected terminal width.
+        self.console.print(Text(f'[{when}] {CHECK_OUTCOMES[phase]} — {summary}.'), soft_wrap=True)
+        self.console.file.flush()
 
     def emit(self, when, change, finding: Finding):
         if finding.session_id != self.session_id:
@@ -177,6 +204,7 @@ class MonitorView:
             # redraws the frame below it; in plain log, this block alone is written.
             self.console.print(self.notification(row))
             self.emitted += 1
+            self.cycle_emitted += 1
             if self.live is not None:
                 self.live.refresh()  # updates the notification counter in the frame
             self.console.file.flush()

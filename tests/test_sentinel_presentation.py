@@ -426,3 +426,108 @@ def test_non_tty_phase_transitions_print_snapshot_once(store):
     assert '\x1b' not in text
     for finding in emitted:
         assert text.count(finding.id) == 1
+
+
+# ---------------------------------------------------------------------------
+# Plain-log progress line after each check that ended (presentation only)
+# ---------------------------------------------------------------------------
+
+PROGRESS_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\] (Contrôle [^—]+) — (.+)\.$', re.M)
+
+
+@pytest.mark.parametrize('width', [120, 40])
+def test_non_tty_one_progress_line_per_completed_check(store, width):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=width), session_id=RUN) as view:
+        c.view = view
+        view.set_phase('contrôle')
+        (finding,) = send(c)
+        view.set_phase('attente')  # transition without an end of check: no line
+        view.set_phase('attente', store().isoformat())  # the check ended: one line
+        view.set_phase('contrôle')
+        view.set_phase('attente')
+        view.set_phase('attente', store().isoformat())  # second check, no notification
+    text = output.getvalue()
+    lines = PROGRESS_RE.findall(text)
+    assert lines == [
+        ('Contrôle terminé', '1 notification(s) affichée(s) pendant ce contrôle'),
+        ('Contrôle terminé', 'aucune notification affichée pendant ce contrôle'),
+    ]
+    assert text.count(finding.id) == 1  # the progress line never repeats a notification
+    assert '\x1b' not in text
+
+
+@pytest.mark.parametrize('phase,label', [
+    ('dégradé', 'Contrôle partiel, non enregistré comme réussi'),
+    ('erreur', 'Contrôle en échec, non enregistré comme réussi'),
+])
+def test_non_tty_partial_or_failed_check_is_never_announced_as_success(store, phase, label):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=False, width=120), session_id=RUN) as view:
+        c.view = view
+        view.set_phase('contrôle')
+        view.set_phase(phase, store().isoformat())
+    text = output.getvalue()
+    assert PROGRESS_RE.findall(text) == [(label, 'aucune notification affichée pendant ce contrôle')]
+    assert 'Contrôle terminé' not in text
+
+
+class _CycleOwner:
+    """Drives the real _run_loop for a fixed number of cycles, then ends it cooperatively."""
+
+    def __init__(self, cycles):
+        self.left = cycles
+
+    def wait(self, seconds):
+        if self.left == 0:
+            return True
+        self.left -= 1
+        return False
+
+    def admit_cycle(self):
+        return True
+
+    def end_cycle(self):
+        pass
+
+
+@pytest.mark.parametrize('tty', [False, True])
+def test_real_loop_progress_follows_each_check_outcome(store, monkeypatch, tty):
+    from sentinel import sentinel_manager as manager
+    from sentinel.monitor import ScanDegradedError
+    from sentinel.whitelist import Whitelist
+    from unittest.mock import Mock
+    monkeypatch.setattr(manager, 'get_baseline', lambda *args: {'known': object()})
+    outcomes = [
+        [NetworkChange('new_host', HOST, 'new host detected', 'test')],  # success, one notification
+        [],                                                            # success, nothing new
+        ScanDegradedError('simulated partial', []),                    # partial: not a success
+    ]
+    monkeypatch.setattr(manager, 'check_network', Mock(side_effect=outcomes))
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=tty, width=120), session_id=RUN) as view:
+        c.view = view
+        manager._run_loop(target_network='192.0.2.0/24', network_id=NET, run_session_id=RUN,
+                          identity=object(), interval=60, whitelist=Whitelist(), counter=c,
+                          owner=_CycleOwner(len(outcomes)))
+    text = output.getvalue()
+    findings = db.get_findings(RUN)
+    assert len(findings) == 1
+    if tty:
+        # TTY keeps its frame: no progress line at all (the frame itself may show the id).
+        assert 'Contrôle terminé' not in text and 'Contrôle partiel' not in text
+        return
+    assert text.count(findings[0].id) == 1  # plain log: the notification is printed once
+    assert [label for label, _ in PROGRESS_RE.findall(text)] == [
+        'Contrôle terminé', 'Contrôle terminé', 'Contrôle partiel, non enregistré comme réussi']
+    assert PROGRESS_RE.findall(text)[0][1] == '1 notification(s) affichée(s) pendant ce contrôle'
+    assert text.count('SENTINEL ● SURVEILLANCE ACTIVE') == 1
+    assert text.count('État des hôtes') == 1
+    assert text.count('sentinel findings show') == 1
+    assert '\x1b' not in text

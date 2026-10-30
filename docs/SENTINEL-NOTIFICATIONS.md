@@ -75,7 +75,10 @@ sont pas affichés. La vue réévalue les échéances pendant l'attente sans cha
 polling lifecycle. Sur petit terminal, les colonnes sont présentées en paires
 libellé/valeur. En non-TTY, l'en-tête et le tableau des hôtes sont écrits une fois au
 démarrage, chaque notification une fois, et le pied une fois à la fermeture, sans
-instantané à chaque changement de phase ni répétition des détails.
+instantané à chaque changement de phase ni répétition des détails. Après chaque contrôle
+terminé, une seule ligne compacte précise l'heure, l'issue et le nombre de notifications
+affichées pendant ce contrôle ; un contrôle partiel ou en échec n'est jamais annoncé comme
+réussi. Aucune de ces lignes n'apparaît en TTY, où le cadre est redessiné sur place.
 
 Les alertes masquées n'apparaissent jamais individuellement dans cette vue.
 Les compteurs « affichées » et « masquées » couvrent 60 minutes ; les réserves sont
