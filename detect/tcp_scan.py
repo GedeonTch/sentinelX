@@ -200,6 +200,7 @@ def _run_nmap_tcp(
     profile: str,
     ports: str,
     strict: bool = False,
+    skip_host_discovery: bool = False,
 ) -> Optional[str]:
     """Run nmap TCP scan and return raw XML output, or None on error.
 
@@ -212,12 +213,17 @@ def _run_nmap_tcp(
                  and any unexpected error becomes None.
                  True is used by the pipeline (tcp_scan): see
                  _run_nmap_tcp_strict.
+        skip_host_discovery: False (default) leaves nmap host discovery
+                 unchanged. True adds ``-Pn`` so that a host already known
+                 to be present (e.g. answering ARP but not ICMP) is scanned
+                 without a prior discovery step.
 
     Returns:
         str: Raw XML from nmap, or None on error.
     """
     flags = PROFILE_FLAGS.get(profile, PROFILE_FLAGS["normal"])
-    cmd = ["nmap"] + flags + ["-oX", "-", "-p", ports, target]
+    host_discovery = ["-Pn"] if skip_host_discovery else []
+    cmd = ["nmap"] + flags + host_discovery + ["-oX", "-", "-p", ports, target]
     if strict:
         return _run_nmap_tcp_strict(cmd)
     try:

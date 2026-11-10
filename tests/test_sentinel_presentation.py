@@ -16,6 +16,21 @@ from reports.sentinel_report import generate_sentinel_report
 from tests.test_sentinel_notifications import store, send, NET, HOST, RUN
 
 
+def _observations(changes=()):
+    """Cycle observations for a check double (§9.3); degraded flag set for partial doubles."""
+    from sentinel.monitor import CycleObservations
+    return CycleObservations(current_hosts=[], ping_hosts=[], host_arp_status={}, tcp_observations={},
+                             candidate_changes=list(changes), ping_failed=False, services_degraded=True)
+
+
+def _state():
+    from sentinel.alerting import EventStamp
+    from sentinel.sentinel_manager import NetworkState
+    return NetworkState(stamp=EventStamp(NET), known_hosts=set(), initial_ports={}, ports_initialized={},
+                        open_ports={}, port_absent_count={}, notified_port_not_open={}, host_absent_count={},
+                        host_not_observed=set(), target_network='192.0.2.0/24')
+
+
 @pytest.mark.parametrize('tty,width', [(False, 90), (False, 35), (True, 65)])
 def test_tables_do_not_replay_masked_details_or_count_refreshes(store, tty, width):
     output = io.StringIO()
@@ -156,9 +171,9 @@ def test_monitor_labels_partial_or_failed_check_honestly(store, monkeypatch, out
     c.bind(NET)
     c.view = MonitorView(NET, 60, c, Console(file=io.StringIO()), session_id=RUN)
     monkeypatch.setattr(manager, 'get_baseline', lambda *args: {'known': object()})
-    error = ScanDegradedError('simulated partial', []) if outcome == 'degraded' else ScanFailedError('simulated error')
+    error = ScanDegradedError('simulated partial', _observations()) if outcome == 'degraded' else ScanFailedError('simulated error')
     monkeypatch.setattr(manager, 'check_network', Mock(side_effect=error))
-    manager._do_check('192.0.2.0/24', NET, RUN, object(), 60, Whitelist(), c)
+    manager._do_check('192.0.2.0/24', NET, RUN, object(), 60, Whitelist(), c, _state())
     assert c.view.phase == ('dégradé' if outcome == 'degraded' else 'erreur')
     assert c.view.last_finished == store().isoformat()
     assert db.sentinel_get_state(NET)['last_check_time'] is None
@@ -503,9 +518,9 @@ def test_real_loop_progress_follows_each_check_outcome(store, monkeypatch, tty):
     from unittest.mock import Mock
     monkeypatch.setattr(manager, 'get_baseline', lambda *args: {'known': object()})
     outcomes = [
-        [NetworkChange('new_host', HOST, 'new host detected', 'test')],  # success, one notification
-        [],                                                            # success, nothing new
-        ScanDegradedError('simulated partial', []),                    # partial: not a success
+        _observations([NetworkChange('new_host', HOST, 'new host detected', 'test')]),  # success, one notification
+        _observations([]),                                                             # success, nothing new
+        ScanDegradedError('simulated partial', _observations()),                       # partial: not a success
     ]
     monkeypatch.setattr(manager, 'check_network', Mock(side_effect=outcomes))
     output = io.StringIO()
@@ -515,7 +530,7 @@ def test_real_loop_progress_follows_each_check_outcome(store, monkeypatch, tty):
         c.view = view
         manager._run_loop(target_network='192.0.2.0/24', network_id=NET, run_session_id=RUN,
                           identity=object(), interval=60, whitelist=Whitelist(), counter=c,
-                          owner=_CycleOwner(len(outcomes)))
+                          owner=_CycleOwner(len(outcomes)), state=_state())
     text = output.getvalue()
     findings = db.get_findings(RUN)
     assert len(findings) == 1
@@ -531,3 +546,102 @@ def test_real_loop_progress_follows_each_check_outcome(store, monkeypatch, tty):
     assert text.count('État des hôtes') == 1
     assert text.count('sentinel findings show') == 1
     assert '\x1b' not in text
+
+
+# ---------------------------------------------------------------------------
+# T23-B B2 — observations without Finding (§9.10, §9.11 critère 23)
+# ---------------------------------------------------------------------------
+
+from sentinel.alerting import EventStamp, process_changes  # noqa: E402
+from sentinel.whitelist import Whitelist  # noqa: E402
+from sentinel.monitor_view import EVENT_IDENTITY_LABEL, FINDING_IDENTITY_LABEL, OBSERVATION_SEVERITY_LABEL  # noqa: E402
+
+OBSERVATION = NetworkChange('host_not_observed', HOST, 'host not observed', 'ARP NOT_OBSERVED twice')
+
+
+def _observe(counter, change=OBSERVATION):
+    """Persist one observation through the real alerting path and return its event id."""
+    process_changes([change], RUN, Whitelist(), counter, network_id=NET,
+                    stamp=EventStamp(NET, clock=counter.clock))
+    (event,) = [e for e in db.sentinel_get_events(NET) if e['type'] == change.change_type][-1:]
+    return event['id']
+
+
+@pytest.mark.parametrize('tty,width', [(False, 100), (True, 100), (False, 35)])
+def test_observation_shows_event_identity_and_dash_severity(store, tty, width):
+    output = io.StringIO()
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=output, force_terminal=tty, width=width), session_id=RUN) as view:
+        c.view = view
+        event_id = _observe(c)
+        view.set_phase('attente')
+    text = output.getvalue()
+    compact = ''.join(ch for ch in re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', text) if not ch.isspace() and ch not in '│┃')
+    assert compact.count(event_id) == 1
+    assert EVENT_IDENTITY_LABEL.replace(' ', '') in compact
+    assert FINDING_IDENTITY_LABEL.replace(' ', '') not in compact
+    assert OBSERVATION_SEVERITY_LABEL in text
+    assert 'HIGH' not in text and 'MEDIUM' not in text
+    assert db.get_findings(RUN) == []  # no Finding was invented for the display
+    assert c.summary()[HOST]['displayed'] == 1
+
+
+def test_observation_row_is_identity_without_finding_object(store):
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=io.StringIO(), width=100), session_id=RUN) as view:
+        view.emit('12:00:00', OBSERVATION, event_id='evt-123', session_id=RUN)
+        assert view.rows[-1] == ('12:00:00', HOST, 'host_not_observed', 'host not observed',
+                                 'evt-123', OBSERVATION_SEVERITY_LABEL, EVENT_IDENTITY_LABEL)
+
+
+def test_observation_without_event_id_is_rejected(store):
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=io.StringIO(), width=100), session_id=RUN) as view:
+        with pytest.raises(ValueError):
+            view.emit('12:00:00', OBSERVATION)
+        assert len(view.rows) == 0  # nothing displayed
+
+
+def test_observation_from_other_session_is_rejected(store):
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=io.StringIO(), width=100), session_id=RUN) as view:
+        with pytest.raises(ValueError):
+            view.emit('12:00:00', OBSERVATION, event_id='evt-1', session_id='other-session')
+
+
+def test_finding_path_unchanged_with_positional_arguments(store):
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=io.StringIO(), width=100), session_id=RUN) as view:
+        c.view = view
+        finding, = send(c)
+        assert view.rows[-1][4:] == (finding.id, finding.severity.value.upper(), FINDING_IDENTITY_LABEL)
+
+
+def test_observation_without_view_is_persisted_and_budgeted_without_finding(store):
+    c = AlertCounter(clock=store)
+    assert c.view is None
+    assert process_changes([OBSERVATION], RUN, Whitelist(), c, network_id=NET,
+                           stamp=EventStamp(NET, clock=c.clock)) == []
+    assert [e['type'] for e in db.sentinel_get_events(NET)] == ['host_not_observed']
+    assert db.get_findings(RUN) == []
+    assert c.summary()[HOST]['displayed'] == 1
+
+
+def test_observation_quota_is_shared_with_findings_of_the_same_host(store):
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    with MonitorView(NET, 60, c, Console(file=io.StringIO(), width=100), session_id=RUN) as view:
+        c.view = view
+        send(c)                    # Finding, slot 1
+        _observe(c)                # observation, slot 2
+        send(c)                    # Finding, slot 3
+        assert send(c) == []       # fourth notification for the host: masked
+        _observe(c)                # observation also masked
+    summary = c.summary()[HOST]
+    assert summary['displayed'] == 3
+    assert summary['masked'] == 2

@@ -104,7 +104,7 @@ def test_two_real_cli_processes_stop_inflight_and_restart(lab):
     assert db.get_session('run-a')['status'] == 'completed'
     assert db.get_session('run-a')['end_time']
     assert db.sentinel_get_state(NETWORK)['sentinel_status'] == 'inactive'
-    assert len(db.sentinel_get_events(NETWORK)) == 1
+    assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
     assert len(db.get_findings('run-a')) == 1
     assert db.get_events('run-a') == []
     assert len(db.sentinel_get_baseline_entries(NETWORK, TARGET, IDENTITY.gateway_ip, IDENTITY.gateway_mac)) == 1
@@ -119,7 +119,8 @@ def test_two_real_cli_processes_stop_inflight_and_restart(lab):
     assert_exit(a2)
     assert lc._lock_path(NETWORK).stat().st_ino == lock_inode
     assert len(db.sentinel_get_events(NETWORK)) == 2
-    assert len(db.get_findings('run-new')) == 1
+    # T23-B reconstruction (§9.5): the host announced by run-a is known, so run-new repeats nothing.
+    assert db.get_findings('run-new') == []
 
 
 def test_stop_during_wait_not_full_interval(lab):
@@ -158,11 +159,13 @@ def test_control_outcomes(lab, mode, expected_code, result):
     if expected_code:
         assert 'terminaison confirmées' not in output
     if mode == 'whitelisted':
-        assert len(db.sentinel_get_events(NETWORK, resolved=True)) == 1
+        # new_host (whitelisted) + host_ports_initialized (not an alert, resolved)
+        assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK, resolved=True)) == [
+            'host_ports_initialized', 'new_host']
         assert db.get_findings('run-a') == []
     if mode == 'degraded':
-        assert len(db.sentinel_get_events(NETWORK)) == 1
-        assert len(db.get_findings('run-a')) == 1
+        assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['new_host', 'scan_degraded']
+        assert len(db.get_findings('run-a')) == 1  # scan_degraded itself has no Finding (B2)
     if mode == 'finalization-failure':
         assert 'session finalization failed' in lc.records(NETWORK)[0]['error']
 
@@ -456,7 +459,7 @@ def test_atomic_stop_cycle_race_with_two_real_cli_barriers(lab, first):
         assert db.get_findings('race-run') == []
     else:
         assert marker('race-run', 'cycles').read_text() == '1'
-        assert len(db.sentinel_get_events(NETWORK)) == 1
+        assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
         assert len(db.get_findings('race-run')) == 1
     assert db.get_session('race-run')['end_time']
     assert lc.lock_is_free(NETWORK)
@@ -1021,18 +1024,24 @@ def test_unconfirmed_session_cleanup_never_invents_or_deletes_rows(lab, storage)
 
 
 def test_notification_quota_survives_real_cli_restarts(lab):
-    """Four distinct OS owners, same network/host, no actual scans."""
+    """Four distinct OS owners on one network, no actual scans.
+
+    T23-B: a host is announced once (§9.5), so repeated notifications come from
+    scan_degraded episodes. Each degraded run starts a new episode after a complete
+    run; the network quota for scan_degraded (B3) must survive the restarts.
+    """
     _, marker = lab
-    for index in range(4):
+    for index in range(8):
         run = f'quota-restart-{index}'
-        a = start(lab, run)
+        mode = 'degraded' if index % 2 else 'normal'
+        a = start(lab, run, mode=mode)
         b = stop(lab)
         eventually(requested)
         marker(run, 'release').touch()
         assert_exit(b)
         assert_exit(a)
-        assert len(db.get_findings(run)) == 1
-    events = db.sentinel_get_events(NETWORK)
+        assert len(db.get_findings(run)) == (1 if index == 0 else 0)  # only the first new host
+    events = [e for e in db.sentinel_get_events(NETWORK) if e['type'] == 'scan_degraded']
     states = [e['details']['notification']['state'] for e in events]
     assert states.count('confirmed') == 3 and states.count('masked') == 1
     assert len(events) == 4

@@ -87,39 +87,62 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
     manager.start(TARGET, session_id=RUN)
 
     events = db.sentinel_get_events(NETWORK)
-    assert len(events) == len(new_hosts)
-    assert {e['details']['ip'] for e in events} == set(new_hosts)
-    assert all(e['timestamp'] == NOW.isoformat() and e['type'] == 'new_host' for e in events)
-    assert all(bool(e['resolved']) == (e['details']['ip'] in allowed) for e in events)
+    new_events = [e for e in events if e['type'] == 'new_host']
+    init_events = [e for e in events if e['type'] == 'host_ports_initialized']
+    scan_events = [e for e in events if e['type'] == 'scan_degraded']
+    # T23-B: one new_host per new host, plus its host_ports_initialized when the scan is complete.
+    assert len(new_events) == len(new_hosts)
+    assert len(init_events) == (0 if degraded else len(new_hosts))
+    # §9.14 / B3: exactly one scan_degraded for the single degraded episode, none otherwise.
+    assert len(scan_events) == (1 if degraded else 0)
+    if degraded:
+        assert scan_events[0]['asset_id'] is None and scan_events[0]['details']['ip'] == TARGET
+    assert len(events) == len(new_events) + len(init_events) + len(scan_events)
+    assert {e['details']['ip'] for e in new_events} == set(new_hosts)
+    # B1: stamps are strictly increasing per network (the clock is frozen at NOW).
+    stamps = [e['timestamp'] for e in events]
+    assert len(set(stamps)) == len(stamps)
+    assert min(stamps) == NOW.isoformat(timespec='microseconds')  # §9.3.1 format
+    assert all(bool(e['resolved']) == (e['details']['ip'] in allowed) for e in new_events)
+    assert all(bool(e['resolved']) for e in init_events)  # initialization is not an alert
     unresolved = len(new_hosts) - len(allowed)
-    assert len(db.sentinel_get_events(NETWORK, resolved=False)) == unresolved
-    assert len(db.sentinel_get_events(NETWORK, resolved=True)) == len(allowed)
-    assert manager.status(NETWORK)['unresolved_alerts'] == unresolved
+    expected_unresolved = unresolved + len(scan_events)  # observations are unresolved events
+    assert len(db.sentinel_get_events(NETWORK, resolved=False)) == expected_unresolved
+    assert len(db.sentinel_get_events(NETWORK, resolved=True)) == len(allowed) + len(init_events)
+    assert manager.status(NETWORK)['unresolved_alerts'] == expected_unresolved
     assert db.sentinel_get_events('other-network') == []
     findings = db.get_findings(RUN)
-    assert len(findings) == unresolved
+    assert len(findings) == unresolved  # no Finding for host_ports_initialized or scan_degraded
     assert all(f.session_id == RUN and f.severity.value == 'medium' and f.risk_score is None for f in findings)
     assert db.get_session(RUN)['id'] == RUN
     assert db.get_events(RUN) == []
     assert not session_path(NETWORK).exists()
     assert network_path(NETWORK).exists()
     assert states[0]['sentinel_status'] == ('degraded' if degraded else 'active')
-    assert alerts.call_count == unresolved  # independent quotas for distinct hosts
+    assert alerts.call_count == unresolved + len(scan_events)  # independent quotas for distinct hosts
     if allowed:
         assert any('[INFO]' in str(call) for call in shown.call_args_list)
 
 
 def test_network_events_survive_distinct_runs(isolated, monkeypatch):
+    """Each run routes its own new host to its own Finding; known hosts are not re-announced (§9.5, known_hosts)."""
     session_path, _ = isolated
     monkeypatch.setattr(manager, 'load_whitelist', Whitelist)
-    monkeypatch.setattr(monitor, '_get_active_hosts', lambda target: ['192.0.2.10', '192.0.2.99'])
+    hosts_by_run = {
+        RUN: ['192.0.2.10', '192.0.2.99'],
+        'sentinel-run-second': ['192.0.2.10', '192.0.2.99', '192.0.2.98'],  # .99 already known
+    }
     for index, run in enumerate((RUN, 'sentinel-run-second'), 1):
+        monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, run=run: hosts_by_run[run])
         monkeypatch.setattr(manager.Owner, 'wait', Mock(side_effect=[False, KeyboardInterrupt]))
         manager.start(TARGET, session_id=run)
         findings = db.get_findings(run)
+        new_ip = '192.0.2.99' if index == 1 else '192.0.2.98'
         assert len(findings) == 1 and findings[0].session_id == run
+        assert findings[0].target_ip == new_ip
         assert db.get_events(run) == []
-        assert len(db.sentinel_get_events(NETWORK)) == index
+        new_events = [e for e in db.sentinel_get_events(NETWORK) if e['type'] == 'new_host']
+        assert len(new_events) == index  # .99 is not announced again in the second run
         assert manager.status(NETWORK)['unresolved_alerts'] == index
     assert len(db.get_findings(RUN)) == 1
     assert not session_path(NETWORK).exists()
@@ -136,7 +159,7 @@ def test_generated_run_id_is_not_replaced_by_network_id(isolated, monkeypatch):
     generated_run = files[0].stem
     assert generated_run.startswith('sentinel-run-') and generated_run != NETWORK
     assert db.get_findings(generated_run)[0].session_id == generated_run
-    assert len(db.sentinel_get_events(NETWORK)) == 1
+    assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
     assert not session_path(NETWORK).exists()
 
 
@@ -151,8 +174,8 @@ def test_notification_window_reads_network_not_run_storage(isolated, monkeypatch
     db.save_event(RUN, 'session-decoy', 'new_host', NOW.isoformat(), None, {}, False)
     counter = alerting.AlertCounter()
     change = monitor.NetworkChange('new_host', '192.0.2.99', 'new host detected', 'synthetic')
-    assert len(alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK)) == 1
-    assert alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK) == []
+    assert len(alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK, stamp=alerting.EventStamp(NETWORK))) == 1
+    assert alerting.process_changes([change], RUN, Whitelist(), counter, network_id=NETWORK, stamp=alerting.EventStamp(NETWORK)) == []
     row = counter.summary()['192.0.2.99']
     assert row['displayed'] == 1 and row['reserved'] == 2 and row['masked'] == 1
     assert len(db.sentinel_get_events(NETWORK)) == 4

@@ -1,42 +1,93 @@
 """
-sentinel/monitor.py — Network state comparison against baseline
+sentinel/monitor.py — Network observation for one Sentinel cycle
 
-Role: Compare the current network state to the stored baseline and return
-      a list of NetworkChange objects describing what changed.
+Role: Observe the network once per cycle and report what was seen, without
+      deciding anything about history. The observations are returned as a
+      CycleObservations; sentinel/sentinel_manager.py turns them into events.
 
-This module does NOT create Findings, does NOT write to DB, does NOT alert.
-It only observes and reports raw changes. alerting.py decides what to do.
+What this module does:
+    - ping scan (nmap -sn) for the target network;
+    - targeted active ARP probe for each known host (baseline or already
+      known) that the ping did not return, one probe per IP per cycle;
+    - TCP scan of every current host, with -Pn for hosts not seen by ping;
+    - candidate new_host (ping-visible, not known) and mac_change
+      (baseline MAC differs from the active ARP answer).
+
+What this module does NOT do:
+    - no new_port, port_not_open, host_not_observed, host_recovered or
+      scan_degraded decision (sentinel/sentinel_manager.py, §9.5);
+    - no Finding, no DB write, no alert.
+
+Failure contract (§9.4):
+    ping ok + TCP complete            -> CycleObservations
+    ping ok + TCP incomplete          -> ScanDegradedError(observations)
+    ping failed + >=1 PRESENT or NOT_OBSERVED -> ScanDegradedError(observations)
+    ping failed + all ERROR / no probe        -> ScanFailedError
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 
-from sentinel.arp_probe import ArpProbeStatus, arp_probe
+from sentinel.arp_probe import ArpProbeResult, ArpProbeStatus, arp_probe
 from sentinel.baseline import SENTINEL_TCP_PORTS, BaselineEntry, NetworkIdentity
 
 
 class ScanFailedError(Exception):
-    """Raised when ping failed and no known host was recovered by ARP."""
+    """No exploitable observation: ping failed and no ARP probe gave PRESENT or NOT_OBSERVED."""
 
 
-class ScanDegradedError(Exception):
-    """Raised when ping failed but targeted ARP recovered known hosts."""
+@dataclass
+class HostTcpObservation:
+    """TCP state of one host for this cycle.
 
-    def __init__(self, message: str, changes: List["NetworkChange"]):
-        super().__init__(message)
-        self.changes = changes
+    ports: None = unknown (scan incomplete or not performed),
+           []   = complete scan, no open port,
+           [..] = complete scan, these ports are open.
+    """
+
+    ip: str
+    ports: Optional[List[int]]
 
 
 @dataclass
 class NetworkChange:
-    """A detected deviation from the stored baseline."""
+    """A candidate or recorded change.
+
+    Only new_host and mac_change are produced here. Port and host transitions
+    are computed by the manager (§9.5); new_port, port_not_open and
+    host_recovered may carry ``port`` or ``initial_ports`` fields in the event.
+    """
 
     change_type: str
     asset_ip: str
     detail: str
     evidence: str
+    port: Optional[int] = None
+    initial_ports: Optional[List[int]] = None
+    initial_ports_known: bool = False
+
+
+@dataclass
+class CycleObservations:
+    """Everything observed during one cycle (§9.3)."""
+
+    current_hosts: List[str]                              # ping ∪ ARP recovery
+    ping_hosts: List[str]                                 # seen by nmap ping only
+    host_arp_status: Dict[str, ArpProbeStatus]            # probed IPs only
+    tcp_observations: Dict[str, HostTcpObservation]       # every current host
+    candidate_changes: List[NetworkChange]                # [new_host, mac_change]
+    ping_failed: bool
+    services_degraded: bool
+
+
+class ScanDegradedError(Exception):
+    """Partial cycle: the observations are exploitable but incomplete."""
+
+    def __init__(self, message: str, observations: CycleObservations):
+        super().__init__(message)
+        self.observations = observations
 
 
 def check_network(
@@ -44,63 +95,91 @@ def check_network(
     session_id: str,
     identity: NetworkIdentity,
     baseline: Dict[str, BaselineEntry],
-) -> List[NetworkChange]:
-    """Compare current network state to baseline and return detected changes.
+    known_hosts: Set[str],
+) -> CycleObservations:
+    """Observe the network for one cycle.
 
-    A failed ping scan may recover baseline IPs with one targeted active ARP
-    probe each. Such a partial check raises ScanDegradedError after collecting
-    changes, so callers can process them without marking the check successful.
+    Args:
+        target_network: CIDR scanned by ping.
+        session_id:     Run session (kept for call-site compatibility).
+        identity:       Network identity of the monitored network.
+        baseline:       Stored baseline, keyed by IP.
+        known_hosts:    IPs known to Sentinel (baseline hosts and hosts already
+                        recorded as new_host). A ping-visible IP in this set is
+                        not reported as new_host again (§9.5 step 1).
+
+    Returns:
+        CycleObservations when the cycle is complete.
+
+    Raises:
+        ScanDegradedError: partial cycle, with the observations attached.
+        ScanFailedError:   no exploitable observation at all.
     """
+    known = set(known_hosts)
 
-    changes: List[NetworkChange] = []
-    services_degraded = False
+    ping_result = _get_active_hosts(target_network)
+    ping_failed = ping_result is None
+    ping_hosts = [] if ping_failed else list(dict.fromkeys(ping_result))
 
-    current_hosts = _get_active_hosts(target_network)
-    ping_failed = current_hosts is None
-    if current_hosts is None:
-        current_hosts = []
+    # Targeted ARP: every baseline or known IP that ping did not return.
+    # One probe per IP per cycle; results are reused below.
+    arp_results: Dict[str, ArpProbeResult] = {}
+    for ip in _arp_targets(baseline, known, ping_hosts):
+        arp_results[ip] = arp_probe(ip)
+    host_arp_status = {ip: result.status for ip, result in arp_results.items()}
 
-    arp_recovered = False
-    arp_results = {}
-    if ping_failed:
-        for ip in baseline:
-            result = arp_probe(ip)
-            arp_results[ip] = result
-            if result.status is ArpProbeStatus.PRESENT:
-                current_hosts.append(ip)
-                arp_recovered = True
-
-    if ping_failed and not arp_recovered:
+    if ping_failed and not any(
+        status in (ArpProbeStatus.PRESENT, ArpProbeStatus.NOT_OBSERVED)
+        for status in host_arp_status.values()
+    ):
         raise ScanFailedError(
-            f"Ping scan failed for {target_network}; no known host was recovered by ARP."
+            f"Ping scan failed for {target_network}; no known host gave a usable ARP answer."
         )
 
-    # ARP fallback only probes baseline IPs and therefore never creates
-    # new_host changes.
+    recovered = [
+        ip for ip, result in arp_results.items()
+        if result.status is ArpProbeStatus.PRESENT and ip not in ping_hosts
+    ]
+    current_hosts = ping_hosts + recovered
+
+    tcp_observations: Dict[str, HostTcpObservation] = {}
     for ip in current_hosts:
-        if ip not in baseline:
-            changes.append(NetworkChange(
-                change_type="new_host",
-                asset_ip=ip,
-                detail="new host detected",
-                evidence=f"Host {ip} responded to ping but is not in the baseline.",
-            ))
+        if ip in ping_hosts:
+            ports = _get_open_ports(ip)  # ordinary scan, same call as before T23-B
+        else:
+            ports = _get_open_ports(ip, skip_host_discovery=True)  # ARP-only host: -Pn
+        tcp_observations[ip] = HostTcpObservation(ip=ip, ports=ports)
+    services_degraded = any(obs.ports is None for obs in tcp_observations.values())
 
-    for ip, entry in baseline.items():
-        if ip not in current_hosts:
+    candidates: List[NetworkChange] = []
+    for ip in current_hosts:
+        if ip in baseline or ip in known:
             continue
+        observed = tcp_observations[ip]
+        candidates.append(NetworkChange(
+            change_type="new_host",
+            asset_ip=ip,
+            detail="new host detected",
+            evidence=f"Host {ip} responded to ping but is not in the baseline or the known hosts.",
+            initial_ports=observed.ports,
+            initial_ports_known=observed.ports is not None,
+        ))
 
-        arp_result = arp_results.get(ip)
-        if arp_result is not None:
+    for ip in current_hosts:
+        entry = baseline.get(ip)
+        if entry is None:
+            continue
+        result = arp_results.get(ip)
+        if result is not None:
             current_mac = (
-                arp_result.mac
-                if arp_result.status is ArpProbeStatus.PRESENT and arp_result.mac
+                result.mac
+                if result.status is ArpProbeStatus.PRESENT and result.mac
                 else ""
             )
         else:
             current_mac = _get_arp_mac(ip)
         if current_mac and entry.mac and current_mac != entry.mac.lower():
-            changes.append(NetworkChange(
+            candidates.append(NetworkChange(
                 change_type="mac_change",
                 asset_ip=ip,
                 detail=f"mac changed from {entry.mac} to {current_mac}",
@@ -110,31 +189,41 @@ def check_network(
                 ),
             ))
 
-        current_ports = _get_open_ports(ip)
-        if current_ports is None:
-            services_degraded = True
+    observations = CycleObservations(
+        current_hosts=current_hosts,
+        ping_hosts=ping_hosts,
+        host_arp_status=host_arp_status,
+        tcp_observations=tcp_observations,
+        candidate_changes=candidates,
+        ping_failed=ping_failed,
+        services_degraded=services_degraded,
+    )
+
+    if ping_failed:
+        raise ScanDegradedError(
+            "Ping scan failed; known hosts were partially checked with targeted ARP.",
+            observations,
+        )
+    if services_degraded:
+        raise ScanDegradedError(
+            "Service scan failed for at least one present host.",
+            observations,
+        )
+    return observations
+
+
+def _arp_targets(
+    baseline: Dict[str, BaselineEntry],
+    known: Iterable[str],
+    ping_hosts: List[str],
+) -> List[str]:
+    """Baseline then known IPs not seen by ping, without duplicates."""
+    seen: List[str] = []
+    for ip in list(baseline) + sorted(known):
+        if ip in ping_hosts or ip in seen:
             continue
-
-        for port in current_ports:
-            if port not in entry.ports:
-                changes.append(NetworkChange(
-                    change_type="new_port",
-                    asset_ip=ip,
-                    detail=f"port {port} opened",
-                    evidence=(
-                        f"Port {port}/tcp open on {ip}. "
-                        f"Baseline ports: {entry.ports}."
-                    ),
-                ))
-
-    if ping_failed or services_degraded:
-        if ping_failed:
-            message = "Ping scan failed; known hosts were partially checked with targeted ARP."
-        else:
-            message = "Service scan failed for at least one present host."
-        raise ScanDegradedError(message, changes)
-
-    return changes
+        seen.append(ip)
+    return seen
 
 
 def _get_active_hosts(target_network: str) -> Optional[List[str]]:
@@ -149,11 +238,17 @@ def _get_active_hosts(target_network: str) -> Optional[List[str]]:
         return None
 
 
-def _get_open_ports(ip: str) -> Optional[List[int]]:
-    """Open TCP ports of a proven complete scan; None means the state is unknown."""
+def _get_open_ports(ip: str, skip_host_discovery: bool = False) -> Optional[List[int]]:
+    """Open TCP ports of a proven complete scan; None means the state is unknown.
+
+    skip_host_discovery adds -Pn for hosts that were found by ARP but not by ping.
+    """
     try:
         from detect.tcp_scan import _run_nmap_tcp, parse_sentinel_open_ports
-        xml = _run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS, strict=True)
+        xml = _run_nmap_tcp(
+            ip, "normal", SENTINEL_TCP_PORTS,
+            strict=True, skip_host_discovery=skip_host_discovery,
+        )
         return parse_sentinel_open_ports(xml, ip, SENTINEL_TCP_PORTS)
     except Exception:
         return None

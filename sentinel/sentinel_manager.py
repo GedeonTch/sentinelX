@@ -27,10 +27,13 @@ Rules enforced here:
 from __future__ import annotations
 
 import datetime
+import ipaddress
+import subprocess
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import timezone
-from typing import Optional
+from typing import Dict, List, Optional, Set
 
 import typer
 
@@ -49,7 +52,8 @@ from core.database import (
     close_session,
 )
 from core.logger import display
-from sentinel.alerting import AlertCounter, process_changes
+from sentinel.alerting import AlertCounter, EventStamp, process_changes
+from sentinel.arp_probe import ArpProbeStatus
 from sentinel.baseline import (
     BaselineEntry,
     NetworkIdentity,
@@ -60,6 +64,8 @@ from sentinel.baseline import (
     learn_baseline,
 )
 from sentinel.monitor import (
+    CycleObservations,
+    NetworkChange,
     ScanDegradedError,
     ScanFailedError,
     check_network,
@@ -243,7 +249,14 @@ def _start_owned(target_network, network_id, run_session_id, identity,
     else:
         display("[green]Baseline existante trouvée — surveillance démarrée.[/green]")
 
-    # Step 6 — record initial state in sentinel DB
+    # Step 6 — rebuild transition state from the stored history (§9.8, B1) before any write
+    state = _rebuild_transition_state(network_id, get_baseline(network_id, identity) or {})
+    if state is None:
+        display("[red]Lecture de l'historique Sentinel impossible. Sentinel non démarré.[/red]")
+        return "failed"
+    state.target_network = target_network
+
+    # Step 7 — record initial state in sentinel DB
     sentinel_update_state(
         network_id=network_id,
         sentinel_status="active",
@@ -260,9 +273,280 @@ def _start_owned(target_network, network_id, run_session_id, identity,
         _run_loop(
             target_network=target_network, network_id=network_id,
             run_session_id=run_session_id, identity=identity, interval=interval,
-            whitelist=whitelist, counter=counter, owner=owner,
+            whitelist=whitelist, counter=counter, owner=owner, state=state,
         )
     return "completed"
+
+
+@dataclass
+class NetworkState:
+    """In-memory transition state of one network (§9.15.2). Rebuilt from the stored events."""
+
+    stamp: EventStamp
+    known_hosts: Set[str]
+    initial_ports: Dict[str, Optional[List[int]]]
+    ports_initialized: Dict[str, bool]
+    open_ports: Dict[str, Set[int]]
+    port_absent_count: Dict[str, Dict[int, int]]
+    notified_port_not_open: Dict[str, Set[int]]
+    host_absent_count: Dict[str, int]
+    host_not_observed: Set[str]
+    scan_degraded_active: bool = False    # never restored (§9.8)
+    # Monitored CIDR, needed by the L2 classification. Set by _start_owned.
+    target_network: str = ""
+
+
+def _rebuild_transition_state(network_id: str, baseline: Dict[str, BaselineEntry]) -> Optional[NetworkState]:
+    """Rebuild the transition state from the stored history (§9.8).
+
+    Baseline hosts start initialized with their baseline ports (option b, decision of
+    2026-11-08). Stored events are then replayed chronologically; the stamp is restored
+    from the same snapshot (B1). Returns None when the snapshot cannot be read.
+    """
+    try:
+        events = _database.sentinel_network_snapshot(network_id)["events"]
+    except Exception:
+        return None  # any read failure stops the start explicitly (§9.8)
+
+    state = NetworkState(
+        stamp=EventStamp.restore(network_id, events),
+        known_hosts=set(baseline),
+        initial_ports={},
+        ports_initialized={},
+        open_ports={},
+        port_absent_count={},
+        notified_port_not_open={},
+        host_absent_count={},
+        host_not_observed=set(),
+    )
+    for ip, entry in baseline.items():
+        ports = list(entry.ports or [])
+        state.ports_initialized[ip] = True
+        state.initial_ports[ip] = ports
+        state.open_ports[ip] = set(ports)
+
+    for event in events:
+        kind = event.get("type")
+        details = event.get("details") or {}
+        ip = details.get("ip")
+        port = details.get("port")
+        if kind == "new_host" and ip:
+            state.known_hosts.add(ip)
+            if details.get("initial_ports_known"):
+                ports = list(details.get("initial_ports") or [])
+                state.ports_initialized[ip] = True
+                state.initial_ports[ip] = ports
+                state.open_ports[ip] = set(ports)
+            else:
+                state.ports_initialized[ip] = False
+                state.initial_ports[ip] = None
+                state.open_ports[ip] = set()
+        elif kind == "host_ports_initialized" and ip:
+            ports = list(details.get("initial_ports") or [])
+            state.ports_initialized[ip] = True
+            state.initial_ports[ip] = ports
+            state.open_ports[ip] = set(ports)
+        elif kind == "new_port" and ip and port is not None:
+            state.open_ports.setdefault(ip, set()).add(port)
+            state.notified_port_not_open.get(ip, set()).discard(port)
+        elif kind == "port_not_open" and ip and port is not None:
+            state.open_ports.setdefault(ip, set()).discard(port)
+            state.notified_port_not_open.setdefault(ip, set()).add(port)
+        elif kind == "host_not_observed" and ip:
+            state.host_not_observed.add(ip)
+        elif kind == "host_recovered" and ip:
+            state.host_not_observed.discard(ip)
+        # scan_degraded and mac_change are not restored: no transition depends on them.
+    return state
+
+
+def _route_output(ip: str) -> Optional[str]:
+    """Output of `ip route get <ip>` (local routing table only, no packet sent)."""
+    try:
+        result = subprocess.run(["ip", "route", "get", ip], capture_output=True, text=True,
+                                timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _classify_host(ip: str, target_network: str) -> str:
+    """l2_direct | routed | unknown | out_of_scope (§9.7)."""
+    try:
+        address = ipaddress.ip_address(ip)
+        network = ipaddress.ip_network(target_network, strict=False)
+    except ValueError:
+        return "out_of_scope"
+    if address not in network:
+        return "out_of_scope"
+    output = _route_output(ip)
+    if not output:
+        return "unknown"
+    tokens = output.split()
+    if "via" in tokens:
+        return "routed"
+    if "dev" not in tokens or "src" not in tokens:
+        return "unknown"
+    try:
+        source = ipaddress.ip_address(tokens[tokens.index("src") + 1])
+    except (ValueError, IndexError):
+        return "unknown"
+    # Direct on the monitored segment: no gateway and the local source is on the same CIDR.
+    return "l2_direct" if source in network else "unknown"
+
+
+def _is_l2_direct(ip: str, target_network: str) -> bool:
+    return _classify_host(ip, target_network) == "l2_direct"
+
+
+def _normalize_and_filter(observations: CycleObservations, state: NetworkState) -> List[NetworkChange]:
+    """Four ordered steps (§9.5). Updates the memory state before anything is persisted."""
+    changes: List[NetworkChange] = []
+
+    # Step 1 — candidates from the monitor: new_host (+ host_ports_initialized) and mac_change.
+    for change in observations.candidate_changes:
+        if change.change_type != "new_host":
+            changes.append(change)
+            continue
+        ip = change.asset_ip
+        if ip in state.known_hosts:
+            continue  # anti-répétition: already known
+        state.known_hosts.add(ip)
+        changes.append(change)
+        if change.initial_ports_known:
+            ports = list(change.initial_ports or [])
+            state.ports_initialized[ip] = True
+            state.initial_ports[ip] = ports
+            state.open_ports[ip] = set(ports)
+            changes.append(NetworkChange(
+                change_type="host_ports_initialized",
+                asset_ip=ip,
+                detail="ports initialized",
+                evidence=f"First complete TCP scan of {ip}: {len(ports)} open port(s).",
+                initial_ports=ports,
+                initial_ports_known=True,
+            ))
+        else:
+            state.ports_initialized[ip] = False
+            state.initial_ports[ip] = None
+            state.open_ports[ip] = set()
+
+    # Step 2 — shared initialization loop: known hosts whose first complete scan is now available.
+    for ip in observations.current_hosts:
+        observed = observations.tcp_observations.get(ip)
+        if ip not in state.known_hosts or state.ports_initialized.get(ip, False):
+            continue
+        if observed is None or observed.ports is None:
+            continue
+        ports = list(observed.ports)
+        state.ports_initialized[ip] = True
+        state.initial_ports[ip] = ports
+        state.open_ports[ip] = set(ports)
+        changes.append(NetworkChange(
+            change_type="host_ports_initialized",
+            asset_ip=ip,
+            detail="ports initialized",
+            evidence=f"First complete TCP scan of {ip}: {len(ports)} open port(s).",
+            initial_ports=ports,
+            initial_ports_known=True,
+        ))
+
+    changes.extend(_compute_port_transitions(observations, state))
+    changes.extend(_compute_host_transitions(observations, state))
+    return changes
+
+
+def _compute_port_transitions(observations: CycleObservations, state: NetworkState) -> List[NetworkChange]:
+    """Unified new_port / port_not_open (§9.5 step 3, §9.6)."""
+    changes: List[NetworkChange] = []
+    for ip in observations.current_hosts:
+        if not state.ports_initialized.get(ip, False):
+            continue
+        observed = observations.tcp_observations.get(ip)
+        counts = state.port_absent_count.setdefault(ip, {})
+        if observed is None or observed.ports is None:
+            counts.clear()  # unknown state: no conclusion, no counter kept (§9.6)
+            continue
+        present = set(observed.ports)
+        known_open = state.open_ports.setdefault(ip, set())
+
+        for port in sorted(present):
+            counts.pop(port, None)
+            if port not in known_open:
+                known_open.add(port)  # first opening or reopening
+                state.notified_port_not_open.get(ip, set()).discard(port)
+                changes.append(NetworkChange(
+                    change_type="new_port",
+                    asset_ip=ip,
+                    detail=f"port {port} opened",
+                    evidence=f"Port {port}/tcp open on {ip} in a complete TCP scan.",
+                    port=port,
+                ))
+
+        for port in sorted(known_open - present):
+            count = counts.get(port, 0) + 1
+            counts[port] = count
+            if count < 2:
+                continue
+            counts[port] = 0  # always reset after two complete observations
+            known_open.discard(port)  # a later reappearance is a new opening
+            notified = state.notified_port_not_open.setdefault(ip, set())
+            if port not in notified:
+                changes.append(NetworkChange(
+                    change_type="port_not_open",
+                    asset_ip=ip,
+                    detail=f"port {port} not open",
+                    evidence=f"Port {port}/tcp absent from two complete TCP scans of {ip}.",
+                    port=port,
+                ))
+                notified.add(port)
+    return changes
+
+
+def _compute_host_transitions(observations: CycleObservations, state: NetworkState) -> List[NetworkChange]:
+    """host_not_observed (two NOT_OBSERVED ARP answers, L2 direct only) and host_recovered."""
+    changes: List[NetworkChange] = []
+    current = set(observations.current_hosts)
+
+    for ip in sorted(current):
+        state.host_absent_count.pop(ip, None)
+        if ip in state.host_not_observed:
+            state.host_not_observed.discard(ip)
+            changes.append(NetworkChange(
+                change_type="host_recovered",
+                asset_ip=ip,
+                detail="host recovered",
+                evidence=f"Host {ip} answered again after an absence (ping or targeted ARP).",
+            ))
+
+    for ip in sorted(state.known_hosts - current):
+        if observations.host_arp_status.get(ip) is not ArpProbeStatus.NOT_OBSERVED:
+            state.host_absent_count.pop(ip, None)  # ERROR or no probe: no conclusion, reset
+            continue
+        if not _is_l2_direct(ip, state.target_network):
+            state.host_absent_count.pop(ip, None)  # routed or unknown: never an absence on ARP alone
+            continue
+        count = state.host_absent_count.get(ip, 0) + 1
+        state.host_absent_count[ip] = count
+        if count >= 2 and ip not in state.host_not_observed:
+            state.host_not_observed.add(ip)
+            changes.append(NetworkChange(
+                change_type="host_not_observed",
+                asset_ip=ip,
+                detail="host not observed",
+                evidence=f"Host {ip} not answered to targeted ARP in two reliable cycles.",
+            ))
+    return changes
+
+
+def _scan_degraded_change(target_network: str, reason: str) -> NetworkChange:
+    """Network-scope observation (B3): asset_ip is the target network, never a host."""
+    return NetworkChange(
+        change_type="scan_degraded",
+        asset_ip=target_network,
+        detail="scan degraded",
+        evidence=reason,
+    )
 
 
 def _run_loop(
@@ -274,6 +558,7 @@ def _run_loop(
     whitelist,
     counter: AlertCounter,
     owner: Owner,
+    state: NetworkState,
 ) -> None:
     """Cooperative stop: bounded polling when idle, finish an in-flight check."""
     while not owner.wait(interval):
@@ -289,6 +574,7 @@ def _run_loop(
                 interval=interval,
                 whitelist=whitelist,
                 counter=counter,
+                state=state,
             )
         finally:
             owner.end_cycle()
@@ -302,6 +588,7 @@ def _do_check(
     interval: int,
     whitelist,
     counter: AlertCounter,
+    state: NetworkState,
 ) -> None:
     """Execute one surveillance check cycle using the sentinel DB."""
     baseline = get_baseline(network_id, identity)
@@ -311,13 +598,43 @@ def _do_check(
         return
 
     try:
-        changes = check_network(
-            target_network=target_network,
-            session_id=run_session_id,
-            identity=identity,
-            baseline=baseline,
-        )
-        now = datetime.datetime.now(timezone.utc).isoformat()
+        try:
+            observations = check_network(
+                target_network=target_network,
+                session_id=run_session_id,
+                identity=identity,
+                baseline=baseline,
+                known_hosts=set(state.known_hosts),
+            )
+            partial = None
+        except ScanDegradedError as exc:
+            observations, partial = exc.observations, exc
+        except ScanFailedError as exc:
+            # No exploitable observation: no host or port conclusion, counters reset (§9.14).
+            display(f"[yellow]Monitor: {exc}[/yellow]")
+            state.host_absent_count.clear()
+            state.port_absent_count.clear()
+            changes = []
+            if not state.scan_degraded_active:
+                changes.append(_scan_degraded_change(target_network, str(exc)))
+            if changes:
+                process_changes(
+                    changes=changes,
+                    session_id=run_session_id,
+                    network_id=network_id,
+                    whitelist=whitelist,
+                    counter=counter,
+                    stamp=state.stamp,
+                )
+            state.scan_degraded_active = True
+            sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+            counter.phase("erreur", finished=True)
+            return
+
+        changes = _normalize_and_filter(observations, state)
+        if partial is not None and not state.scan_degraded_active:
+            # One scan_degraded per episode, after the exploitable transitions of this cycle.
+            changes.append(_scan_degraded_change(target_network, str(partial)))
         if changes:
             process_changes(
                 changes=changes,
@@ -325,36 +642,28 @@ def _do_check(
                 network_id=network_id,
                 whitelist=whitelist,
                 counter=counter,
+                stamp=state.stamp,
             )
+        if partial is not None:
+            # Partial check: changes above are persisted, last_check_time is not updated
+            # because global discovery was incomplete.
+            state.scan_degraded_active = True
+            display(f"[yellow]Monitor: {partial}[/yellow]")
+            sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+            counter.phase("dégradé", finished=True)
+            return
+
         # D1: the check is recorded only after its changes were persisted. A
         # storage failure above raises before this point, so last_check_time
         # is not advanced and the cycle is not reported as successful.
+        state.scan_degraded_active = False
+        now = datetime.datetime.now(timezone.utc).isoformat()
         sentinel_update_state(
             network_id=network_id,
             sentinel_status="active",
             last_check_time=now,
         )
         counter.phase('attente', finished=True)
-    except ScanDegradedError as exc:
-        # Partial check: process observed changes, but do not update
-        # last_check_time because global discovery was incomplete.
-        display(f"[yellow]Monitor: {exc}[/yellow]")
-        if exc.changes:
-            process_changes(
-                changes=exc.changes,
-                session_id=run_session_id,
-                network_id=network_id,
-                whitelist=whitelist,
-                counter=counter,
-            )
-        sentinel_update_state(network_id=network_id, sentinel_status="degraded")
-        counter.phase("dégradé", finished=True)
-    except ScanFailedError as exc:
-        # Ping and targeted ARP did not provide a usable host check.
-        # Never update last_check_time and never infer host removal.
-        display(f"[yellow]Monitor: {exc}[/yellow]")
-        sentinel_update_state(network_id=network_id, sentinel_status="degraded")
-        counter.phase("erreur", finished=True)
     except Exception as exc:
         try:
             counter.phase("erreur")

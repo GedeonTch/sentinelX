@@ -1,7 +1,7 @@
 """
 tests/test_sentinel_monitor.py — Unit tests for sentinel/monitor.py
 
-Covers: new_host, new_port, mac_change detection.
+Covers: new_host, mac_change candidates and the TCP observations (T23-B: new_port is decided by the manager).
         removed_host: NOT detected (out of scope V1).
         All network calls mocked.
 """
@@ -9,6 +9,7 @@ Covers: new_host, new_port, mac_change detection.
 import pytest
 from unittest.mock import patch
 
+from sentinel.arp_probe import ArpProbeResult, ArpProbeStatus
 from sentinel.baseline import BaselineEntry, NetworkIdentity
 from sentinel.monitor import (
     NetworkChange,
@@ -19,6 +20,15 @@ from sentinel.monitor import (
 
 IDENTITY = NetworkIdentity("192.168.1.0/24", "192.168.1.1", "aa:aa:aa:aa:aa:aa")
 SESSION = "session-monitor-test"
+NO_KNOWN = frozenset()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_arp():
+    """Tests never send ARP traffic: every probe answers ERROR unless a test patches it."""
+    with patch("sentinel.monitor.arp_probe",
+               return_value=ArpProbeResult(ArpProbeStatus.ERROR, "0.0.0.0", error="test double")):
+        yield
 
 BASELINE = {
     "192.168.1.10": BaselineEntry(
@@ -49,7 +59,7 @@ class TestNewHost:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10", "192.168.1.99"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         new_hosts = [c for c in changes if c.change_type == "new_host"]
         assert len(new_hosts) == 1
         assert new_hosts[0].asset_ip == "192.168.1.99"
@@ -58,36 +68,37 @@ class TestNewHost:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         new_hosts = [c for c in changes if c.change_type == "new_host"]
         assert new_hosts == []
 
 
 class TestNewPort:
     def test_new_port_detected(self):
+        """T23-B: the monitor reports the observed ports; new_port is decided by the manager (§9.5)."""
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80, 4444]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
-        new_ports = [c for c in changes if c.change_type == "new_port"]
-        assert len(new_ports) == 1
-        assert "4444" in new_ports[0].detail
+            obs = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
+        assert obs.tcp_observations["192.168.1.10"].ports == [22, 80, 4444]
+        assert [c for c in obs.candidate_changes if c.change_type == "new_port"] == []
 
     def test_no_new_port_when_ports_match(self):
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         new_ports = [c for c in changes if c.change_type == "new_port"]
         assert new_ports == []
 
     def test_multiple_new_ports(self):
+        """T23-B: both unknown ports are present in the TCP observation, not in candidate_changes."""
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80, 3389, 4444]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
-        new_ports = [c for c in changes if c.change_type == "new_port"]
-        assert len(new_ports) == 2
+            obs = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
+        assert obs.tcp_observations["192.168.1.10"].ports == [22, 80, 3389, 4444]
+        assert [c for c in obs.candidate_changes if c.change_type == "new_port"] == []
 
 
 class TestMacChange:
@@ -95,7 +106,7 @@ class TestMacChange:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80]), \
              patch("sentinel.monitor._get_arp_mac", return_value="ff:ff:ff:ff:ff:ff"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         mac_changes = [c for c in changes if c.change_type == "mac_change"]
         assert len(mac_changes) == 1
         assert mac_changes[0].asset_ip == "192.168.1.10"
@@ -104,7 +115,7 @@ class TestMacChange:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         mac_changes = [c for c in changes if c.change_type == "mac_change"]
         assert mac_changes == []
 
@@ -113,7 +124,7 @@ class TestMacChange:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.20"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[443]), \
              patch("sentinel.monitor._get_arp_mac", return_value="aa:bb:cc:dd:ee:ff"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         mac_changes = [c for c in changes if c.change_type == "mac_change"]
         assert mac_changes == []
 
@@ -124,7 +135,7 @@ class TestRemovedHostOutOfScope:
         with patch("sentinel.monitor._get_active_hosts", return_value=[]), \
              patch("sentinel.monitor._get_open_ports", return_value=[]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         assert changes == []
 
 
@@ -133,7 +144,7 @@ class TestMonitorEdgeCases:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, {})
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, {}, NO_KNOWN).candidate_changes
         new_hosts = [c for c in changes if c.change_type == "new_host"]
         assert len(new_hosts) == 1
 
@@ -142,13 +153,13 @@ class TestMonitorEdgeCases:
         import pytest
         with patch("sentinel.monitor._get_active_hosts", return_value=None):
             with pytest.raises(ScanFailedError):
-                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
 
     def test_evidence_not_empty(self):
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.99"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         assert all(c.evidence != "" for c in changes)
 
 
@@ -163,14 +174,14 @@ class TestScanFailedContract:
         import pytest
         with patch("sentinel.monitor._get_active_hosts", return_value=None):
             with pytest.raises(ScanFailedError):
-                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
 
     def test_ping_success_empty_network_returns_empty_list(self):
         """[] from _get_active_hosts → empty changes, no exception."""
         with patch("sentinel.monitor._get_active_hosts", return_value=[]), \
              patch("sentinel.monitor._get_open_ports", return_value=[]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         assert changes == []
 
     def test_port_scan_failure_degrades_without_new_port(self):
@@ -179,8 +190,8 @@ class TestScanFailedContract:
              patch("sentinel.monitor._get_open_ports", return_value=None), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
             with pytest.raises(ScanDegradedError) as exc_info:
-                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
-        new_ports = [c for c in exc_info.value.changes if c.change_type == "new_port"]
+                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
+        new_ports = [c for c in exc_info.value.observations.candidate_changes if c.change_type == "new_port"]
         assert new_ports == []
 
     def test_port_scan_empty_result_reports_no_new_ports(self):
@@ -188,21 +199,20 @@ class TestScanFailedContract:
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         # Baseline has ports [22, 80], scan returns [] → ports 22 and 80 disappeared
         # but removed_host/port is out of scope V1 → no changes
         new_ports = [c for c in changes if c.change_type == "new_port"]
         assert new_ports == []
 
     def test_port_scan_new_port_detected_when_scan_succeeds(self):
-        """[22, 80, 4444] from _get_open_ports → new_port for 4444."""
+        """[22, 80, 4444] from _get_open_ports → complete observation; new_port is a manager decision."""
         with patch("sentinel.monitor._get_active_hosts", return_value=["192.168.1.10"]), \
              patch("sentinel.monitor._get_open_ports", return_value=[22, 80, 4444]), \
              patch("sentinel.monitor._get_arp_mac", return_value="11:22:33:44:55:66"):
-            changes = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
-        new_ports = [c for c in changes if c.change_type == "new_port"]
-        assert len(new_ports) == 1
-        assert "4444" in new_ports[0].detail
+            obs = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
+        assert obs.tcp_observations["192.168.1.10"].ports == [22, 80, 4444]
+        assert obs.tcp_observations["192.168.1.10"].ports is not None
 
     def test_scan_failed_error_is_distinct_from_empty_changes(self):
         """ScanFailedError and [] are two distinct outcomes."""
@@ -210,11 +220,11 @@ class TestScanFailedContract:
         # ScanFailedError on ping failure
         with patch("sentinel.monitor._get_active_hosts", return_value=None):
             with pytest.raises(ScanFailedError):
-                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+                check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN)
 
         # [] on successful scan with no changes
         with patch("sentinel.monitor._get_active_hosts", return_value=[]), \
              patch("sentinel.monitor._get_open_ports", return_value=[]), \
              patch("sentinel.monitor._get_arp_mac", return_value=""):
-            result = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE)
+            result = check_network("192.168.1.0/24", SESSION, IDENTITY, BASELINE, NO_KNOWN).candidate_changes
         assert result == []  # no exception, empty list

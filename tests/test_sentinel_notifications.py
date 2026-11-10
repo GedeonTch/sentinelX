@@ -8,14 +8,15 @@ from unittest.mock import Mock
 import pytest
 from rich.console import Console
 from core import database as db, logger
-from sentinel.alerting import AlertCounter, process_changes
-from sentinel.monitor import NetworkChange
+from sentinel.alerting import AlertCounter, process_changes, EventStamp
+from sentinel.monitor import CycleObservations, NetworkChange
 from sentinel.whitelist import Whitelist
 from sentinel.notifications import host_summary, notification_state
 
 NET, RUN = 'quota-network', 'quota-run'
 HOST = '192.0.2.10'
 CHANGE = NetworkChange('new_port', HOST, 'port 8080 opened', 'simulated')
+MAC_CHANGE = NetworkChange('mac_change', HOST, 'mac changed', 'simulated')
 
 
 class Clock:
@@ -41,7 +42,8 @@ def store(tmp_path, monkeypatch):
 
 
 def send(counter, change=CHANGE, network=NET, whitelist=None):
-    return process_changes([change], RUN, whitelist or Whitelist(), counter, network_id=network)
+    return process_changes([change], RUN, whitelist or Whitelist(), counter, network_id=network,
+                           stamp=EventStamp(network, clock=counter.clock))  # same clock as the quota
 
 
 def test_rolling_window_exact_boundary_not_fixed_pause(store):
@@ -173,7 +175,7 @@ def test_empty_cycle_has_no_resume_message_or_reactivation(store):
     for _ in range(4):
         send(c)
     store.advance(3600)
-    assert process_changes([], RUN, Whitelist(), c, network_id=NET) == []
+    assert process_changes([], RUN, Whitelist(), c, network_id=NET, stamp=EventStamp(NET, clock=c.clock)) == []
     assert c.summary()[HOST]['available'] == 3
     assert send(c)
 
@@ -190,14 +192,21 @@ def test_silent_host_does_not_suspend_following_monitor_cycles(store, monkeypatc
     c = AlertCounter(clock=store)
     for _ in range(3):
         send(c)
-    check = Mock(return_value=[CHANGE])
+    # T23-B: a candidate mac_change passes through the transitions unchanged, every cycle.
+    cycle = CycleObservations(current_hosts=[], ping_hosts=[], host_arp_status={}, tcp_observations={},
+                              candidate_changes=[MAC_CHANGE], ping_failed=False, services_degraded=False)
+    check = Mock(return_value=cycle)
     monkeypatch.setattr(manager, 'get_baseline', lambda *args: {'known': object()})
     monkeypatch.setattr(manager, 'check_network', check)
     owner = Mock()
     owner.wait.side_effect = [False, False, True]
     owner.admit_cycle.return_value = True
+    state = manager.NetworkState(stamp=EventStamp(NET, clock=c.clock), known_hosts=set(), initial_ports={},
+                                 ports_initialized={}, open_ports={}, port_absent_count={},
+                                 notified_port_not_open={}, host_absent_count={}, host_not_observed=set(),
+                                 target_network='192.0.2.0/24')
     manager._run_loop('192.0.2.0/24', NET, RUN,
-                      NetworkIdentity('192.0.2.0/24', '', ''), 60, Whitelist(), c, owner)
+                      NetworkIdentity('192.0.2.0/24', '', ''), 60, Whitelist(), c, owner, state)
     assert check.call_count == 2 and owner.end_cycle.call_count == 2
     assert len(db.get_findings(RUN)) == 5
     assert len(db.sentinel_get_events(NET)) == 5

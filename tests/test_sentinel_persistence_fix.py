@@ -14,9 +14,9 @@ import pytest
 
 import core.database as db
 import sentinel.sentinel_manager as manager
-from sentinel.alerting import AlertCounter
+from sentinel.alerting import AlertCounter, EventStamp
 from sentinel.baseline import BaselineEntry
-from sentinel.monitor import NetworkChange
+from sentinel.monitor import CycleObservations, NetworkChange
 from sentinel.whitelist import Whitelist
 
 NET = 'persistence-fix-net'
@@ -76,12 +76,26 @@ def record_connect_timeouts(monkeypatch):
     return seen
 
 
+def observations(changes):
+    """Cycle observations carrying the given candidate changes (§9.3)."""
+    return CycleObservations(current_hosts=[], ping_hosts=[], host_arp_status={}, tcp_observations={},
+                             candidate_changes=list(changes), ping_failed=False, services_degraded=False)
+
+
+def fresh_state():
+    return manager.NetworkState(
+        stamp=EventStamp(NET), known_hosts=set(), initial_ports={}, ports_initialized={},
+        open_ports={}, port_absent_count={}, notified_port_not_open={}, host_absent_count={},
+        host_not_observed=set(), target_network=TARGET,
+    )
+
+
 def run_check(changes, whitelist=None):
     return manager._do_check(
         target_network=TARGET, network_id=NET, run_session_id=RUN,
         identity=object(), interval=60,
         whitelist=whitelist if whitelist is not None else Whitelist(),
-        counter=AlertCounter(),
+        counter=AlertCounter(), state=fresh_state(),
     )
 
 
@@ -97,7 +111,7 @@ def make_error(code, message=CANARY):
 # ---------------------------------------------------------------------------
 
 def test_failed_event_write_does_not_advance_last_check(storage, monkeypatch):
-    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: [CHANGE])
+    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: observations([CHANGE]))
     real_process_changes = manager.process_changes
 
     def process_under_real_lock(**kwargs):
@@ -120,7 +134,7 @@ def test_failed_event_write_does_not_advance_last_check(storage, monkeypatch):
 
 
 def test_successful_cycle_advances_last_check(storage, monkeypatch):
-    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: [CHANGE])
+    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: observations([CHANGE]))
 
     run_check([CHANGE])
 
@@ -134,7 +148,7 @@ def test_successful_cycle_advances_last_check(storage, monkeypatch):
 
 
 def test_successful_empty_cycle_advances_last_check(storage, monkeypatch):
-    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: [])
+    monkeypatch.setattr(manager, 'check_network', lambda **kwargs: observations([]))
 
     run_check([])
 

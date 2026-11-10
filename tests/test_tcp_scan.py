@@ -990,3 +990,48 @@ class TestTcpRunnerContracts:
         from sentinel.monitor import _get_open_ports
         with patch("detect.tcp_scan.subprocess.run", side_effect=RuntimeError("bug")):
             assert _get_open_ports("192.168.1.1") is None
+
+
+class TestSkipHostDiscovery:
+    """T23-B §9.9: ``_run_nmap_tcp(skip_host_discovery=True)`` inserts ``-Pn``."""
+
+    @staticmethod
+    def _command(**kwargs):
+        from detect.tcp_scan import _run_nmap_tcp
+        completed = subprocess.CompletedProcess(args=["nmap"], returncode=0, stdout=TCP_XML_UP_NO_OPEN_PORTS, stderr="")
+        with patch("detect.tcp_scan.subprocess.run", return_value=completed) as run:
+            _run_nmap_tcp("192.168.1.7", "normal", "22,80", **kwargs)
+        return run.call_args[0][0]
+
+    @staticmethod
+    def _strict_command(**kwargs):
+        from detect.tcp_scan import _run_nmap_tcp
+        with patch("detect.tcp_scan._run_nmap_tcp_strict", return_value=None) as strict:
+            _run_nmap_tcp("192.168.1.7", "normal", "22,80", **kwargs)
+        return strict.call_args[0][0]
+
+    def test_default_has_no_pn(self):
+        assert "-Pn" not in self._command()
+
+    def test_explicit_false_has_no_pn(self):
+        assert "-Pn" not in self._command(skip_host_discovery=False)
+
+    def test_true_inserts_pn_before_output_flags(self):
+        cmd = self._command(skip_host_discovery=True)
+        assert cmd.count("-Pn") == 1
+        assert cmd.index("-Pn") < cmd.index("-oX")
+        assert cmd[-1] == "192.168.1.7"
+
+    def test_true_keeps_profile_flags_and_ports(self):
+        from detect.tcp_scan import PROFILE_FLAGS
+        cmd = self._command(skip_host_discovery=True)
+        for flag in PROFILE_FLAGS["normal"]:
+            assert flag in cmd
+        assert cmd[cmd.index("-p") + 1] == "22,80"
+
+    def test_strict_pipeline_receives_pn_when_requested(self):
+        cmd = self._strict_command(strict=True, skip_host_discovery=True)
+        assert "-Pn" in cmd and cmd.index("-Pn") < cmd.index("-oX")
+
+    def test_strict_pipeline_without_request_has_no_pn(self):
+        assert "-Pn" not in self._strict_command(strict=True)

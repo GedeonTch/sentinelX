@@ -7,22 +7,34 @@ Covers: status (ACTIF/DÉGRADÉ/INACTIF), _compute_display_state,
 """
 
 import datetime
+import uuid
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from datetime import timezone
 
 import core.database as db
+import sentinel.sentinel_manager as sm
 from sentinel.sentinel_manager import (
+    NetworkState,
     status,
     stop,
     _compute_display_state,
     _graceful_stop,
     _do_check,
+    _normalize_and_filter,
+    _rebuild_transition_state,
 )
-from sentinel.alerting import AlertCounter
+from sentinel.alerting import AlertCounter, EventStamp
+from sentinel.arp_probe import ArpProbeStatus
 from sentinel.baseline import BaselineEntry
-from sentinel.monitor import NetworkChange, ScanDegradedError
+from sentinel.monitor import (
+    CycleObservations,
+    HostTcpObservation,
+    NetworkChange,
+    ScanDegradedError,
+    ScanFailedError,
+)
 from sentinel.whitelist import Whitelist
 
 SESSION = "session-manager-test"
@@ -246,6 +258,20 @@ class TestLastCheckTime:
         assert state["sentinel_status"] == "degraded"
 
 
+def _state():
+    return NetworkState(
+        stamp=EventStamp(SESSION), known_hosts=set(), initial_ports={}, ports_initialized={},
+        open_ports={}, port_absent_count={}, notified_port_not_open={}, host_absent_count={},
+        host_not_observed=set(), target_network="192.168.1.0/24",
+    )
+
+
+def _observations(changes=(), services_degraded=False):
+    return CycleObservations(current_hosts=[], ping_hosts=[], host_arp_status={}, tcp_observations={},
+                             candidate_changes=list(changes), ping_failed=False,
+                             services_degraded=services_degraded)
+
+
 class TestDegradedArpCheck:
     def test_degraded_check_processes_changes_without_updating_last_check(self):
         initial = (datetime.datetime.now(timezone.utc) - datetime.timedelta(seconds=30)).isoformat()
@@ -256,7 +282,7 @@ class TestDegradedArpCheck:
         with patch("sentinel.sentinel_manager.get_baseline", return_value={"ip": object()}), \
              patch(
                  "sentinel.sentinel_manager.check_network",
-                 side_effect=ScanDegradedError("partial", [change]),
+                 side_effect=ScanDegradedError("partial", _observations([change], services_degraded=True)),
              ), \
              patch("sentinel.sentinel_manager.process_changes") as process_changes, \
              patch("sentinel.sentinel_manager.sentinel_update_state") as update_state:
@@ -268,9 +294,13 @@ class TestDegradedArpCheck:
                 interval=60,
                 whitelist=whitelist,
                 counter=AlertCounter(),
+                state=_state(),
             )
 
+        # One batch: the transition, then the scan_degraded episode event (§9.14).
         process_changes.assert_called_once()
+        batch = [c.change_type for c in process_changes.call_args.kwargs["changes"]]
+        assert batch == ["mac_change", "scan_degraded"]
         assert update_state.call_args.kwargs["sentinel_status"] == "degraded"
         assert "last_check_time" not in update_state.call_args.kwargs
 
@@ -300,9 +330,282 @@ class TestDegradedArpCheck:
                 interval=60,
                 whitelist=Whitelist(),
                 counter=AlertCounter(),
+                state=_state(),
             )
 
         state = db.sentinel_get_state(SESSION)
         assert state["sentinel_status"] == "degraded"
         assert state["last_check_time"] == initial
-        process_changes.assert_not_called()
+        # T23-B §9.2/§9.14: the degraded episode is recorded, and only that (no host or port change).
+        process_changes.assert_called_once()
+        batch = process_changes.call_args.kwargs["changes"]
+        assert [c.change_type for c in batch] == ["scan_degraded"]
+        assert batch[0].asset_ip == "192.168.1.0/24"  # B3: network scope
+
+
+# ---------------------------------------------------------------------------
+# T23-B step 5 — transitions, reconstruction, episodes, B1, B3 (§9.5–§9.14)
+# ---------------------------------------------------------------------------
+
+HOST = "192.168.1.10"
+NET_CIDR = "192.168.1.0/24"
+# `ip route get` outputs (local table only): direct L2 on the monitored segment, routed, no route.
+ROUTE_L2 = "192.168.1.10 dev eth0 src 192.168.1.5 uid 0\n"
+ROUTE_VIA = "192.168.1.10 via 192.168.1.1 dev eth0 src 192.168.1.5 uid 0\n"
+
+
+def _cycle(current=(), tcp=None, arp=None, candidates=(), degraded=False):
+    """Observations for one cycle; every current host carries a TCP observation (§9.3)."""
+    tcp = tcp or {}
+    return CycleObservations(
+        current_hosts=list(current),
+        ping_hosts=list(current),
+        host_arp_status=dict(arp or {}),
+        tcp_observations={ip: HostTcpObservation(ip, tcp.get(ip)) for ip in current},
+        candidate_changes=list(candidates),
+        ping_failed=False,
+        services_degraded=degraded,
+    )
+
+
+def _new_host(ip=HOST, ports=None):
+    if ports is None:
+        return NetworkChange("new_host", ip, "new host detected", "test")
+    return NetworkChange("new_host", ip, "new host detected", "test",
+                         initial_ports=list(ports), initial_ports_known=True)
+
+
+def _st(known=(), ports_initialized=None, open_ports=None):
+    """Transition state for NET_CIDR, with the given known hosts and their memory."""
+    state = NetworkState(
+        stamp=EventStamp(SESSION), known_hosts=set(known), initial_ports={}, ports_initialized={},
+        open_ports={}, port_absent_count={}, notified_port_not_open={}, host_absent_count={},
+        host_not_observed=set(), target_network=NET_CIDR,
+    )
+    for ip, ports in (ports_initialized or {}).items():
+        state.ports_initialized[ip] = True
+        state.initial_ports[ip] = list(ports)
+        state.open_ports[ip] = set(ports)
+    for ip, ports in (open_ports or {}).items():
+        state.open_ports[ip] = set(ports)
+    return state
+
+
+def _types(changes):
+    return [c.change_type for c in changes]
+
+
+class TestTransitions:
+    """Pure transitions of _normalize_and_filter (§9.5, §9.6, §9.7)."""
+
+    def test_new_host_with_complete_scan_is_announced_and_initialized_once(self):
+        state = _st()
+        first = _normalize_and_filter(_cycle([HOST], {HOST: [22]}, candidates=[_new_host(HOST, [22])]), state)
+        assert _types(first) == ["new_host", "host_ports_initialized"]
+        assert first[1].initial_ports == [22]
+        assert state.open_ports[HOST] == {22}
+        # Same host seen again (anti-répétition, initialisation déjà faite): nothing new.
+        again = _normalize_and_filter(_cycle([HOST], {HOST: [22]}, candidates=[_new_host(HOST, [22])]), state)
+        assert again == []
+
+    def test_unknown_ports_then_first_complete_scan_initializes_without_fake_new_port(self):
+        state = _st()
+        first = _normalize_and_filter(_cycle([HOST], {HOST: None}, candidates=[_new_host(HOST)]), state)
+        assert _types(first) == ["new_host"]  # no ports known: no initialization, no new_port
+        assert state.ports_initialized[HOST] is False
+        second = _normalize_and_filter(_cycle([HOST], {HOST: [22, 80]}), state)
+        # §9.5 step 2: one initialization, and the ports already open are not new_port (criterion 18).
+        assert _types(second) == ["host_ports_initialized"]
+        assert second[0].initial_ports == [22, 80]
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22, 80]}), state) == []
+
+    def test_new_port_is_announced_once_per_opening(self):
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        opened = _normalize_and_filter(_cycle([HOST], {HOST: [22, 8080]}), state)
+        assert _types(opened) == ["new_port"]
+        assert opened[0].port == 8080
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22, 8080]}), state) == []
+
+    def test_port_not_open_after_two_complete_scans_then_never_repeated(self):
+        state = _st({HOST}, ports_initialized={HOST: [22, 80]})
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []  # first absence
+        closed = _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state)     # second absence
+        assert _types(closed) == ["port_not_open"]
+        assert closed[0].port == 80
+        assert state.port_absent_count[HOST][80] == 0  # reset at two (criterion 6)
+        for _ in range(3):  # still absent: no re-emission (criterion 7)
+            assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []
+        assert state.port_absent_count[HOST][80] < 2
+
+    def test_reopened_port_is_a_new_opening_and_can_close_again(self):
+        state = _st({HOST}, ports_initialized={HOST: [22, 80]})
+        for _ in range(2):
+            _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state)
+        back = _normalize_and_filter(_cycle([HOST], {HOST: [22, 80]}), state)
+        assert _types(back) == ["new_port"] and back[0].port == 80
+        closed_again = [_normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) for _ in range(2)]
+        assert closed_again[0] == []
+        assert _types(closed_again[1]) == ["port_not_open"] and closed_again[1][0].port == 80
+
+    def test_unknown_tcp_observation_restarts_the_absence_count(self):
+        state = _st({HOST}, ports_initialized={HOST: [22, 80]})
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []
+        assert _normalize_and_filter(_cycle([HOST], {HOST: None}), state) == []  # no conclusion
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []  # count restarted at 1
+        assert _types(_normalize_and_filter(_cycle([HOST], {HOST: [22]}), state)) == ["port_not_open"]
+
+    def test_host_not_observed_after_two_reliable_l2_cycles_only(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: ROUTE_L2)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        absent = _cycle([], arp={HOST: ArpProbeStatus.NOT_OBSERVED})
+        assert _normalize_and_filter(absent, state) == []
+        second = _normalize_and_filter(absent, state)
+        assert _types(second) == ["host_not_observed"]
+        assert second[0].asset_ip == HOST
+        assert _normalize_and_filter(absent, state) == []  # not repeated while still absent
+        assert HOST in state.host_not_observed
+
+    def test_host_not_observed_never_from_icmp_only_silence(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: ROUTE_L2)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        for _ in range(3):  # no ARP probe for this host: ping silence alone is not an absence
+            assert _normalize_and_filter(_cycle([], arp={}), state) == []
+        assert HOST not in state.host_not_observed
+
+    def test_host_not_observed_never_for_a_routed_host(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: ROUTE_VIA)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        for _ in range(3):
+            assert _normalize_and_filter(_cycle([], arp={HOST: ArpProbeStatus.NOT_OBSERVED}), state) == []
+
+    def test_host_not_observed_never_when_the_route_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: None)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        for _ in range(3):
+            assert _normalize_and_filter(_cycle([], arp={HOST: ArpProbeStatus.NOT_OBSERVED}), state) == []
+
+    def test_error_status_resets_the_absence_count(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: ROUTE_L2)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        sequence = [ArpProbeStatus.NOT_OBSERVED, ArpProbeStatus.ERROR,
+                    ArpProbeStatus.NOT_OBSERVED, ArpProbeStatus.NOT_OBSERVED]
+        results = [_types(_normalize_and_filter(_cycle([], arp={HOST: status_}), state)) for status_ in sequence]
+        # The ERROR cycle is no conclusion: the next NOT_OBSERVED starts again at one (criterion 15).
+        assert results == [[], [], [], ["host_not_observed"]]
+
+    def test_host_recovered_when_it_answers_again(self, monkeypatch):
+        monkeypatch.setattr(sm, "_route_output", lambda ip: ROUTE_L2)
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        for _ in range(2):
+            _normalize_and_filter(_cycle([], arp={HOST: ArpProbeStatus.NOT_OBSERVED}), state)
+        back = _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state)
+        assert _types(back) == ["host_recovered"]
+        assert HOST not in state.host_not_observed
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []
+
+    def test_mac_change_is_passed_through_unchanged(self):
+        state = _st({HOST}, ports_initialized={HOST: [22]})
+        change = NetworkChange("mac_change", HOST, "mac changed", "test")
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}, candidates=[change]), state) == [change]
+
+
+def _save_event(event_type, timestamp, ip, details=None):
+    body = {"ip": ip, **(details or {})}
+    db.sentinel_save_event(SESSION, uuid.uuid4().hex, event_type, timestamp, None, body, resolved=True)
+
+
+class TestReconstruction:
+    """Rebuild from the stored history (§9.8, §9.13, B1): no repetition, no false new_port."""
+
+    def test_replayed_history_is_not_announced_again(self):
+        _save_event("new_host", "2026-10-10T12:00:00.000001+00:00", HOST,
+                    {"initial_ports": [22], "initial_ports_known": True})
+        _save_event("host_ports_initialized", "2026-10-10T12:00:00.000002+00:00", HOST, {"initial_ports": [22]})
+        _save_event("new_port", "2026-10-10T12:00:00.000003+00:00", HOST, {"port": 8080})
+        state = _rebuild_transition_state(SESSION, {})
+        assert state is not None
+        assert HOST in state.known_hosts
+        assert state.ports_initialized[HOST] is True
+        assert state.open_ports[HOST] == {22, 8080}
+        # The same host and the same ports after a restart: nothing is announced again.
+        candidate = _new_host(HOST, [22, 8080])
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22, 8080]}, candidates=[candidate]), state) == []
+
+    def test_baseline_hosts_start_with_their_ports_and_no_false_new_port(self):
+        baseline = {HOST: BaselineEntry(asset_id="a", ip=HOST, mac="", ports=[22],
+                                        last_scan="2026-01-01T00:00:00+00:00")}
+        state = _rebuild_transition_state(SESSION, baseline)
+        assert state.ports_initialized[HOST] is True and state.open_ports[HOST] == {22}
+        assert _normalize_and_filter(_cycle([HOST], {HOST: [22]}), state) == []
+        assert _types(_normalize_and_filter(_cycle([HOST], {HOST: [22, 80]}), state)) == ["new_port"]
+
+    def test_restored_stamp_is_the_latest_instant_not_the_latest_string(self):
+        # 13:00+02:00 is 11:00 UTC; 12:00+00:00 is the latest instant. A string sort would pick the first.
+        _save_event("new_host", "2026-10-10T13:00:00+02:00", "192.168.1.20")
+        _save_event("new_host", "2026-10-10T12:00:00+00:00", "192.168.1.21")
+        state = _rebuild_transition_state(SESSION, {})
+        assert state.stamp.last == datetime.datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+
+    def test_unreadable_history_returns_none(self, monkeypatch):
+        def unreadable(network_id):
+            raise OSError("simulated unreadable history")
+        monkeypatch.setattr(db, "sentinel_network_snapshot", unreadable)
+        assert _rebuild_transition_state(SESSION, {}) is None
+
+
+class TestEpisodesAndCounters:
+    """_do_check outcomes: scan_degraded per episode, ScanFailedError, network scope (§9.14, B3)."""
+
+    @pytest.fixture
+    def cycle(self, monkeypatch):
+        monkeypatch.setattr(sm, "get_baseline", lambda *args: {HOST: BaselineEntry(
+            asset_id="a", ip=HOST, mac="", ports=[22], last_scan="2026-01-01T00:00:00+00:00")})
+        db.sentinel_update_state(SESSION, "active")
+
+        def run(state, counter, outcome):
+            monkeypatch.setattr(sm, "check_network", Mock(side_effect=[outcome]))
+            _do_check(target_network=NET_CIDR, network_id=SESSION, run_session_id="run-episodes",
+                      identity=object(), interval=60, whitelist=Whitelist(), counter=counter, state=state)
+        return run
+
+    def _degraded_events(self):
+        return [e for e in db.sentinel_get_events(SESSION) if e["type"] == "scan_degraded"]
+
+    def test_scan_degraded_once_per_episode_and_scoped_to_the_network(self, cycle):
+        state, counter = _st({HOST}, ports_initialized={HOST: [22]}), AlertCounter()
+        counter.bind(SESSION)
+        partial = ScanDegradedError("simulated partial", _cycle([HOST], {HOST: None}, degraded=True))
+        cycle(state, counter, partial)  # episode 1 starts
+        cycle(state, counter, partial)  # same episode: no new event
+        cycle(state, counter, _cycle([HOST], {HOST: [22]}))  # clean cycle ends the episode
+        cycle(state, counter, partial)  # episode 2
+        events = self._degraded_events()
+        assert len(events) == 2
+        for event in events:
+            assert event["asset_id"] is None  # B3: no fake asset
+            assert event["details"]["ip"] == NET_CIDR  # B3: network scope
+        assert state.scan_degraded_active is True
+
+    def test_scan_failed_resets_counters_and_records_one_episode_only(self, cycle):
+        state, counter = _st({HOST}, ports_initialized={HOST: [22]}), AlertCounter()
+        counter.bind(SESSION)
+        state.host_absent_count[HOST] = 1
+        state.port_absent_count[HOST] = {22: 1}
+        cycle(state, counter, ScanFailedError("total absence"))
+        cycle(state, counter, ScanFailedError("total absence again"))
+        assert len(self._degraded_events()) == 1
+        assert state.host_absent_count == {} and state.port_absent_count == {}
+        types = [e["type"] for e in db.sentinel_get_events(SESSION)]
+        assert types == ["scan_degraded"]  # no host or port conclusion during an absolute failure
+
+    def test_network_quota_applies_across_degraded_episodes(self, cycle):
+        # B3: the quota of scan_degraded is the network's. Four episodes: three confirmed, one masked.
+        state, counter = _st({HOST}, ports_initialized={HOST: [22]}), AlertCounter()
+        counter.bind(SESSION)
+        partial = ScanDegradedError("simulated partial", _cycle([HOST], {HOST: None}, degraded=True))
+        clean = _cycle([HOST], {HOST: [22]})
+        for outcome in (partial, clean, partial, clean, partial, clean, partial):
+            cycle(state, counter, outcome)
+        events = sorted(self._degraded_events(), key=lambda e: e["timestamp"])
+        assert [e["details"]["notification"]["state"] for e in events] == [
+            "confirmed", "confirmed", "confirmed", "masked"]

@@ -2,12 +2,14 @@
 from collections import deque
 from datetime import datetime
 import unicodedata
+from typing import Optional
 from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from core.finding import Finding
 from core.logger import get_console
+from sentinel.monitor import NetworkChange
 
 
 def safe_text(value):
@@ -20,6 +22,10 @@ def safe_text(value):
 # never contains them (no list, no UUID): see MonitorView.emit.
 NON_TTY_ALERTS_TITLE = 'Alertes de cette exécution'
 NO_NOTIFICATION_LINE = 'Aucune notification affichée pendant cette exécution.'
+# T23-B (B2): observations have no Finding and no severity. Shown as a dash.
+OBSERVATION_SEVERITY_LABEL = '—'
+FINDING_IDENTITY_LABEL = 'UUID du Finding'
+EVENT_IDENTITY_LABEL = "UUID de l'événement"
 # A check that ended, by outcome. Only 'attente' with a finished timestamp is a success:
 # 'dégradé' and 'erreur' ended without recording last_check_time, so they never say "terminé".
 CHECK_OUTCOMES = {
@@ -61,7 +67,7 @@ class MonitorView:
 
     def notification(self, row):
         """One notification block: no command, full UUID, severity. Never a title."""
-        when, host, kind, detail, finding_id, severity = row
+        when, host, kind, detail, identity, severity, identity_label = row
         table = Table(show_header=False, expand=True)
         table.add_column(width=8)
         table.add_column(overflow='fold')
@@ -69,8 +75,8 @@ class MonitorView:
                            ('Détail', detail), ('Sévérité', severity)]:
             table.add_row(key, Text(safe_text(value)))
         # No borders or ellipsis; narrow terminals wrap without losing characters.
-        return Group(table, Text('UUID du Finding :', style='dim'),
-                     Text(finding_id, overflow='fold'))
+        return Group(table, Text(f'{identity_label} :', style='dim'),
+                     Text(identity, overflow='fold'))
 
     def hosts(self):
         return self._host_table(sorted(self.window.summary().items()))
@@ -193,11 +199,26 @@ class MonitorView:
         self.console.print(Text(f'[{when}] {CHECK_OUTCOMES[phase]} — {summary}.'), soft_wrap=True)
         self.console.file.flush()
 
-    def emit(self, when, change, finding: Finding):
-        if finding.session_id != self.session_id:
-            raise ValueError('Finding session differs from monitor session')
+    def emit(self, when, change: NetworkChange, finding: Optional[Finding] = None, *,
+             event_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+        """Display one notification.
+
+        With a Finding: identity is the Finding UUID and the severity is its severity.
+        Without a Finding (T23-B observation, B2): identity is the event UUID and the
+        severity is the dash label. No Finding is invented.
+        """
+        if finding is not None:
+            if finding.session_id != self.session_id:
+                raise ValueError('Finding session differs from monitor session')
+            identity, severity, label = finding.id, finding.severity.value.upper(), FINDING_IDENTITY_LABEL
+        else:
+            if not event_id:
+                raise ValueError('An observation without Finding needs its event_id')
+            if session_id is not None and session_id != self.session_id:
+                raise ValueError('Event session differs from monitor session')
+            identity, severity, label = event_id, OBSERVATION_SEVERITY_LABEL, EVENT_IDENTITY_LABEL
         row = (when, change.asset_ip, change.change_type, change.detail,
-               finding.id, finding.severity.value.upper())
+               identity, severity, label)
         self.rows.append(row)
         try:
             # Written once, at emission. In TTY, Rich prints it above the live frame and
