@@ -72,6 +72,7 @@ from sentinel.monitor import (
 )
 from sentinel.whitelist import load_whitelist
 from sentinel.monitor_view import MonitorView
+from core.process_control import ScanInterrupted
 from sentinel.lifecycle import Owner, LifecycleError, network_lock, request_stop, DEFAULT_STOP_TIMEOUT
 
 
@@ -560,7 +561,13 @@ def _run_loop(
     owner: Owner,
     state: NetworkState,
 ) -> None:
-    """Cooperative stop: bounded polling when idle, finish an in-flight check."""
+    """Cooperative stop: bounded polling when idle; a stop during a check interrupts it.
+
+    An interrupted check is abandoned as a whole: no observation, transition,
+    counter change, last_check update or scan_degraded event is produced by it.
+    The loop then returns normally, so the common finalizer records a completed
+    stop.
+    """
     while not owner.wait(interval):
         if not owner.admit_cycle():
             return
@@ -575,7 +582,11 @@ def _run_loop(
                 whitelist=whitelist,
                 counter=counter,
                 state=state,
+                should_stop=owner.requested,
             )
+        except ScanInterrupted:
+            counter.phase('arrêt')
+            return
         finally:
             owner.end_cycle()
 
@@ -589,8 +600,13 @@ def _do_check(
     whitelist,
     counter: AlertCounter,
     state: NetworkState,
+    should_stop=None,
 ) -> None:
-    """Execute one surveillance check cycle using the sentinel DB."""
+    """Execute one surveillance check cycle using the sentinel DB.
+
+    should_stop: None runs the check to completion; a callable returning True
+    interrupts it (ScanInterrupted propagates to the caller, nothing is written).
+    """
     baseline = get_baseline(network_id, identity)
     if not baseline:
         counter.phase('erreur')
@@ -605,6 +621,7 @@ def _do_check(
                 identity=identity,
                 baseline=baseline,
                 known_hosts=set(state.known_hosts),
+                should_stop=should_stop,
             )
             partial = None
         except ScanDegradedError as exc:

@@ -50,7 +50,7 @@ def isolated(tmp_path, monkeypatch):
         '192.0.2.10': BaselineEntry(asset_id='known', ip='192.0.2.10', mac='', ports=[22], last_scan=NOW.isoformat())
     })
     monkeypatch.setattr(monitor, '_get_arp_mac', lambda ip: '')
-    monkeypatch.setattr(monitor, '_get_open_ports', lambda ip: [22])
+    monkeypatch.setattr(monitor, '_get_open_ports', lambda ip, **kwargs: [22])
     return session_path, network_path
 
 
@@ -64,9 +64,9 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
     allowed = ['192.0.2.99'] if mode != 'normal' else []
     wl = Whitelist(allowed_new_hosts=allowed, sentinel_max_alerts_per_hour=3)
     monkeypatch.setattr(manager, 'load_whitelist', lambda: wl)
-    monkeypatch.setattr(monitor, '_get_active_hosts', lambda target: ['192.0.2.10', *new_hosts])
+    monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, **kwargs: ['192.0.2.10', *new_hosts])
     if degraded:
-        monkeypatch.setattr(monitor, '_get_open_ports', lambda ip: None)
+        monkeypatch.setattr(monitor, '_get_open_ports', lambda ip, **kwargs: None)
     shown = Mock()
     monkeypatch.setattr(alerting, 'display', shown)
     alerts = Mock()
@@ -133,7 +133,7 @@ def test_network_events_survive_distinct_runs(isolated, monkeypatch):
         'sentinel-run-second': ['192.0.2.10', '192.0.2.99', '192.0.2.98'],  # .99 already known
     }
     for index, run in enumerate((RUN, 'sentinel-run-second'), 1):
-        monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, run=run: hosts_by_run[run])
+        monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, run=run, **kwargs: hosts_by_run[run])
         monkeypatch.setattr(manager.Owner, 'wait', Mock(side_effect=[False, KeyboardInterrupt]))
         manager.start(TARGET, session_id=run)
         findings = db.get_findings(run)
@@ -151,7 +151,7 @@ def test_network_events_survive_distinct_runs(isolated, monkeypatch):
 def test_generated_run_id_is_not_replaced_by_network_id(isolated, monkeypatch):
     session_path, _ = isolated
     monkeypatch.setattr(manager, 'load_whitelist', Whitelist)
-    monkeypatch.setattr(monitor, '_get_active_hosts', lambda target: ['192.0.2.10', '192.0.2.99'])
+    monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, **kwargs: ['192.0.2.10', '192.0.2.99'])
     monkeypatch.setattr(manager.Owner, 'wait', Mock(side_effect=[False, KeyboardInterrupt]))
     manager.start(TARGET)
     files = list(session_path(RUN).parent.glob('*.db'))

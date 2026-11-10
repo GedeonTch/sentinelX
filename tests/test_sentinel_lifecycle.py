@@ -11,6 +11,8 @@ import pytest
 from core import database as db
 from sentinel import lifecycle as lc
 from sentinel.baseline import NetworkIdentity, compute_network_id
+from tests.fake_nmap import hang_pid, install, pid_alive
+from tests.test_sentinel_baseline_reliability import nmap_tcp_xml
 
 TARGET = '192.0.2.0/24'
 IDENTITY = NetworkIdentity(TARGET, '192.0.2.1', '02:00:00:00:00:01')
@@ -87,15 +89,11 @@ def requested(network=NETWORK):
 
 
 def test_two_real_cli_processes_stop_inflight_and_restart(lab):
+    """A stop during an in-flight cycle interrupts it: confirmed at once, nothing persisted."""
     _, marker = lab
     a = start(lab)
     b = stop(lab)
-    eventually(requested)
-    assert b.poll() is None  # request alone cannot report success
-    assert a.poll() is None
-    assert db.sentinel_get_state(NETWORK)['sentinel_status'] == 'active'
-    marker('run-a', 'release').touch()
-    assert 'terminaison confirmées' in assert_exit(b)
+    assert 'terminaison confirmées' in assert_exit(b)  # no release: the scan is interrupted
     assert_exit(a)
     assert marker('run-a', 'cycles').read_text() == '1'
     row = lc.records(NETWORK)[0]
@@ -104,23 +102,24 @@ def test_two_real_cli_processes_stop_inflight_and_restart(lab):
     assert db.get_session('run-a')['status'] == 'completed'
     assert db.get_session('run-a')['end_time']
     assert db.sentinel_get_state(NETWORK)['sentinel_status'] == 'inactive'
-    assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
-    assert len(db.get_findings('run-a')) == 1
+    # The abandoned cycle left no trace: no event, no finding, baseline untouched.
+    assert db.sentinel_get_events(NETWORK) == []
     assert db.get_events('run-a') == []
+    assert db.get_findings('run-a') == []
     assert len(db.sentinel_get_baseline_entries(NETWORK, TARGET, IDENTITY.gateway_ip, IDENTITY.gateway_mac)) == 1
     lock_inode = lc._lock_path(NETWORK).stat().st_ino
     a2 = start(lab, 'run-new')
     assert not requested()  # old stop request is never inherited
     assert lc.records(NETWORK)[1]['stop_requested'] == 1
-    b2 = stop(lab, session='run-new')
-    eventually(requested)
     marker('run-new', 'release').touch()
+    eventually(lambda: marker('run-new', 'waiting').exists())  # first complete cycle
+    b2 = stop(lab, session='run-new')
     assert_exit(b2)
     assert_exit(a2)
     assert lc._lock_path(NETWORK).stat().st_ino == lock_inode
-    assert len(db.sentinel_get_events(NETWORK)) == 2
-    # T23-B reconstruction (§9.5): the host announced by run-a is known, so run-new repeats nothing.
-    assert db.get_findings('run-new') == []
+    # run-a announced nothing, so run-new announces the new host itself (no earlier trace).
+    assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
+    assert len(db.get_findings('run-new')) == 1
 
 
 def test_stop_during_wait_not_full_interval(lab):
@@ -140,9 +139,10 @@ def test_stop_during_wait_not_full_interval(lab):
 def test_control_outcomes(lab, mode, expected_code, result):
     _, marker = lab
     a = start(lab, mode=mode)
-    b = stop(lab)
-    eventually(requested)
     marker('run-a', 'release').touch()
+    # The stop follows the completed cycle: an in-flight stop would interrupt it.
+    eventually(lambda: marker('run-a', 'waiting').exists() or a.poll() is not None)
+    b = stop(lab)
     output = assert_exit(b, expected_code)
     a_output = assert_exit(a, 1 if mode in ('fatal', 'finalization-failure') else 0)
     assert 'Traceback' not in a_output and 'Traceback' not in output
@@ -227,8 +227,9 @@ def test_two_networks_independent(lab):
 
 
 def test_timeout_is_failure_request_remains(lab):
+    """A stop that the cycle cannot acknowledge in time fails; the request remains."""
     _, marker = lab
-    a = start(lab)
+    a = start(lab, mode='uninterruptible')
     b = stop(lab, timeout='.2')
     output = assert_exit(b, 1)
     assert 'arrêt non confirmé' in output
@@ -445,9 +446,8 @@ def test_atomic_stop_cycle_race_with_two_real_cli_barriers(lab, first):
     assert b.poll() is None
     marker('race-run', 'admission-release').touch()
     if first == 'admission':
+        # The admitted cycle is in flight: the stop interrupts it, no release needed.
         eventually(lambda: marker('race-run', 'entered').exists())
-        assert a.poll() is None and b.poll() is None
-        marker('race-run', 'release').touch()
     assert_exit(b)
     assert_exit(a)
     row = lc.records(NETWORK)[0]
@@ -458,9 +458,10 @@ def test_atomic_stop_cycle_race_with_two_real_cli_barriers(lab, first):
         assert db.sentinel_get_events(NETWORK) == []
         assert db.get_findings('race-run') == []
     else:
+        # Interrupted in flight: the cycle was entered but left no observation.
         assert marker('race-run', 'cycles').read_text() == '1'
-        assert sorted(e['type'] for e in db.sentinel_get_events(NETWORK)) == ['host_ports_initialized', 'new_host']
-        assert len(db.get_findings('race-run')) == 1
+        assert db.sentinel_get_events(NETWORK) == []
+        assert db.get_findings('race-run') == []
     assert db.get_session('race-run')['end_time']
     assert lc.lock_is_free(NETWORK)
 
@@ -1035,9 +1036,9 @@ def test_notification_quota_survives_real_cli_restarts(lab):
         run = f'quota-restart-{index}'
         mode = 'degraded' if index % 2 else 'normal'
         a = start(lab, run, mode=mode)
-        b = stop(lab)
-        eventually(requested)
         marker(run, 'release').touch()
+        eventually(lambda: marker(run, 'waiting').exists())  # cycle complete before the stop
+        b = stop(lab)
         assert_exit(b)
         assert_exit(a)
         assert len(db.get_findings(run)) == (1 if index == 0 else 0)  # only the first new host
@@ -1045,3 +1046,39 @@ def test_notification_quota_survives_real_cli_restarts(lab):
     states = [e['details']['notification']['state'] for e in events]
     assert states.count('confirmed') == 3 and states.count('masked') == 1
     assert len(events) == 4
+
+
+PING_SWEEP_XML = (
+    '<?xml version="1.0"?><nmaprun>'
+    '<host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/></host>'
+    '<host><status state="up"/><address addr="192.0.2.99" addrtype="ipv4"/></host>'
+    '<runstats><finished exit="success"/></runstats></nmaprun>'
+)
+
+
+def test_real_cli_stop_interrupts_a_running_nmap_and_leaves_no_child(lab, tmp_path, monkeypatch):
+    """Real CLI processes and real nmap calls through a fake executable.
+
+    The second host's nmap never answers. A stop request during that scan is
+    confirmed at once, the nmap process is gone, and the abandoned cycle left no
+    event, finding or status change behind.
+    """
+    spawn, _ = lab
+    install(tmp_path, monkeypatch, 'hang-ip', hang='192.0.2.99')
+    (tmp_path / '192.0.2.0_24.xml').write_text(PING_SWEEP_XML, encoding='utf-8')
+    (tmp_path / '192.0.2.10.xml').write_text(nmap_tcp_xml('192.0.2.10', open_ports=[22]), encoding='utf-8')
+    a = spawn(['start', '--target', TARGET, '--session', 'real-a'], 'real-a', 'real-nmap')
+    eventually(lambda: hang_pid(tmp_path) is not None or a.poll() is not None)
+    assert a.poll() is None, a.output_path.read_text()
+    pid = hang_pid(tmp_path)
+    began = time.monotonic()
+    b = stop(lab)
+    assert 'terminaison confirmées' in assert_exit(b)
+    assert time.monotonic() - began < 4, 'the stop must not wait for the nmap timeout'
+    assert_exit(a)
+    assert not pid_alive(pid), 'no nmap process may survive the stop'
+    assert lc.lock_is_free(NETWORK)
+    assert db.get_session('real-a')['status'] == 'completed'
+    assert db.sentinel_get_state(NETWORK)['sentinel_status'] == 'inactive'
+    assert db.sentinel_get_events(NETWORK) == []
+    assert db.get_findings('real-a') == []

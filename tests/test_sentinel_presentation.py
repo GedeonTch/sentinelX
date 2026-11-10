@@ -506,6 +506,9 @@ class _CycleOwner:
     def admit_cycle(self):
         return True
 
+    def requested(self):
+        return False
+
     def end_cycle(self):
         pass
 

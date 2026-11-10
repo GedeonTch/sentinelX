@@ -28,9 +28,10 @@ Failure contract (§9.4):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from sentinel.arp_probe import ArpProbeResult, ArpProbeStatus, arp_probe
+from core.process_control import ScanInterrupted
 from sentinel.baseline import SENTINEL_TCP_PORTS, BaselineEntry, NetworkIdentity
 
 
@@ -96,6 +97,7 @@ def check_network(
     identity: NetworkIdentity,
     baseline: Dict[str, BaselineEntry],
     known_hosts: Set[str],
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> CycleObservations:
     """Observe the network for one cycle.
 
@@ -107,6 +109,10 @@ def check_network(
         known_hosts:    IPs known to Sentinel (baseline hosts and hosts already
                         recorded as new_host). A ping-visible IP in this set is
                         not reported as new_host again (§9.5 step 1).
+        should_stop:    None runs the cycle to completion. A callable returning
+                        True interrupts the running nmap process and raises
+                        ScanInterrupted: the cycle is abandoned, nothing is
+                        observed or persisted for it.
 
     Returns:
         CycleObservations when the cycle is complete.
@@ -114,10 +120,11 @@ def check_network(
     Raises:
         ScanDegradedError: partial cycle, with the observations attached.
         ScanFailedError:   no exploitable observation at all.
+        ScanInterrupted:   a stop was requested during the cycle (BaseException).
     """
     known = set(known_hosts)
 
-    ping_result = _get_active_hosts(target_network)
+    ping_result = _get_active_hosts(target_network, should_stop=should_stop)
     ping_failed = ping_result is None
     ping_hosts = [] if ping_failed else list(dict.fromkeys(ping_result))
 
@@ -125,6 +132,7 @@ def check_network(
     # One probe per IP per cycle; results are reused below.
     arp_results: Dict[str, ArpProbeResult] = {}
     for ip in _arp_targets(baseline, known, ping_hosts):
+        _checkpoint(should_stop)
         arp_results[ip] = arp_probe(ip)
     host_arp_status = {ip: result.status for ip, result in arp_results.items()}
 
@@ -144,10 +152,13 @@ def check_network(
 
     tcp_observations: Dict[str, HostTcpObservation] = {}
     for ip in current_hosts:
+        _checkpoint(should_stop)
         if ip in ping_hosts:
-            ports = _get_open_ports(ip)  # ordinary scan, same call as before T23-B
+            # ordinary scan, same call as before T23-B
+            ports = _get_open_ports(ip, should_stop=should_stop)
         else:
-            ports = _get_open_ports(ip, skip_host_discovery=True)  # ARP-only host: -Pn
+            # ARP-only host: -Pn
+            ports = _get_open_ports(ip, skip_host_discovery=True, should_stop=should_stop)
         tcp_observations[ip] = HostTcpObservation(ip=ip, ports=ports)
     services_degraded = any(obs.ports is None for obs in tcp_observations.values())
 
@@ -212,6 +223,12 @@ def check_network(
     return observations
 
 
+def _checkpoint(should_stop: Optional[Callable[[], bool]]) -> None:
+    """Raise ScanInterrupted when a stop was requested (between two probes)."""
+    if should_stop is not None and should_stop():
+        raise ScanInterrupted("stop requested during the Sentinel cycle")
+
+
 def _arp_targets(
     baseline: Dict[str, BaselineEntry],
     known: Iterable[str],
@@ -226,11 +243,17 @@ def _arp_targets(
     return seen
 
 
-def _get_active_hosts(target_network: str) -> Optional[List[str]]:
-    """Run a lightweight ping scan and return active IPs, or None on failure."""
+def _get_active_hosts(
+    target_network: str,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Optional[List[str]]:
+    """Run a lightweight ping scan and return active IPs, or None on failure.
+
+    ScanInterrupted is a BaseException and is deliberately not caught here.
+    """
     try:
         from recon.device_fingerprint import _run_nmap_ping, _parse_active_hosts
-        xml = _run_nmap_ping(target_network)
+        xml = _run_nmap_ping(target_network, should_stop=should_stop)
         if xml is None:
             return None
         return _parse_active_hosts(xml)
@@ -238,16 +261,23 @@ def _get_active_hosts(target_network: str) -> Optional[List[str]]:
         return None
 
 
-def _get_open_ports(ip: str, skip_host_discovery: bool = False) -> Optional[List[int]]:
+def _get_open_ports(
+    ip: str,
+    skip_host_discovery: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Optional[List[int]]:
     """Open TCP ports of a proven complete scan; None means the state is unknown.
 
     skip_host_discovery adds -Pn for hosts that were found by ARP but not by ping.
+    ScanInterrupted (BaseException) is not caught: an interruption is not an
+    unknown state.
     """
     try:
         from detect.tcp_scan import _run_nmap_tcp, parse_sentinel_open_ports
         xml = _run_nmap_tcp(
             ip, "normal", SENTINEL_TCP_PORTS,
             strict=True, skip_host_discovery=skip_host_discovery,
+            should_stop=should_stop,
         )
         return parse_sentinel_open_ports(xml, ip, SENTINEL_TCP_PORTS)
     except Exception:

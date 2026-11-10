@@ -12,6 +12,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import database as db
+from core.process_control import ScanInterrupted
 from sentinel import sentinel_manager as manager, monitor
 from sentinel.baseline import NetworkIdentity
 from sentinel.whitelist import Whitelist
@@ -34,10 +35,15 @@ def forbidden(*args, **kwargs):
 
 
 socket.socket = forbidden
-subprocess.Popen = forbidden
+# 'real-nmap': the monitor runs its real nmap calls (a fake nmap executable is on PATH);
+# every other mode replaces the scanner boundary with simulated answers.
+REAL_NMAP = mode == 'real-nmap'
+if not REAL_NMAP:
+    subprocess.Popen = forbidden
 monitor._get_arp_mac = lambda ip: ''
-monitor._get_open_ports = lambda ip: None if mode == 'degraded' else [22]
-monitor._get_active_hosts = lambda target: ['192.0.2.10', '192.0.2.99']
+if not REAL_NMAP:
+    monitor._get_open_ports = lambda ip, **kwargs: None if mode == 'degraded' else [22]
+    monitor._get_active_hosts = lambda target, **kwargs: ['192.0.2.10', '192.0.2.99']
 manager.detect_network_identity = lambda target: NetworkIdentity(target, '192.0.2.1', '02:00:00:00:00:01')
 manager._load_interval = lambda: .05
 manager.typer.confirm = lambda *args, **kwargs: True
@@ -64,7 +70,13 @@ def check(**kwargs):
     mark('cycles', str(cycles))
     mark('entered')
     deadline = time.monotonic() + 20
+    should_stop = kwargs.get('should_stop')
     while not (markers / (run + '.release')).exists():
+        # Simulated nmap is interruptible exactly like the real one: the stop
+        # predicate is polled while the scan is in flight.
+        # mode 'uninterruptible' models a step that never polls the stop request.
+        if mode != 'uninterruptible' and should_stop is not None and should_stop():
+            raise ScanInterrupted('simulated scan interrupted by stop request')
         if time.monotonic() > deadline:
             raise AssertionError('Test orchestrator did not release simulated scan')
         time.sleep(.01)
@@ -75,7 +87,8 @@ def check(**kwargs):
     return result
 
 
-manager.check_network = check
+if not REAL_NMAP:
+    manager.check_network = check
 original_wait = Owner.wait
 
 

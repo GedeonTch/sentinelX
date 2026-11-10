@@ -22,7 +22,9 @@ Le code de sortie 0 de `stop` exige conjointement :
 Une demande enregistrée, un statut `inactive`, un fichier de verrou existant ou
 un acquittement seul ne prouvent pas l'arrêt. Un timeout retourne 1 et **laisse la
 demande enregistrée**. Un nouveau `stop` peut vérifier sa réalisation ultérieure.
-Aucune terminaison forcée ni escalade n'est effectuée.
+Aucune terminaison forcée ni escalade de l'instance Sentinel n'est effectuée. Le
+processus nmap lancé par un cycle en cours n'appartient pas à ce contrat : il est
+arrêté par le monitor (voir « Arrêt pendant un scan Nmap »).
 
 `--session` est conservé : résolution des identifiants d'exécution et anciens
 identifiants réseau uniquement à partir des enregistrements de contrôle. Si un
@@ -84,9 +86,36 @@ SQLite. L'admission est un UPDATE conditionnel (`stop_requested=0`, propriétair
 
 Il n'y a plus de décision fondée sur une lecture suivie d'un démarrage non
 synchronisé. La fin du cycle remet son indicateur à zéro, sans effacer la demande.
-Une sonde/cycle admis en cours est laissé terminer. L'apprentissage initial et la confirmation
-interactive ne sont pas annulés : une demande pendant cette phase peut expirer
-côté B en attendant que A atteigne sa boucle ou sorte.
+### Arrêt pendant un scan Nmap
+
+Un cycle admis et en cours est **interrompu** par une demande d'arrêt, sans attendre
+la fin des scans Nmap (timeout de 300 s par commande). Le monitor consulte la demande
+entre deux hôtes, et pendant chaque processus nmap toutes les 100 ms :
+
+- le processus nmap en cours reçoit `terminate()`, puis `kill()` s'il n'a pas quitté
+  dans les 5 s, et il est attendu : aucun processus nmap ne survit à cet arrêt
+  (sauf SIGKILL de Sentinel lui-même, voir les limites plus bas) ;
+- le cycle est **abandonné en entier** : aucune observation partielle n'est persistée,
+  aucune transition (`new_port`, `port_not_open`, `new_host`, `mac_change`) n'est
+  produite, aucun compteur d'absence ni `last_check` n'est modifié, et aucun événement
+  `scan_degraded` n'est créé : une interruption volontaire n'est pas une panne ;
+- la boucle sort normalement, par la finalisation commune, ce qui donne un arrêt
+  `completed` (voir le tableau ci-dessous).
+
+Le cycle est libéré par `end_cycle` dans tous les cas. Les règles de cycle dégradé
+(T23-B) sont inchangées pour une panne réelle : `scan_degraded` reste émis une fois par
+épisode.
+
+Le chemin réactif est limité au monitor : `core/process_control.py` (`run_process`,
+`ScanInterrupted`). Sans fonction d'arrêt, l'appel reste l'ancien `subprocess.run`, donc
+l'apprentissage initial et le pipeline `netlab scan` ne changent pas. Le cycle de
+surveillance transmet sa fonction d'arrêt à chaque appel nmap qu'il déclenche. `ScanInterrupted` dérive de `BaseException` : les blocs
+`except Exception` (qui transforment un échec de scan en « inconnu ») ne peuvent pas
+l'absorber. Une interruption n'est donc jamais un résultat `None`, ni `[]`.
+
+L'apprentissage initial et la confirmation interactive ne sont pas interrompus par ce
+mécanisme : une demande pendant cette phase peut expirer côté B en attendant que A
+atteigne sa boucle ou sorte.
 
 La finalisation commune tente indépendamment : clôture de la vraie session,
 statut réseau `inactive`, puis acquittement. Le verrou est libéré même en erreur.
@@ -94,6 +123,7 @@ statut réseau `inactive`, puis acquittement. Le verrou est libéré même en er
 | Sortie A | Session | Résultat contrôle |
 |---|---|---|
 | Arrêt coopératif | `completed` | `completed` |
+| Arrêt pendant un scan Nmap (cycle abandonné) | `completed` | `completed` |
 | Ctrl+C / refus de confirmation | `partial` | `completed` si écritures réussies |
 | Erreur fatale / échec d'apprentissage | `failed` | `failed` |
 | Échec d'écriture finale | selon écritures effectivement réussies | `finalization_failed` si contrôle accessible |
@@ -131,20 +161,43 @@ Whitelist, mode silencieux, baseline et règles de détection : inchangés.
   de vie OS. Pas de refonte visuelle dans cette mission.
 - SIGKILL/crash ne permettent pas une finalisation applicative. SIGTERM ne fait
   pas partie du chemin coopératif ; utiliser la CLI d'arrêt ou Ctrl+C.
+- **Limite SIGKILL pendant un scan Nmap** : si le processus Sentinel est tué avec
+  SIGKILL, aucun `finally` ne s'exécute et le processus nmap enfant n'est pas arrêté
+  par Sentinel. Il se termine seul, borné par son propre travail. Aucun mécanisme
+  propre à Linux (par exemple `PR_SET_PDEATHSIG`) n'est utilisé.
+- Ctrl+C pendant un scan : le terminal envoie aussi SIGINT à nmap (même groupe de
+  processus) ; le `finally` de `run_process` termine dans tous les cas le processus
+  enfant restant.
 
 ## Validation
 
 `tests/sentinel_cli_child.py` est exclusivement un adaptateur de test : il appelle
 la véritable application Typer, remplace les sondes/découverte/identité, interdit
 les sockets et les sous-processus de scan, et utilise des barrières de fichiers.
-Il n'existe aucun mode de simulation activable par environnement en production.
+Le mode `real-nmap` garde le `Popen` et les appels nmap réels, qui exécutent un faux
+exécutable `nmap` (`tests/fake_nmap.py`) placé en tête de PATH. Il n'existe aucun mode
+de simulation activable par environnement en production.
 
 `tests/test_sentinel_lifecycle.py` lance de vrais processus A et B. Le test nominal
-attend un cycle effectivement commencé, fait demander l'arrêt par B, constate que
-B attend, libère le cycle simulé puis vérifie la sortie de A/B, la session, l'état,
-le verrou, la baseline, les événements et les Findings, et redémarre sur ce réseau.
-Un test retarde explicitement la sortie OS après acquittement/verrou libre : B ne
-peut pas encore réussir. Aucun kill de l'orchestrateur dans le chemin nominal.
+attend un cycle effectivement commencé, fait demander l'arrêt par B pendant ce cycle :
+B est confirmée sans libération du scan (le cycle est interrompu), A et B sortent, la
+session, l'état, le verrou et la baseline sont vérifiés, et aucun événement ni Finding
+n'est persisté pour le cycle abandonné. Le redémarrage sur ce réseau réannonce l'hôte,
+puisque rien n'a été persisté avant. Un test retarde explicitement la sortie OS après
+acquittement/verrou libre : B ne peut pas encore réussir. Aucun kill de l'orchestrateur
+dans le chemin nominal.
+
+`test_real_cli_stop_interrupts_a_running_nmap_and_leaves_no_child` lance un vrai
+`sentinel start` dont le second hôte ne répond jamais à nmap (faux exécutable). Un vrai
+`sentinel stop` est confirmé en moins de 4 s, le processus nmap n'existe plus, et le
+cycle abandonné ne laisse ni événement ni Finding.
+
+`tests/test_sentinel_stop_during_scan.py` vérifie, avec de vrais processus factices :
+arrêt pendant le ping et pendant un scan TCP ; arrêt entre deux hôtes (le second n'est
+même pas tenté) ; terminaison du processus enfant ; `kill()` après le délai de grâce
+si `terminate()` est ignoré ; timeout qui tue le processus et reste « inconnu » ; sortie
+de 2 Mio sans blocage ; `Ctrl+C` pendant l'attente qui tue le processus ; délai
+nominal de 300 s ; cycle abandonné sans écriture et libéré par `end_cycle`.
 Le nettoyage forcé du fixture n'est qu'une récupération après test défaillant ;
 un test de crash distinct tue volontairement A.
 
@@ -158,7 +211,8 @@ les ACL, le verrouillage et le comportement opérationnel des handles/Ctrl+C.
 Deux scénarios avec vrais processus CLI placent une barrière dans A exactement
 avant ou après le commit d'admission, après que l'attente est revenue. B enregistre
 sa demande, le test constate son commit, puis seulement libère A. Arrêt premier :
-zéro cycle/événement/Finding. Admission première : exactement un cycle, puis fin.
+zéro cycle/événement/Finding. Admission première : le cycle admis est en cours, il est
+interrompu par l'arrêt ; il est entré mais ne produit ni événement ni Finding, puis fin.
 Les délais servent uniquement de garde-fous d'échec, jamais à décider l'ordre.
 Deux tests supplémentaires retiennent la première transaction avant son commit.
 L'écriture concurrente utilise réellement SQLite, avec un busy timeout nul pour

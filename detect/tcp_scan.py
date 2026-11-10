@@ -48,6 +48,7 @@ from core.finding import (
     Exposure,
 )
 from core.logger import display
+from core.process_control import run_process
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 
@@ -201,6 +202,7 @@ def _run_nmap_tcp(
     ports: str,
     strict: bool = False,
     skip_host_discovery: bool = False,
+    should_stop=None,
 ) -> Optional[str]:
     """Run nmap TCP scan and return raw XML output, or None on error.
 
@@ -217,6 +219,9 @@ def _run_nmap_tcp(
                  unchanged. True adds ``-Pn`` so that a host already known
                  to be present (e.g. answering ARP but not ICMP) is scanned
                  without a prior discovery step.
+        should_stop: None (default) runs nmap to completion. A callable
+                 returning True interrupts nmap and raises ScanInterrupted
+                 (see core.process_control). Only the Sentinel monitor passes it.
 
     Returns:
         str: Raw XML from nmap, or None on error.
@@ -225,14 +230,9 @@ def _run_nmap_tcp(
     host_discovery = ["-Pn"] if skip_host_discovery else []
     cmd = ["nmap"] + flags + host_discovery + ["-oX", "-", "-p", ports, target]
     if strict:
-        return _run_nmap_tcp_strict(cmd)
+        return _run_nmap_tcp_strict(cmd, should_stop=should_stop)
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        result = run_process(cmd, 300, should_stop)
         if result.returncode not in (0, 1):  # nmap exits 1 if no hosts up
             display(f"[yellow]nmap warning (exit {result.returncode}): "
                     f"{result.stderr.strip()[:200]}[/yellow]")
@@ -248,7 +248,7 @@ def _run_nmap_tcp(
         return None
 
 
-def _run_nmap_tcp_strict(cmd: List[str]) -> Optional[str]:
+def _run_nmap_tcp_strict(cmd: List[str], should_stop=None) -> Optional[str]:
     """Run the pipeline's TCP command with the T20 success criterion.
 
     Failure by default: any non-zero exit code is a failure, because no real
@@ -263,12 +263,7 @@ def _run_nmap_tcp_strict(cmd: List[str]) -> Optional[str]:
         str: Raw XML when nmap exited with 0 and produced output, else None.
     """
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        result = run_process(cmd, 300, should_stop)
     except FileNotFoundError:
         display("[red]nmap not found. Run 'netlab doctor'.[/red]")
         return None

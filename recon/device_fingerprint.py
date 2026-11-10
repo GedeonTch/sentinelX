@@ -41,6 +41,7 @@ from core.finding import (
     Exposure,
 )
 from core.logger import display
+from core.process_control import run_process
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 
@@ -160,19 +161,21 @@ def fingerprint(target: str, session_id: str, auto_confirm: bool = False) -> Lis
 # nmap subprocess calls
 # ---------------------------------------------------------------------------
 
-def _run_nmap_ping(target: str) -> Optional[str]:
+def _run_nmap_ping(target: str, should_stop=None) -> Optional[str]:
     """Run a ping scan on a target and return raw XML output.
 
     Command: nmap -sn -oX - <target>
 
     Args:
         target: IP or CIDR range.
+        should_stop: None runs nmap to completion; a callable returning True
+            interrupts nmap and raises ScanInterrupted (Sentinel monitor only).
 
     Returns:
         str: Raw XML string from nmap, or None on error.
     """
     cmd = ["nmap", "-sn", "-oX", "-", target]
-    return _run_nmap(cmd)
+    return _run_nmap(cmd, should_stop=should_stop)
 
 
 def _run_nmap_os(ip: str) -> Optional[str]:
@@ -193,23 +196,20 @@ def _run_nmap_os(ip: str) -> Optional[str]:
     return _run_nmap(cmd, timeout=60)
 
 
-def _run_nmap(cmd: List[str], timeout: int = 300) -> Optional[str]:
+def _run_nmap(cmd: List[str], timeout: int = 300, should_stop=None) -> Optional[str]:
     """Execute an nmap command and return its stdout as a string.
 
     Args:
         cmd:     Full command as a list of strings.
         timeout: Subprocess timeout in seconds (default 300).
+        should_stop: None runs the process to completion; a callable returning
+            True interrupts it and raises ScanInterrupted.
 
     Returns:
         str: stdout of the nmap process, or None if the process failed.
     """
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_process(cmd, timeout, should_stop)
         if result.returncode != 0:
             display(
                 f"[yellow]nmap command failed (exit {result.returncode}): "
