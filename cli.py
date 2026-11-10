@@ -1893,6 +1893,7 @@ def _render_findings_table(findings: list) -> None:
     table = Table(title=f"Findings ({len(findings)} total)", box=box.ROUNDED)
     table.add_column("ID", style="dim", max_width=12)
     table.add_column("Severity")
+    table.add_column("Confidence")
     table.add_column("Module")
     table.add_column("Target")
     table.add_column("Service")
@@ -1903,6 +1904,7 @@ def _render_findings_table(findings: list) -> None:
         table.add_row(
             format_finding_id(f.id),
             f"[{color}]{f.severity.value}[/{color}]",
+            f.confidence.name,
             f.module,
             f"{f.target_ip}:{f.target_port}" if f.target_port else f.target_ip,
             f.target_service or "—",
@@ -1992,6 +1994,7 @@ def _render_security_block(findings: List[Finding]) -> None:
     table = Table(box=box.ROUNDED)
     table.add_column("ID", style="dim", max_width=12)
     table.add_column("Severity")
+    table.add_column("Confidence")
     table.add_column("Module")
     table.add_column("Port")
     table.add_column("Service")
@@ -2002,6 +2005,7 @@ def _render_security_block(findings: List[Finding]) -> None:
         table.add_row(
             format_finding_id(f.id),
             f"[{color}]{f.severity.value}[/{color}]",
+            f.confidence.name,
             escape(f.module),
             str(f.target_port) if f.target_port is not None else "—",
             escape(f.target_service or "—"),
