@@ -412,14 +412,18 @@ def test_tty_refresh_without_notification_redraws_frame_in_place(store):
     with MonitorView(NET, 60, c, console, session_id=RUN) as view:
         c.view = view
         _fourteen_hosts_twenty_notifications(c)
-        height = _frame_height(view, cols, rows)
         for _ in range(3):
+            # The frame height can still change while notifications arrive (the footer
+            # wraps differently as hosts fill the table). Each redraw is therefore measured
+            # against the frame actually on screen: the cursor moves back up over the last
+            # rendered frame, and the new frame is written in full. No line is added to the
+            # output, hence nothing accumulates above the frame.
+            previous = view.live._live_render._shape[1]
             before = len(output.getvalue())
             view.live.refresh()  # no new notification
             redraw = output.getvalue()[before:]
-            # Each redraw moves the cursor back to the top of the frame and rewrites it:
-            # no line is added to the output, hence nothing accumulates above the frame.
-            assert redraw.count('\x1b[1A') == height - 1
+            height = len(console.render_lines(view, console.options, pad=False))
+            assert redraw.count('\x1b[1A') == previous - 1
             assert redraw.count('\n') == height - 1
             assert 'UUID du Finding' not in redraw
 

@@ -112,24 +112,28 @@ class MonitorView:
         return self._host_table(sorted(self.window.summary().items()))
 
     def _host_table(self, items):
+        # Numbers follow the order of ``items`` (the display order), starting at 1. They are
+        # computed on each render, so they follow the list; they are never stored.
         if self.console.width < 60:
             table = Table(title='Hôtes — 60 min', show_header=False, expand=True)
             table.add_column(width=8)
             table.add_column(overflow='fold')
-            for host, row in items:
-                for key, value in [('Hôte', host), ('Affichées', row['displayed']),
+            for number, (host, row) in enumerate(items, start=1):
+                for key, value in [('N°', number), ('Hôte', host), ('Affichées', row['displayed']),
                                    ('Masquées', row['masked']), ('Réserves', row['reserved']),
                                    ('État', row['state'])]:
                     table.add_row(key, Text(safe_text(value)))
             return table
         table = Table(title='État des hôtes — fenêtre glissante de 60 min', expand=True)
+        table.add_column('N°', justify='right', no_wrap=True)
         for column in ('Hôte', 'Affichées (60 min)', 'Masquées (60 min)', 'État'):
             table.add_column(column, overflow='fold')
-        for host, row in items:
+        for number, (host, row) in enumerate(items, start=1):
             state = row['state']
             if row['reserved']:
                 state += f" · {row['reserved']} réserve(s), dont {row['unknown']} inconnue(s)"
-            table.add_row(Text(safe_text(host)), str(row['displayed']), str(row['masked']), Text(state))
+            table.add_row(str(number), Text(safe_text(host)), str(row['displayed']),
+                          str(row['masked']), Text(state))
         return table
 
     def _frame(self, hosts, hidden):
