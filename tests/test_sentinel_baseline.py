@@ -112,6 +112,56 @@ class TestGatewayDetection:
         with patch("sentinel.baseline.subprocess.run", side_effect=run):
             assert _get_gateway_ip("192.168.56.0/24") == ""
 
+    # --- directly connected target route: gateway comes from a compatible default route ---
+
+    CONNECTED_ETH0 = "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.20\n"
+
+    @staticmethod
+    def _routes(target_output, default_output=""):
+        def run(command, **kwargs):
+            if command[-2:] == ["show", "default"]:
+                return subprocess.CompletedProcess(command, 0, default_output, "")
+            return subprocess.CompletedProcess(command, 0, target_output, "")
+        return run
+
+    def test_connected_route_with_compatible_default_route_gives_gateway(self):
+        default = "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.20 metric 100\n"
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == "192.168.1.1"
+
+    def test_connected_route_ignores_default_route_on_other_interface(self):
+        default = "default via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.30 metric 600\n"
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == ""
+
+    def test_connected_route_ignores_default_gateway_outside_target_network(self):
+        default = "default via 10.0.0.1 dev eth0 proto dhcp src 192.168.1.20 metric 100\n"
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == ""
+
+    def test_connected_route_without_default_route_keeps_gateway_unknown(self):
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, "")):
+            assert _get_gateway_ip("192.168.1.0/24") == ""
+
+    def test_connected_route_ignores_default_gateway_equal_to_local_source(self):
+        default = "default via 192.168.1.20 dev eth0 proto dhcp src 192.168.1.20 metric 100\n"
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == ""
+
+    def test_connected_route_with_two_distinct_compatible_gateways_is_unknown(self):
+        default = (
+            "default via 192.168.1.1 dev eth0 metric 100\n"
+            "default via 192.168.1.254 dev eth0 metric 200\n"
+        )
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(self.CONNECTED_ETH0, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == ""
+
+    def test_route_with_via_keeps_historic_result_even_if_default_is_on_other_interface(self):
+        via = "192.168.1.0/24 via 192.168.1.1 dev eth0 src 192.168.1.20\n"
+        default = "default via 10.0.0.1 dev wlan0 src 10.0.0.20\n"
+        with patch("sentinel.baseline.subprocess.run", side_effect=self._routes(via, default)):
+            assert _get_gateway_ip("192.168.1.0/24") == "192.168.1.1"
+
 
 # ---------------------------------------------------------------------------
 # baseline_exists

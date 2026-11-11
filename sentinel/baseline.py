@@ -24,6 +24,7 @@ Dependencies:
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import re
 import socket
 import subprocess
@@ -175,16 +176,20 @@ def detect_network_identity(target_network: str) -> NetworkIdentity:
 
 
 def _get_gateway_ip(target_network: str) -> str:
-    """Read the default gateway IP from the OS routing table.
+    """Read the gateway IP of ``target_network`` from the OS routing table.
 
-    Uses `ip route` on Linux, returns the gateway for the target network.
-    Falls back to the default route gateway if no specific route found.
+    1. A route for the target that carries ``via`` gives the gateway directly.
+    2. A directly connected route (no ``via``) has no gateway of its own. The
+       default route then supplies it only if it uses the same interface (``dev``),
+       its address lies inside the target network and it is not the local source
+       address (see ``_gateway_for_connected_route``). Otherwise the gateway is unknown.
+    3. With no route at all for the target, the default route is used.
 
     Args:
         target_network: CIDR string.
 
     Returns:
-        str: Gateway IP, or "" if not found.
+        str: Gateway IP, or "" if not found (gateway unknown).
     """
     try:
         result = subprocess.run(
@@ -205,10 +210,10 @@ def _get_gateway_ip(target_network: str) -> str:
                     return gateway
                 return ""
 
-        # A matching connected route is host-only/local-link evidence: do not
-        # fall back to an unrelated default route on another interface.
+        # Only directly connected routes for the target: their interface decides
+        # which default route, if any, can name the gateway.
         if route_lines:
-            return ""
+            return _gateway_for_connected_route(target_network, route_lines)
 
         # Fallback: default route only when no route exists for the target.
         result2 = subprocess.run(
@@ -226,6 +231,60 @@ def _get_gateway_ip(target_network: str) -> str:
                 return ""
     except Exception:
         pass
+    return ""
+
+
+def _route_field(parts: List[str], key: str) -> str:
+    """Return the token following ``key`` in an ``ip route`` line, or ""."""
+    if key in parts and parts.index(key) + 1 < len(parts):
+        return parts[parts.index(key) + 1]
+    return ""
+
+
+def _gateway_for_connected_route(target_network: str, connected_lines: List[str]) -> str:
+    """Gateway for a directly connected target route, or "" (unknown).
+
+    The connected route fixes the interface (``dev``) and the local source address.
+    A default route is accepted only if it uses exactly that interface, its gateway
+    lies inside the target network and differs from the local source address. If
+    several different gateways qualify, the gateway is ambiguous and stays unknown.
+    """
+    interfaces = set()
+    local_sources = set()
+    for line in connected_lines:
+        parts = line.split()
+        dev = _route_field(parts, "dev")
+        if not dev:
+            return ""
+        interfaces.add(dev)
+        local_sources.add(_route_field(parts, "src"))
+    if len(interfaces) != 1:
+        return ""
+    interface = interfaces.pop()
+
+    network = ipaddress.ip_network(target_network, strict=False)
+    result = subprocess.run(
+        ["ip", "route", "show", "default"],
+        capture_output=True, text=True, timeout=10,
+    )
+    candidates = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "via" not in parts:
+            continue
+        if _route_field(parts, "dev") != interface:
+            continue
+        gateway = _route_field(parts, "via")
+        if gateway == _route_field(parts, "src") or gateway in local_sources:
+            continue
+        try:
+            address = ipaddress.ip_address(gateway)
+        except ValueError:
+            continue
+        if address in network:
+            candidates.add(gateway)
+    if len(candidates) == 1:
+        return candidates.pop()
     return ""
 
 
