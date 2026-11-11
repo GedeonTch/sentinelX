@@ -81,7 +81,7 @@ SILENT_TYPES = frozenset({"host_ports_initialized"})
 from sentinel.notifications import NotificationWindow, VERSION
 from core.logger import get_console
 from rich.text import Text
-from sentinel.monitor_view import safe_text
+from sentinel.monitor_view import presentation_detail, safe_text
 
 AlertCounter = NotificationWindow
 
@@ -173,7 +173,7 @@ def process_changes(changes: List[NetworkChange], session_id: str, whitelist: Wh
         sentinel_save_event(network_id, event_id, change.change_type, now, None,
                             details, resolved=authorized or silent)
         if authorized:
-            display(Text(safe_text(f"[INFO] {change.asset_ip} — {change.detail} (changement autorisé / whitelisté)"), style='dim'))
+            display(Text(safe_text(f"[INFO] {change.asset_ip} — {presentation_detail(change)} (changement autorisé / whitelisté)"), style='dim'))
             counter.refresh()
             continue
         if silent:
@@ -271,7 +271,7 @@ def _make_finding(
 
 def _display_observation(change: NetworkChange) -> None:
     """Standalone fallback for an observation without monitor view."""
-    display(Text(safe_text(f"[INFO] {change.asset_ip} — {change.detail}"), style='dim'))
+    display(Text(safe_text(f"[INFO] {change.asset_ip} — {presentation_detail(change)}"), style='dim'))
 
 
 def _display_alert(change: NetworkChange, finding: Finding) -> None:

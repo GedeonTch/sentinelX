@@ -1,6 +1,7 @@
 """Presentation only. Shared Rich console, bounded live frame, plain log mode."""
 from collections import deque
 from datetime import datetime
+import re
 import unicodedata
 from typing import Optional
 from rich.console import Group
@@ -33,6 +34,31 @@ CHECK_OUTCOMES = {
     'dégradé': 'Contrôle partiel, non enregistré comme réussi',
     'erreur': 'Contrôle en échec, non enregistré comme réussi',
 }
+# Colour of the Type value of a notification. Presentation only: the persisted
+# event type and detail are unchanged. Other types are shown without colour.
+EVENT_TYPE_STYLES = {
+    'new_host': 'yellow',
+    'new_port': 'red',
+    'mac_change': 'red',
+    'port_not_open': 'cyan',
+    'host_not_observed': 'magenta',
+    'host_recovered': 'green',
+    'scan_degraded': 'bold magenta',
+}
+# The persisted detail of a closed port is 'port N not open'; it is shown as 'Port N closed'.
+_PORT_NOT_OPEN_DETAIL = re.compile(r'port (\d+) not open')
+
+
+def presentation_detail(change):
+    """Detail text to display for a change. The stored change.detail is never modified."""
+    if change.change_type == 'port_not_open':
+        port = change.port
+        if port is None:
+            match = _PORT_NOT_OPEN_DETAIL.fullmatch(change.detail or '')
+            port = int(match.group(1)) if match else None
+        if port is not None:
+            return f'Port {port} closed'
+    return change.detail
 
 
 class MonitorView:
@@ -71,9 +97,13 @@ class MonitorView:
         table = Table(show_header=False, expand=True)
         table.add_column(width=8)
         table.add_column(overflow='fold')
-        for key, value in [('Heure', when), ('Hôte', host), ('Type', kind),
-                           ('Détail', detail), ('Sévérité', severity)]:
-            table.add_row(key, Text(safe_text(value)))
+        cells = [('Heure', Text(safe_text(when))),
+                 ('Hôte', Text(safe_text(host))),
+                 ('Type', Text(safe_text(kind), style=EVENT_TYPE_STYLES.get(kind, ''))),
+                 ('Détail', Text(safe_text(detail))),
+                 ('Sévérité', Text(safe_text(severity)))]
+        for key, cell in cells:
+            table.add_row(key, cell)
         # No borders or ellipsis; narrow terminals wrap without losing characters.
         return Group(table, Text(f'{identity_label} :', style='dim'),
                      Text(identity, overflow='fold'))
@@ -217,7 +247,7 @@ class MonitorView:
             if session_id is not None and session_id != self.session_id:
                 raise ValueError('Event session differs from monitor session')
             identity, severity, label = event_id, OBSERVATION_SEVERITY_LABEL, EVENT_IDENTITY_LABEL
-        row = (when, change.asset_ip, change.change_type, change.detail,
+        row = (when, change.asset_ip, change.change_type, presentation_detail(change),
                identity, severity, label)
         self.rows.append(row)
         try:
