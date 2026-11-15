@@ -8,18 +8,24 @@ Covers:
 - Edge: user cancel → []
 - Edge: empty output → []
 - Error: timeout / OSError → [] without crash
-- Invariants: explanation is None, risk_score is None, evidence.raw is raw output
+- Invariants: explanation is None, risk_score is None, evidence.raw holds analysed fields only
 """
 
 import json
+import os
+import stat
 import subprocess
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from core.finding import Category, Confidence, FindingStatus, Severity
 
 from detect.smb_enum import (
+    ENUM4LINUX_TIMEOUT_SECONDS,
     SmbEnumerationResult,
     _parse_enum4linux_output,
+    _run_enum4linux_ng,
     normalize_smb_output,
     smb_enum,
 )
@@ -89,7 +95,10 @@ class TestParseAdminShare:
         assert share_names.count("C$") == 1
         assert share_names.count("IPC$") == 1
         assert "LAB" in share_names
-        assert len(findings) == 4
+        # Five findings: the text output names "Account: Administrator", which the
+        # corrected user regex (C7) now reads and reports as smb_users_enumerated.
+        assert "smb_users_enumerated" in share_names
+        assert len(findings) == 5
 
     def test_no_domain_finding_when_domain_absent(self):
         findings = _parse_enum4linux_output(
@@ -114,12 +123,18 @@ class TestParseInvariants:
         )
         assert all(f.explanation is None for f in findings)
 
-    def test_evidence_raw_is_full_output(self):
+    def test_evidence_raw_holds_analysed_fields_only(self):
         findings = _parse_enum4linux_output(
             ENUM4LINUX_ADMIN_ONLY, "192.168.1.26", "session-test"
         )
-        assert findings[0].evidence.raw == ENUM4LINUX_ADMIN_ONLY
-        assert "enum4linux-ng -A --json 192.168.1.26" == findings[0].evidence.command
+        assert findings[0].evidence.raw != ENUM4LINUX_ADMIN_ONLY
+        assert "Remote Admin" not in findings[0].evidence.raw
+        assert json.loads(findings[0].evidence.raw) == {
+            "share": "ADMIN$",
+            "source": "enum4linux-ng share listing",
+        }
+        assert "enum4linux-ng -A -oJ <json-base> 192.168.1.26" == findings[0].evidence.command
+        assert "--json" not in findings[0].evidence.command
 
     def test_status_is_open(self):
         findings = _parse_enum4linux_output(
@@ -177,6 +192,7 @@ class TestSmbEnumErrors:
 class TestSmbEnumNominalRun:
     def test_admin_share_from_smb_enum_entry_point(self):
         completed = MagicMock()
+        completed.returncode = 0
         completed.stdout = ENUM4LINUX_ADMIN_ONLY
         completed.stderr = ""
         with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
@@ -644,3 +660,284 @@ class TestVulnerabilitiesJsonT19:
             assert r.get("what"), f"{rule_id} missing 'what'"
             assert r.get("attack"), f"{rule_id} missing 'attack'"
             assert r.get("defense"), f"{rule_id} missing 'defense'"
+
+
+# ---------------------------------------------------------------------------
+# SMB-01 — échec d'énumération explicite, export JSON privé, preuves analysées
+# ---------------------------------------------------------------------------
+
+IP = "192.168.1.26"
+
+
+def _fake_enum_run(*, rc=0, stdout="", stderr="", export=None, record=None):
+    """Fake subprocess.run. Writes <base>.json when `export` is given, as -oJ does."""
+    def _run(command, **kwargs):
+        base = command[command.index("-oJ") + 1]
+        export_dir = os.path.dirname(base)
+        if record is not None:
+            record["command"] = list(command)
+            record["kwargs"] = dict(kwargs)
+            record["export_dir"] = export_dir
+            record["export_dir_mode"] = stat.S_IMODE(os.stat(export_dir).st_mode)
+        if export is not None:
+            with open(base + ".json", "w", encoding="utf-8") as handle:
+                handle.write(export)
+        return subprocess.CompletedProcess(command, rc, stdout=stdout, stderr=stderr)
+    return _run
+
+
+def _run_entry(fake_run, target=IP):
+    """Call the public entry point with the tool present and the user confirming."""
+    with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
+         patch("detect.smb_enum.typer.confirm", return_value=True), \
+         patch("detect.smb_enum.subprocess.run", side_effect=fake_run):
+        return smb_enum(target, "session-smb01")
+
+
+@pytest.fixture
+def shown():
+    """Capture every message sent to display()."""
+    with patch("detect.smb_enum.display") as mock_display:
+        yield mock_display
+
+
+def _messages(mock_display):
+    return [str(call.args[0]) for call in mock_display.call_args_list]
+
+
+class TestRunContract:
+    def test_command_uses_json_export_and_no_json_flag(self, shown):
+        record = {}
+        with patch("detect.smb_enum.subprocess.run",
+                   side_effect=_fake_enum_run(export="{}", record=record)):
+            _run_enum4linux_ng(IP)
+        command = record["command"]
+        assert "-oJ" in command
+        assert "--json" not in command
+        assert "-A" in command
+        assert command[-1] == IP
+        assert record["kwargs"]["check"] is False
+        assert record["kwargs"]["capture_output"] is True
+        assert record["kwargs"]["timeout"] == ENUM4LINUX_TIMEOUT_SECONDS
+
+    def test_export_dir_is_private_during_run_and_removed_after(self, shown):
+        record = {}
+        with patch("detect.smb_enum.subprocess.run",
+                   side_effect=_fake_enum_run(export="{}", record=record)):
+            _run_enum4linux_ng(IP)
+        assert record["export_dir_mode"] == 0o700
+        assert not os.path.exists(record["export_dir"])
+
+    def test_export_dir_removed_after_failure(self, shown):
+        record = {}
+        with patch("detect.smb_enum.subprocess.run",
+                   side_effect=_fake_enum_run(rc=2, stderr="usage", record=record)):
+            assert _run_enum4linux_ng(IP) is None
+        assert not os.path.exists(record["export_dir"])
+
+    def test_nominal_export_is_read_and_analysed(self, shown):
+        export = json.dumps({"shares": [{"name": "Public", "accessible": True}], "domain": "LAB"})
+        findings = _run_entry(_fake_enum_run(export=export))
+        assert {f.target_service for f in findings} == {"Public", "LAB"}
+        assert not any("FAILED" in m for m in _messages(shown))
+
+    def test_nonzero_rc_is_failure_even_with_valid_export(self, shown):
+        export = json.dumps({"shares": [{"name": "ADMIN$"}]})
+        findings = _run_entry(_fake_enum_run(rc=2, stderr="usage: enum4linux-ng", export=export))
+        assert findings == []
+        messages = _messages(shown)
+        assert any("FAILED" in m and "exit code 2" in m for m in messages)
+        assert not any("no shares" in m for m in messages)
+
+    def test_nonzero_rc_never_falls_back_to_text(self, shown):
+        findings = _run_entry(_fake_enum_run(rc=1, stdout=ENUM4LINUX_ADMIN_ONLY))
+        assert findings == []
+
+    def test_rc0_empty_stdout_and_no_export_is_failure(self, shown):
+        findings = _run_entry(_fake_enum_run(rc=0, stdout="  \n"))
+        assert findings == []
+        assert any("FAILED" in m for m in _messages(shown))
+
+    def test_rc0_without_export_uses_text_fallback_and_reads_account(self, shown):
+        findings = _run_entry(_fake_enum_run(rc=0, stdout="index: 0x1 Account: alice\n"))
+        users = [f for f in findings if f.target_service == "smb_users_enumerated"]
+        assert len(users) == 1
+        assert json.loads(users[0].evidence.raw)["users"] == ["alice"]
+
+    def test_rc0_malformed_export_is_failure_without_fallback(self, shown):
+        findings = _run_entry(_fake_enum_run(rc=0, stdout=ENUM4LINUX_ADMIN_ONLY, export="{not json"))
+        assert findings == []
+        assert any("FAILED" in m and "malformed" in m for m in _messages(shown))
+
+    def test_rc0_export_that_is_not_an_object_is_failure(self, shown):
+        findings = _run_entry(_fake_enum_run(rc=0, stdout=ENUM4LINUX_ADMIN_ONLY, export="[1, 2]"))
+        assert findings == []
+        assert any("FAILED" in m for m in _messages(shown))
+
+    def test_timeout_is_explicit_failure(self, shown):
+        def boom(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="enum4linux-ng", timeout=120)
+        assert _run_entry(boom) == []
+        assert any("FAILED" in m and "timed out" in m for m in _messages(shown))
+
+    def test_oserror_is_explicit_failure(self, shown):
+        def boom(*args, **kwargs):
+            raise OSError("denied")
+        assert _run_entry(boom) == []
+        assert any("FAILED" in m and "OSError" in m for m in _messages(shown))
+
+    def test_missing_binary_is_explicit_failure(self, shown):
+        def boom(*args, **kwargs):
+            raise FileNotFoundError("enum4linux-ng")
+        assert _run_entry(boom) == []
+        assert any("FAILED" in m and "not found" in m for m in _messages(shown))
+
+    def test_stderr_is_redacted_ansi_free_and_not_parsed(self, shown):
+        stderr = "\x1b[31mERROR\x1b[0m login failed password: Hunter2-SECRET\n"
+        findings = _run_entry(_fake_enum_run(rc=1, stderr=stderr))
+        assert findings == []
+        joined = "\n".join(_messages(shown))
+        assert "Hunter2-SECRET" not in joined
+        assert "\x1b" not in joined
+        assert "[redacted]" in joined
+
+
+class TestFailureVisibility:
+    def test_successful_empty_analysis_keeps_no_shares_message(self, shown):
+        findings = _run_entry(_fake_enum_run(export="{}"))
+        assert findings == []
+        messages = _messages(shown)
+        assert any("no shares or domain info" in m for m in messages)
+        assert not any("FAILED" in m for m in messages)
+
+    def test_failure_message_is_distinct_from_empty_result(self, shown):
+        _run_entry(_fake_enum_run(rc=2, stderr="usage"))
+        messages = _messages(shown)
+        assert any("FAILED" in m and "not an absence" in m for m in messages)
+        assert not any("no shares or domain info" in m for m in messages)
+
+
+class TestEvidenceContainsAnalysedFieldsOnly:
+    """Q4: no full tool output, no secret, in Findings or evidence."""
+
+    MARKERS = ("MARKER-PASSWORD", "MARKER-RAW", "MARKER-COMMENT", "Hunter2")
+
+    def test_json_full_output_and_secrets_absent_from_evidence(self):
+        document = {
+            "anonymous_session": True,
+            "shares": [
+                {"name": "tmp", "accessible": True, "permissions": "READ_WRITE",
+                 "comment": "MARKER-COMMENT"},
+                {"name": "Public", "accessible": True, "permissions": "READ",
+                 "comment": "MARKER-COMMENT"},
+            ],
+            "users": ["Administrator"],
+            "passwordpolicy": {"minpasswdlength": 6, "lockoutthreshold": 0},
+            "credentials": {"username": "alice", "password": "MARKER-PASSWORD"},
+            "sessions": {"null_session": True, "password": "MARKER-PASSWORD"},
+            "unrelated_blob": "MARKER-RAW Hunter2",
+        }
+        raw = json.dumps(document)
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-q4")
+        assert findings
+        for finding in findings:
+            blob = " ".join([finding.evidence.raw, finding.evidence.command,
+                             finding.target_service])
+            for marker in self.MARKERS:
+                assert marker not in blob
+            assert raw not in finding.evidence.raw
+            assert "smb_enum_" not in finding.evidence.command
+            assert "/tmp" not in finding.evidence.command
+
+    def test_text_full_output_absent_from_evidence(self):
+        raw = (
+            "MARKER-RAW-TEXT noise line\n"
+            "Sharename       Type      Comment\n"
+            "---------       ----      -------\n"
+            "Public          Disk      MARKER-COMMENT\n"
+            "Account: alice\n"
+        )
+        findings = _parse_enum4linux_output(raw, "10.0.0.5", "session-q4")
+        share = next(f for f in findings if f.target_service == "Public")
+        assert "MARKER" not in share.evidence.raw
+        assert "noise" not in share.evidence.raw
+        assert json.loads(share.evidence.raw) == {
+            "share": "Public",
+            "source": "enum4linux-ng share listing",
+        }
+
+    def test_admin_share_evidence_has_no_comment_and_no_raw_output(self):
+        findings = _parse_enum4linux_output(ENUM4LINUX_ADMIN_ONLY, IP, "session-q4")
+        admin = next(f for f in findings if f.target_service == "ADMIN$")
+        assert "Remote Admin" not in admin.evidence.raw
+        assert "Sharename" not in admin.evidence.raw
+
+
+class TestAccountRegex:
+    def test_account_with_space_is_extracted(self):
+        assert normalize_smb_output("Account: alice", IP).users == ("alice",)
+
+    def test_account_with_tab_is_extracted(self):
+        assert normalize_smb_output("Account:\talice", IP).users == ("alice",)
+
+
+# ---------------------------------------------------------------------------
+# SMB-01 / CLI — run_smb_enum : échec (None) distinct du résultat vide ([])
+# ---------------------------------------------------------------------------
+
+def _run_checked(fake_run=None, *, confirm=True, resolve="/usr/bin/enum4linux-ng"):
+    """Call run_smb_enum() and count the enum4linux-ng executions."""
+    calls = []
+    if fake_run is not None:
+        inner = fake_run
+
+        def counting_run(command, **kwargs):
+            calls.append(list(command))
+            return inner(command, **kwargs)
+        run_patch = patch("detect.smb_enum.subprocess.run", side_effect=counting_run)
+    else:
+        run_patch = patch("detect.smb_enum.subprocess.run", side_effect=AssertionError("must not run"))
+    with patch("detect.smb_enum._resolve_tool_path", return_value=resolve), \
+         patch("detect.smb_enum.typer.confirm", return_value=confirm), \
+         run_patch:
+        from detect.smb_enum import run_smb_enum
+        outcome = run_smb_enum(IP, "session-smb01")
+    return outcome, calls
+
+
+class TestRunSmbEnumOutcome:
+    def test_success_with_findings_returns_list(self, shown):
+        export = json.dumps({"shares": [{"name": "Public", "accessible": True}]})
+        outcome, calls = _run_checked(_fake_enum_run(export=export))
+        assert isinstance(outcome, list)
+        assert [f.target_service for f in outcome] == ["Public"]
+        assert len(calls) == 1
+
+    def test_success_without_findings_returns_empty_list(self, shown):
+        outcome, calls = _run_checked(_fake_enum_run(export="{}"))
+        assert outcome == []
+        assert len(calls) == 1
+        assert any("no shares or domain info" in m for m in _messages(shown))
+
+    def test_failure_returns_none(self, shown):
+        outcome, calls = _run_checked(_fake_enum_run(rc=2, stderr="usage"))
+        assert outcome is None
+        assert len(calls) == 1
+        assert any("FAILED" in m for m in _messages(shown))
+
+    def test_tool_missing_returns_none_without_running(self, shown):
+        outcome, calls = _run_checked(None, resolve=None)
+        assert outcome is None
+        assert calls == []
+        assert any("not found" in m for m in _messages(shown))
+
+    def test_user_cancel_returns_empty_list_without_running(self, shown):
+        outcome, calls = _run_checked(None, confirm=False)
+        assert outcome == []
+        assert calls == []
+
+    def test_smb_enum_wrapper_maps_failure_to_empty_list(self, shown):
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
+             patch("detect.smb_enum.typer.confirm", return_value=True), \
+             patch("detect.smb_enum.subprocess.run", side_effect=_fake_enum_run(rc=2)):
+            assert smb_enum(IP, "session-smb01") == []

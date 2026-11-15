@@ -490,9 +490,13 @@ def smb_enum_cmd(
     target: str = typer.Option(..., "--target", "-t", help="IPv4 address of the Windows host."),
 ) -> None:
     """Enumerate SMB shares/domain via enum4linux. Findings are displayed, not saved."""
-    from detect.smb_enum import smb_enum
+    from detect.smb_enum import run_smb_enum
 
-    findings = smb_enum(target, _standalone_session_id())
+    findings = run_smb_enum(target, _standalone_session_id())
+    if findings is None:
+        # Enumeration failed: the module already displayed the explicit red
+        # error. No "No SMB findings" message, which would contradict it.
+        return
     if findings:
         _render_findings_table(findings)
     else:

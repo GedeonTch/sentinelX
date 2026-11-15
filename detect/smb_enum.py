@@ -16,18 +16,24 @@ Rules enforced here:
 - ALWAYS return List[Finding]
 - ALWAYS ask (y/n) confirmation before sending traffic
 - explanation stays None (KB lookup done by pipeline/CLI)
-- evidence.raw is the raw enum4linux-ng JSON output
+- evidence.raw holds only the analysed, filtered fields (JSON). It never holds
+  the full enum4linux-ng output, which may contain secrets.
+- A failed enumeration is reported explicitly and returns []; it is never
+  presented as an empty result.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import typer
+from rich.markup import escape
 
 from core.dependencies import ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, _resolve_tool_path
 from core.finding import (
@@ -43,6 +49,8 @@ from core.logger import display
 MODULE_NAME = "smb_enum"
 SMB_PORT = 445
 ENUM4LINUX_TIMEOUT_SECONDS = 120
+ENUM4LINUX_STDERR_EXCERPT_CHARS = 160
+ENUM4LINUX_EVIDENCE_COMMAND = "enum4linux-ng -A -oJ <json-base> {target}"
 
 _SHARE_ROW = re.compile(
     r"^\s*([A-Za-z0-9._$-]+)\s+(Disk|IPC|Printer)\b",
@@ -95,8 +103,11 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
     """Enumerate SMB shares and domain info on a Windows host.
 
     Asks for (y/n) confirmation before running enum4linux-ng. Returns an
-    empty list when the tool is missing, the user cancels, or output is
-    empty — never raises for those cases.
+    empty list when the tool is missing, the user cancels, or the run fails.
+    A failed run is displayed as an explicit error, distinct from the message
+    "no shares or domain info" that is shown only after a successful, empty
+    analysis. Never raises for those cases. Use run_smb_enum() when the caller
+    must tell a failure apart from an empty result.
 
     Args:
         target_ip: IPv4 address of the Windows host.
@@ -106,9 +117,28 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
         List[Finding]: One Finding per detected share, plus one domain
         Finding when domain information is available.
     """
+    return run_smb_enum(target_ip, session_id) or []
+
+
+def run_smb_enum(target_ip: str, session_id: str) -> Optional[List[Finding]]:
+    """Run the SMB enumeration once and report its outcome without ambiguity.
+
+    Args:
+        target_ip: IPv4 address of the Windows host.
+        session_id: Current audit session ID.
+
+    Returns:
+        None: the enumeration failed or could not start (tool missing,
+            timeout, non-zero exit, unreadable export). The explicit red
+            message has already been displayed.
+        []: the user cancelled, or the analysis completed with no Finding.
+        List[Finding]: the analysis completed with Findings.
+
+    Never raises for those cases.
+    """
     if _resolve_tool_path("enum4linux-ng") is None:
         display("[red]enum4linux-ng not found. Run 'netlab doctor'.[/red]")
-        return []
+        return None
 
     confirmed = typer.confirm(
         f"[smb_enum] Enumerate SMB shares, users and domain on {target_ip}?"
@@ -119,9 +149,9 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
 
     display(f"[cyan]Starting enum4linux-ng on {target_ip}...[/cyan]")
     raw_output = _run_enum4linux_ng(target_ip)
-    if not raw_output:
-        display(f"[yellow]No output from enum4linux-ng on {target_ip}.[/yellow]")
-        return []
+    if raw_output is None:
+        # The failure reason was already displayed by _run_enum4linux_ng.
+        return None
 
     findings = _parse_enum4linux_output(raw_output, target_ip, session_id)
     if findings:
@@ -135,42 +165,117 @@ def smb_enum(target_ip: str, session_id: str) -> List[Finding]:
     return findings
 
 
-def _run_enum4linux_ng(target_ip: str) -> Optional[str]:
-    """Run enum4linux-ng with JSON output and return stdout, or None on error.
+def _report_failure(target_ip: str, reason: str) -> None:
+    """Display an explicit, visible SMB enumeration failure (red).
 
-    Invokes ``ENUM4LINUX_NG_PYTHON ENUM4LINUX_NG_SCRIPT -A --json <ip>``
-    so that the tool runs in its own venv with its own dependencies.
+    The message states that there is no result, so it can never be read as
+    an absence of shares or domain information.
+    """
+    display(
+        f"[red]SMB enumeration FAILED on {escape(target_ip)}: {escape(reason)}. "
+        "No result: this is not an absence of shares or domain info.[/red]"
+    )
+
+
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:pass(?:word|wd)?|pwd|secret|hash|token|key)\b\s*[:=]\s*\S+"
+)
+
+
+def _stderr_excerpt(stderr: str) -> str:
+    """Return a short diagnostic excerpt of stderr.
+
+    stderr is never parsed as data. The excerpt is one line, ANSI-free,
+    truncated, and any ``password: value``-style assignment is redacted.
+    """
+    lines = [line.strip() for line in _strip_ansi(stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    excerpt = _SECRET_ASSIGNMENT.sub("[redacted]", lines[-1])
+    if len(excerpt) > ENUM4LINUX_STDERR_EXCERPT_CHARS:
+        excerpt = excerpt[:ENUM4LINUX_STDERR_EXCERPT_CHARS] + "..."
+    return excerpt
+
+
+def _run_enum4linux_ng(target_ip: str) -> Optional[str]:
+    """Run enum4linux-ng in JSON-export mode and return the text to analyse.
+
+    Invokes ``ENUM4LINUX_NG_PYTHON ENUM4LINUX_NG_SCRIPT -A -oJ <base> <ip>``
+    in a private temporary directory (0700). The export is read from
+    ``<base>.json``. The directory is removed on every path, including
+    failures.
+
+    Decision rules (approved):
+      - non-zero return code          -> explicit failure, no fallback;
+      - rc 0 and valid JSON export    -> the JSON text is returned;
+      - rc 0 and no JSON export       -> stdout text is returned (text fallback),
+                                         or failure if stdout is empty;
+      - JSON export present but bad   -> explicit failure, no fallback.
 
     Args:
         target_ip: IPv4 address of the Windows host.
 
     Returns:
-        Optional[str]: Raw JSON stdout, or None on error/empty output.
+        Optional[str]: Text to analyse, or None on failure. Every failure is
+        displayed explicitly before None is returned.
     """
-    command = [ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, "-A", "--json", target_ip]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=ENUM4LINUX_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except FileNotFoundError:
-        display("[red]enum4linux-ng not found. Run 'netlab doctor'.[/red]")
-        return None
-    except subprocess.TimeoutExpired:
-        display("[yellow]enum4linux-ng timed out.[/yellow]")
-        return None
-    except OSError as exc:
-        display(f"[red]enum4linux-ng error: {exc}[/red]")
-        return None
+    with tempfile.TemporaryDirectory(prefix="smb_enum_") as export_dir:
+        base = os.path.join(export_dir, "enum4linux")
+        command = [ENUM4LINUX_NG_PYTHON, ENUM4LINUX_NG_SCRIPT, "-A", "-oJ", base, target_ip]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=ENUM4LINUX_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError:
+            _report_failure(target_ip, "enum4linux-ng not found (run 'netlab doctor')")
+            return None
+        except subprocess.TimeoutExpired:
+            _report_failure(target_ip, f"timed out after {ENUM4LINUX_TIMEOUT_SECONDS} s")
+            return None
+        except OSError as exc:
+            _report_failure(target_ip, f"system error ({type(exc).__name__})")
+            return None
 
-    combined = f"{result.stdout or ''}{result.stderr or ''}"
-    stripped = combined.strip()
-    if not stripped:
-        return None
-    return combined
+        if result.returncode != 0:
+            excerpt = _stderr_excerpt(result.stderr or "")
+            detail = f"exit code {result.returncode}"
+            if excerpt:
+                detail += f" ({excerpt})"
+            _report_failure(target_ip, detail)
+            return None
+
+        json_path = base + ".json"
+        if os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as handle:
+                    text = handle.read()
+                document = json.loads(text)
+            except (OSError, ValueError):
+                _report_failure(target_ip, "JSON export is unreadable or malformed")
+                return None
+            if not isinstance(document, dict):
+                _report_failure(target_ip, "JSON export is not an object")
+                return None
+            return text
+
+        stdout = result.stdout or ""
+        if not _strip_ansi(stdout).strip():
+            _report_failure(target_ip, "no JSON export and no output")
+            return None
+        return stdout
+
+
+def _analysis_evidence(**fields: Any) -> str:
+    """Serialise only analysed fields as sorted JSON (evidence.raw).
+
+    Never receives the full tool output: the caller passes the named,
+    filtered values it actually relies on (decision Q4).
+    """
+    return json.dumps(fields, sort_keys=True, default=str)
 
 
 def _parse_enum4linux_output(
@@ -180,33 +285,18 @@ def _parse_enum4linux_output(
 ) -> List[Finding]:
     """Normalize tool output, then convert justified observations to Findings."""
     result = normalize_smb_output(raw_output, target_ip)
-    command = f"enum4linux-ng -A --json {target_ip}"
+    command = ENUM4LINUX_EVIDENCE_COMMAND.format(target=target_ip)
     findings: List[Finding] = []
     seen_services: set[str] = set()
 
-    def add_finding(service: str, category: Category, severity: Severity) -> None:
-        key = service.lower()
-        if key in seen_services:
-            return
-        seen_services.add(key)
-        findings.append(_make_finding(
-            session_id=session_id,
-            target_ip=target_ip,
-            target_service=service,
-            category=category,
-            severity=severity,
-            raw_output=result.raw_output,
-            command=command,
-        ))
-
-    def add_finding_ex(
+    def add_finding(
         service: str,
         category: Category,
         severity: Severity,
-        confidence: Confidence,
         evidence_raw: str,
+        confidence: Confidence = Confidence.CONFIRMED,
     ) -> None:
-        """Like add_finding but with explicit confidence and evidence text."""
+        """Append one Finding per service key; evidence_raw holds analysed fields only."""
         key = service.lower()
         if key in seen_services:
             return
@@ -224,26 +314,47 @@ def _parse_enum4linux_output(
 
     for share in result.shares:
         category, severity = _classify_share(share.name)
-        add_finding(share.name, category, severity)
+        add_finding(share.name, category, severity, _analysis_evidence(
+            share=share.name,
+            source="enum4linux-ng share listing",
+        ))
 
     if result.domain is not None:
-        add_finding(result.domain, Category.NETWORK, Severity.INFO)
+        add_finding(result.domain, Category.NETWORK, Severity.INFO, _analysis_evidence(
+            domain=result.domain,
+            source="enum4linux-ng domain information",
+        ))
 
     # Null session explicitly refused → document the attempt as INFO.
     # This is an observation, not a vulnerability: the server is hardened.
     if result.anonymous_session is False:
-        add_finding("smb_access_refused", Category.NETWORK, Severity.INFO)
+        add_finding("smb_access_refused", Category.NETWORK, Severity.INFO, _analysis_evidence(
+            anonymous_session=False,
+            source="enum4linux-ng session check",
+        ))
 
     # Anonymous authentication alone is an observation. Only confirmed share
-    # access creates a stronger Finding with the raw proof attached.
+    # access creates a stronger Finding with the analysed proof attached.
     if result.anonymous_session is True and result.anonymous_share_access is True:
-        add_finding("smb_anonymous_share_access", Category.SERVICE, Severity.MEDIUM)
+        add_finding("smb_anonymous_share_access", Category.SERVICE, Severity.MEDIUM,
+                    _analysis_evidence(
+                        anonymous_session=True,
+                        anonymous_share_access=True,
+                        source="enum4linux-ng session and share check",
+                    ))
 
     if "NT1" in result.dialects or "SMBv1" in result.dialects:
-        add_finding("SMBv1", Category.SERVICE, Severity.HIGH)
+        add_finding("SMBv1", Category.SERVICE, Severity.HIGH, _analysis_evidence(
+            dialects=[d for d in result.dialects if d in ("NT1", "SMBv1")],
+            source="enum4linux-ng dialect check",
+        ))
 
     if result.signing_required is False:
-        add_finding("smb_signing_not_required", Category.CONFIG, Severity.MEDIUM)
+        add_finding("smb_signing_not_required", Category.CONFIG, Severity.MEDIUM,
+                    _analysis_evidence(
+                        signing_required=False,
+                        source="enum4linux-ng signing check",
+                    ))
 
     # ── T19 — Writable shares ─────────────────────────────────────────────────
     # Confidence is PROBABLE because enum4linux-ng uses smbclient "dir" to test
@@ -291,12 +402,12 @@ def _parse_enum4linux_output(
             "count": len(result.users),
             "source": "enum4linux-ng user enumeration",
         }, sort_keys=True)
-        add_finding_ex(
+        add_finding(
             "smb_users_enumerated",
             Category.NETWORK,
             Severity.INFO,
-            Confidence.CONFIRMED,
             evidence_raw,
+            Confidence.CONFIRMED,
         )
 
     # ── T19 — Weak password policy ────────────────────────────────────────────
@@ -319,12 +430,12 @@ def _parse_enum4linux_output(
                 "no_lockout": no_lockout,
                 "source": "enum4linux-ng password policy",
             }, sort_keys=True)
-            add_finding_ex(
+            add_finding(
                 "smb_weak_password_policy",
                 Category.CONFIG,
                 severity,
-                Confidence.CONFIRMED,
                 evidence_raw,
+                Confidence.CONFIRMED,
             )
 
     return findings
@@ -506,7 +617,7 @@ def _normalize_text_output(raw: str, target_ip: str) -> SmbEnumerationResult:
         dialects=tuple(dict.fromkeys(dialects)),
         signing_required=signing,
         shares=tuple(SmbShare(name=name) for name in _extract_share_names(raw)),
-        users=tuple(re.findall(r"Account:\\s*(\\S+)", raw, re.IGNORECASE)),
+        users=tuple(re.findall(r"Account:\s*(\S+)", raw, re.IGNORECASE)),
         groups=(),
         anonymous_session=anonymous,
         anonymous_share_access=access,
@@ -599,7 +710,7 @@ def _make_finding(
         target_service: Share name or rule id.
         category:       Finding category.
         severity:       Finding severity.
-        raw_output:     Full enum4linux-ng output (evidence.raw).
+        raw_output:     Analysed-fields JSON only (evidence.raw); never full tool output.
         command:        Exact command that produced the output.
         confidence:     Confidence level (default CONFIRMED; use PROBABLE when
                         the evidence is indirect, e.g. share writable inferred

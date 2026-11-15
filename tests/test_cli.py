@@ -1502,7 +1502,7 @@ class TestCleanup:
 class TestStandaloneCommands:
     def test_smb_enum_calls_module_without_db_persist(self):
         finding = make_finding(module="smb_enum", target_port=445, target_service="smb")
-        with patch("detect.smb_enum.smb_enum", return_value=[finding]) as smb, \
+        with patch("detect.smb_enum.run_smb_enum", return_value=[finding]) as smb, \
              patch("cli._render_findings_table") as render, \
              patch("core.database.save_findings") as save:
             result = runner.invoke(
@@ -1663,3 +1663,58 @@ class TestConfig:
             set_result = runner.invoke(app, ["config", "set", "lab.scope", "192.168.1.0/24"])
             assert set_result.exit_code == 0
             assert "updated" in set_result.output.lower()
+
+
+class TestSmbEnumCliOutcomes:
+    """SMB-01 CLI: one enumeration per command; a failure never shows 'No SMB findings'."""
+
+    @staticmethod
+    def _invoke(export=None, rc=0, stderr=""):
+        import subprocess
+
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(list(command))
+            base = command[command.index("-oJ") + 1]
+            if export is not None:
+                with open(base + ".json", "w", encoding="utf-8") as handle:
+                    handle.write(export)
+            return subprocess.CompletedProcess(command, rc, stdout="", stderr=stderr)
+
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"), \
+             patch("detect.smb_enum.typer.confirm", return_value=True), \
+             patch("detect.smb_enum.subprocess.run", side_effect=fake_run), \
+             patch("detect.smb_enum.display") as module_display, \
+             patch("cli.display") as cli_display, \
+             patch("cli._render_findings_table") as render:
+            result = runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
+        messages = [str(c.args[0]) for c in
+                    module_display.call_args_list + cli_display.call_args_list]
+        return result, calls, render, messages
+
+    def test_success_with_results_renders_findings_once(self):
+        import json
+
+        export = json.dumps({"shares": [{"name": "Public", "accessible": True}]})
+        result, calls, render, messages = self._invoke(export=export)
+        assert result.exit_code == 0
+        assert len(calls) == 1
+        render.assert_called_once()
+        assert [f.target_service for f in render.call_args.args[0]] == ["Public"]
+        assert not any("No SMB findings" in m for m in messages)
+
+    def test_success_without_results_shows_normal_message(self):
+        result, calls, render, messages = self._invoke(export="{}")
+        assert result.exit_code == 0
+        assert len(calls) == 1
+        render.assert_not_called()
+        assert any("No SMB findings for 192.168.1.50." in m for m in messages)
+
+    def test_failure_shows_red_error_and_no_no_findings_message(self):
+        result, calls, render, messages = self._invoke(rc=2, stderr="usage: enum4linux-ng")
+        assert result.exit_code == 0
+        assert len(calls) == 1
+        render.assert_not_called()
+        assert any(m.startswith("[red]SMB enumeration FAILED") for m in messages)
+        assert not any("No SMB findings" in m for m in messages)
