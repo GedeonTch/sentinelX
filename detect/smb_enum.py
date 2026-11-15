@@ -549,34 +549,81 @@ def _normalize_shares(value: Any) -> Tuple[SmbShare, ...]:
     return tuple(shares)
 
 
+def _policy_int(value: Any) -> Optional[int]:
+    """Convert a password-policy field value to int, field by field.
+
+    Decision rules (approved by owner, 2026-11-13, confirmed in
+    enum4linux-ng 1.3.10 source l.2630-2631, 2654, 2686-2688):
+
+    * ``None`` or ``"None"`` / ``"none"`` → 0 (zero in enum4linux-ng means
+      the threshold is set to zero / unlimited).
+    * ``"not set"`` → None (field is not configured; omit it).
+    * Any integer-like value (int, float, or numeric string) → int(value).
+    * Anything else unrecognised → None (omit the field, do NOT lose the
+      other fields in the policy dict).
+
+    Returns:
+        int  — parsed value (including 0 for None/none).
+        None — field absent, "not set", or unrecognised (omit this field).
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        # bool is a subclass of int in Python; bool values are never valid
+        # numeric policy fields — reject them so they cannot produce false positives.
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        normalised = value.strip().lower()
+        if normalised in ("none",):
+            return 0
+        if normalised in ("not set", "not_set", "notset", "n/a", "unknown", ""):
+            return None
+        try:
+            return int(value.strip())
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def _extract_password_policy(raw: Any) -> Optional[dict]:
     """Extract min_password_length and lockout_threshold from a policy dict.
 
-    enum4linux-ng may nest the policy under various keys. Returns None when
-    the data is absent or cannot be parsed as integers.
+    Each field is converted independently by ``_policy_int`` so that one
+    unrecognised value does not discard the whole policy.  Returns None only
+    when the dict is absent or both fields are absent / "not set".
 
     Args:
         raw: Raw value found via _find_value (may be dict, list, or None).
 
     Returns:
         Optional[dict]: {"min_password_length": int, "lockout_threshold": int}
-        or None if extraction fails.
+        (each key present only when the value could be converted).
     """
     if not isinstance(raw, dict):
         return None
-    min_len = _find_value(raw, {"minpasswdlength", "minimumpasswordlength", "minpasswordlength",
-                                "minlen", "minlength"})
-    lockout = _find_value(raw, {"lockoutthreshold", "accountlockoutthreshold", "lockout",
-                                "badpwdcount", "badpasswordcount"})
-    try:
-        result: dict = {}
+    # Use _find_key_value (not _find_value) to distinguish a key that is
+    # present with JSON null (Python None → 0 by rule) from a key that is
+    # simply absent (field omitted, never invented as 0).
+    min_found, min_len_raw = _find_key_value(
+        raw, {"minpasswdlength", "minimumpasswordlength",
+              "minpasswordlength", "minlen", "minlength"}
+    )
+    lock_found, lockout_raw = _find_key_value(
+        raw, {"lockoutthreshold", "accountlockoutthreshold",
+              "lockout", "badpwdcount", "badpasswordcount"}
+    )
+    result: dict = {}
+    if min_found:
+        min_len = _policy_int(min_len_raw)
         if min_len is not None:
-            result["min_password_length"] = int(min_len)
+            result["min_password_length"] = min_len
+    if lock_found:
+        lockout = _policy_int(lockout_raw)
         if lockout is not None:
-            result["lockout_threshold"] = int(lockout)
-        return result if result else None
-    except (ValueError, TypeError):
-        return None
+            result["lockout_threshold"] = lockout
+    return result if result else None
 
 
 

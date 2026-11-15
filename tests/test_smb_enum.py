@@ -27,6 +27,7 @@ from detect.smb_enum import (
     _SMB1_DIALECT_NAMES,
     _extract_dialects,
     _parse_enum4linux_output,
+    _policy_int,
     _run_enum4linux_ng,
     normalize_smb_output,
     smb_enum,
@@ -634,6 +635,8 @@ class TestPasswordPolicyExtraction:
         """Text fallback never extracts password_policy."""
         result = normalize_smb_output("Domain Name: WORKGROUP", "10.0.0.5")
         assert result.password_policy is None
+
+
 
 
 class TestVulnerabilitiesJsonT19:
@@ -1304,3 +1307,187 @@ class TestSMB03V3Provenance:
         """When smb_dialects:false, no Finding exists to affirm success."""
         f = self._smb1({"smb_dialects": False})
         assert f is None
+
+
+# ---------------------------------------------------------------------------
+# SMB-04 — politique de mots de passe avec valeurs textuelles
+# ---------------------------------------------------------------------------
+
+
+class TestPolicyInt:
+    """Unit tests for _policy_int — the field-by-field converter."""
+
+    def test_none_python_returns_zero(self):
+        assert _policy_int(None) == 0
+
+    def test_string_None_returns_zero(self):
+        assert _policy_int("None") == 0
+
+    def test_string_none_lowercase_returns_zero(self):
+        assert _policy_int("none") == 0
+
+    def test_string_not_set_returns_none(self):
+        assert _policy_int("not set") is None
+
+    def test_string_not_set_variant_underscore(self):
+        assert _policy_int("not_set") is None
+
+    def test_string_na_returns_none(self):
+        assert _policy_int("n/a") is None
+
+    def test_empty_string_returns_none(self):
+        assert _policy_int("") is None
+
+    def test_integer_zero(self):
+        assert _policy_int(0) == 0
+
+    def test_integer_positive(self):
+        assert _policy_int(8) == 8
+
+    def test_numeric_string(self):
+        assert _policy_int("6") == 6
+
+    def test_numeric_string_zero(self):
+        assert _policy_int("0") == 0
+
+    def test_unknown_string_returns_none(self):
+        assert _policy_int("unknown") is None
+
+    def test_unrecognised_string_returns_none(self):
+        assert _policy_int("??") is None
+
+    def test_bool_true_rejected(self):
+        """Python True must never become 1 — it is not a valid numeric policy value."""
+        assert _policy_int(True) is None
+
+    def test_bool_false_rejected(self):
+        """Python False must never become 0 — it is not a valid numeric policy value."""
+        assert _policy_int(False) is None
+
+
+class TestSMB04PasswordPolicy:
+    """SMB-04: field-by-field extraction — one invalid field must not lose the others."""
+
+    @staticmethod
+    def _policy(raw_dict):
+        raw = json.dumps({"passwordpolicy": raw_dict})
+        result = normalize_smb_output(raw, "192.168.57.3")
+        return result.password_policy
+
+    def test_both_fields_none_string_gives_zero(self):
+        p = self._policy({"minpasswdlength": "None", "lockoutthreshold": "None"})
+        assert p == {"min_password_length": 0, "lockout_threshold": 0}
+
+    def test_both_fields_none_lowercase_gives_zero(self):
+        p = self._policy({"minpasswdlength": "none", "lockoutthreshold": "none"})
+        assert p == {"min_password_length": 0, "lockout_threshold": 0}
+
+    def test_min_none_lockout_numeric_preserved(self):
+        """min='None' (zero) must not cause lockout to be lost."""
+        p = self._policy({"minpasswdlength": "None", "lockoutthreshold": 5})
+        assert p is not None
+        assert p["min_password_length"] == 0
+        assert p["lockout_threshold"] == 5
+
+    def test_min_not_set_lockout_none_string(self):
+        """`not set` omits min; `None` on lockout → 0."""
+        p = self._policy({"minpasswdlength": "not set", "lockoutthreshold": "None"})
+        assert p is not None
+        assert "min_password_length" not in p
+        assert p["lockout_threshold"] == 0
+
+    def test_both_not_set_returns_none(self):
+        p = self._policy({"minpasswdlength": "not set", "lockoutthreshold": "not set"})
+        assert p is None
+
+    def test_valid_integers_unchanged(self):
+        p = self._policy({"minpasswdlength": 8, "lockoutthreshold": 3})
+        assert p == {"min_password_length": 8, "lockout_threshold": 3}
+
+    def test_unknown_min_with_valid_lockout_keeps_lockout(self):
+        """An unrecognised min value must not discard lockout."""
+        p = self._policy({"minpasswdlength": "??unknown??", "lockoutthreshold": 10})
+        assert p is not None
+        assert "min_password_length" not in p
+        assert p["lockout_threshold"] == 10
+
+    def test_lockout_zero_integer_preserved(self):
+        """lockout=0 is a valid value and must be kept."""
+        p = self._policy({"minpasswdlength": 7, "lockoutthreshold": 0})
+        assert p == {"min_password_length": 7, "lockout_threshold": 0}
+
+    def test_mixed_none_and_valid(self):
+        """Real-world Metasploitable-style: some fields None, others numeric."""
+        p = self._policy({
+            "minpasswdlength": "None",
+            "lockoutthreshold": "None",
+            "minpasswordage": "not set",
+        })
+        assert p is not None
+        assert p["min_password_length"] == 0
+        assert p["lockout_threshold"] == 0
+
+    def test_evidence_raw_contains_policy_fields(self):
+        """The Finding evidence must reflect the extracted policy, not raw strings."""
+        raw = json.dumps({
+            "passwordpolicy": {"minpasswdlength": "None", "lockoutthreshold": 0}
+        })
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb04")
+        policy_finding = next(
+            (f for f in findings if f.target_service == "smb_weak_password_policy"), None
+        )
+        # lockoutthreshold=0 means no lockout → weak policy finding expected
+        assert policy_finding is not None, "smb_weak_password_policy finding expected"
+        ev = json.loads(policy_finding.evidence.raw)
+        # Evidence must show no_lockout=True (lockout_threshold=0)
+        assert ev.get("no_lockout") is True
+        # Must not contain the raw string "None" as a value
+        assert "None" not in json.dumps(ev) or "no_lockout" in ev, (
+            "raw 'None' string must not appear verbatim in evidence"
+        )
+
+    # ── SMB-04 V2 — key-presence and boolean rejection ───────────────────────
+
+    def test_key_absent_min_field_omitted(self):
+        """When minpasswdlength key is absent, min_password_length must not appear."""
+        p = self._policy({"lockoutthreshold": 5})
+        assert p == {"lockout_threshold": 5}
+        assert "min_password_length" not in p
+
+    def test_key_absent_lockout_field_omitted(self):
+        """When lockoutthreshold key is absent, lockout_threshold must not appear."""
+        p = self._policy({"minpasswdlength": 7})
+        assert p == {"min_password_length": 7}
+        assert "lockout_threshold" not in p
+
+    def test_key_present_json_null_gives_zero(self):
+        """JSON null (Python None after json.loads) on a present key must yield 0."""
+        # JSON: {"minpasswdlength": null, "lockoutthreshold": 5}
+        # Python dict: {"minpasswdlength": None, "lockoutthreshold": 5}
+        p = self._policy({"minpasswdlength": None, "lockoutthreshold": 5})
+        assert p is not None
+        assert p["min_password_length"] == 0
+        assert p["lockout_threshold"] == 5
+
+    def test_bool_lockout_false_no_false_positive(self):
+        """Boolean False in lockoutthreshold must be omitted, never treated as 0.
+        minpasswdlength=12 is a strong value and isolates the boolean as the
+        only potential source of a false positive Finding."""
+        p = self._policy({"minpasswdlength": 12, "lockoutthreshold": False})
+        assert p == {"min_password_length": 12}
+        assert "lockout_threshold" not in p
+        raw = json.dumps(
+            {"passwordpolicy": {"minpasswdlength": 12, "lockoutthreshold": False}}
+        )
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "sess-smb04v2")
+        assert not any(f.target_service == "smb_weak_password_policy" for f in findings), (
+            "No smb_weak_password_policy Finding expected when lockout is a boolean"
+        )
+
+    def test_bool_lockout_true_field_omitted(self):
+        """Boolean True in lockoutthreshold must be omitted — no Finding produced."""
+        p = self._policy({"lockoutthreshold": True})
+        assert p is None
+        raw = json.dumps({"passwordpolicy": {"lockoutthreshold": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "sess-smb04v2")
+        assert not any(f.target_service == "smb_weak_password_policy" for f in findings)

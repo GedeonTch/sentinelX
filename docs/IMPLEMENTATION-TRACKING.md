@@ -54,9 +54,10 @@ Ces règles s'appliquent à tout agent lisant ou modifiant ce fichier.
 ## État général du projet (branche `a4-arena`)
 
 ```
-HEAD    : 3657498  (T23-B — 2026-11-10)
+HEAD    : 9034f01  (origin/a4-arena, ticket 4 — audit 2026-11-12 ; T23-B = 3657498)
 Tests   : 2024–2026 passed (2 flaky lifecycle sous forte charge, passent en isolation)
 Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
+SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers non commités) ; NON intégré
 ```
 
 ---
@@ -195,7 +196,7 @@ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
 **Objectif :** Afficher `Finding.confidence` (CONFIRMED / PROBABLE / POSSIBLE) dans les deux tables de findings de `cli.py`.
 **Branche :** `a4-arena` | **Base commit :** `3657498` | **Auteur :** Kiro
 **Fichiers :** `cli.py`, `tests/test_cli.py`
-**Statut :** `[-]` En cours — modifications faites, tests passent, commit en attente d'autorisation
+**Statut :** `[-]` Commit `85870ac` et push prouvés (présent dans `origin/a4-arena`) ; clôture soumise à revue Kiro (non tracée)
 
 #### Phase 1 — Implémentation `cli.py`
 
@@ -217,11 +218,10 @@ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
 
 #### En attente
 
-- [ ] Commit (`cli.py`, `tests/test_cli.py`, `docs/MASTER-REFERENCE.md`, `docs/IMPLEMENTATION-TRACKING.md`)
-  - Proof: en attente d'autorisation du propriétaire
-  - Message suggéré : `feat(cli): add confidence column to findings tables`
-- [ ] Push vers `origin/a4-arena`
-  - Proof: en attente d'autorisation du propriétaire
+- [x] Commit (`85870ac`, `feat(cli): add confidence column to findings tables`)
+  - Proof: `85870ac` présent dans `origin/a4-arena` (`git branch -r --contains 85870ac`, vérifié 2026-11-12)
+- [x] Push vers `origin/a4-arena`
+  - Proof: `git branch -r --contains 85870ac` renvoie `origin/a4-arena`
 
 ---
 
@@ -234,7 +234,7 @@ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
 **Statut :** `[ ]` Non commencé
 **Spec :** approuvée — voir `docs/MASTER-REFERENCE.md` §7
 **Dépendances :** aucune
-**Prochaine dans la feuille de route** après Confidence CLI (commit)
+**Prochaine dans la feuille de route** après Confidence CLI (commité, `85870ac`) : T20
 
 ---
 
@@ -273,6 +273,59 @@ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
   - Proof: vérification `test_scan_confirmations.py` à faire
 - [ ] Valider : `--yes` court-circuite toutes les confirmations
   - Proof: vérification terrain à faire
+
+---
+
+## Tickets d'audit et compléments SMB — séquence V2.2 (DEC-02)
+
+> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **L'ordre V2.2 est approuvé (DEC-02). La présence d'un ticket dans ce tableau ne vaut pas autorisation implicite d'implémentation. Les statuts individuels font foi. SMB-01 est implémenté en worktree, non intégré ; SMB-02 est clôturé selon les preuves du propriétaire. Les autres tickets restent soumis à leur autorisation respective.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
+
+> **Décisions non résolues (ne pas trancher dans ce suivi)** : DEC-03, DEC-04, DEC-05, DEC-11, DEC-12, DEC-14, DEC-16, DEC-17.
+
+| Ticket | Anomalie | Priorité | Statut | Dépend de |
+|---|---|---|---|---|
+| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | **Implémenté en worktree**, **non intégré** (branche `smb-01`, base `9034f01`, 4 fichiers non commités, diff `aa1d9d58…c4a4bf`) ; tests ciblés 189 passed ; suite complète 2112 passed / 1 failed (base 2082 passed / 1 failed ; échec commun `test_installed_standalone_command_exact_session`, environnement) ; revue Kiro CONFORME (rapportée, non reproduite par Arena) ; Revue Nova : avis favorable sur la base du diff et des rapports transmis ; implémentation et tests non reproduits indépendamment ; **acceptation propriétaire requise** | Étape 0 |
+| SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | **Clôturé** selon les preuves disponibles (voir bloc de clôture sous le tableau) | SMB-01 |
+| SMB-03 | Reconnaissance SMBv1 dans le JSON `enum4linux-ng` : `smb_dialects: true` (marqueur d'imposition SMBv1) et dict de dialectes booléens (clés `SMB 1.0`, …) | P2 | **Implémenté (V3), non commité** ; revue indépendante Antigravity CONFORME ; **accepté par le propriétaire le 2026-11-14** ; diff isolé `aa2cb91a…afffe7f2f` ; tests SMB 145 passed ; tests CLI 7 passed (SMB-related) ; modifications présentes dans le dépôt local, aucun commit ni push | SMB-01 (en worktree), SMB-02 |
+| SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Implémenté V2, non commité** ; revue indépendante Antigravity CONFORME (2026-11-15) ; diff isolé `4e833b58…6872856` (`detect/smb_enum.py` `40c69ea8…`, `tests/test_smb_enum.py` `79445a41…`) ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale 2026-11-15 : **2 196 passed, 2 failed** en 3 140,69 s (voir bloc de résultats sous le tableau) ; HEAD inchangé (`9034f01`), aucun commit ni push ; **acceptation propriétaire requise avant intégration** | SMB-01 (en worktree), SMB-02, SMB-03 |
+| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
+| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
+| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
+| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
+| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
+| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 |
+| REP-01 | « 0 » du rapport = quota de notification 60 min | P2 | Proposition | DEC-16 |
+| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure requise | DEC-12 |
+| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
+| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
+| A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
+| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch à appliquer par le propriétaire | DEC-02 (approuvée) |
+| CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
+| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
+| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
+| DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
+| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
+| CLI-01 | Annulation confondue avec « aucun résultat » : après « SMB enumeration cancelled », la CLI affiche « No SMB findings » (`run_smb_enum` retourne `[]` dans les deux cas) | P3 | Proposition **non bloquante**, hors séquence §5.1 ; non autorisée ; contrat à décider (option A : troisième état ; option B : confirmation déplacée hors `run_smb_enum`) | SMB-01 (en worktree) ; décision de contrat |
+| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
+| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
+
+**Précisions SMB-03 / SMB-04 / D6** : SMB-03 accepté le 2026-11-14 (non commité). SMB-04 implémenté V2, revue Antigravity CONFORME (2026-11-15), non commité, acceptation propriétaire requise. Priorité P2 confirmée. Dépendent de SMB-01 (en worktree) et SMB-02 (clôturé). D6 reste indépendant et hors de cette séquence.
+
+**Résultats suite générale SMB-04 V2 (2026-11-15)** :
+- Commande : `HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=.../venv/bin/sentinel bash -c "umask 022 && venv/bin/python -m pytest --tb=short -q"`
+- Résultat : **2 196 passed, 2 failed** en 3 140,69 s (0:52:20)
+- Échec 1 : `tests/test_cli_coherence.py::test_real_cli_subprocess_reports_discover_failure` — `subprocess.TimeoutExpired` après 30 s ; sous-processus CLI qui ne termine pas dans le délai sur cette machine. Échec d'environnement (charge CPU, vitesse) ; test présent à `9034f01` ; non touché par SMB-04 V2. Reproductibilité sur base antérieure non prouvée dans cette session.
+- Échec 2 : `tests/test_sentinel_consultation.py::test_installed_standalone_command_exact_session` — entrée `sentinel` non installée (`shutil.which('sentinel')` = None) ; assertion explicite du test. Échec d'environnement connu ; non touché par SMB-04 V2. Présent dans les runs précédents (Arena : « échec commun »).
+- Aucun nouvel échec introduit par SMB-04 V2.
+- HEAD, `git status` et SHA-256 des fichiers SMB inchangés après l'exécution.
+
+**Clôture SMB-02 (2026-11-13)** : vérification de compatibilité réalisée par le propriétaire sur cible autorisée (Metasploitable 2, `192.168.57.3`) avec `enum4linux-ng` **1.3.10** (tag `f34e7bb`) : `-A -oJ` accepté, JSON généré et valide, énumération complète. Version et options consignées (critère 1 de SMB-01).
+- Proof: ✓ rapport du propriétaire (2026-11-13) ; **non reproduit par Arena** ; sortie JSON complète non archivée dans le workspace.
+- Constats de la même sortie, transférés à SMB-03 (`"smb_dialects": true`) et SMB-04 (`"None"`, `"none"`, `"not set"`).
+
+**Worktree SMB-01** : ne pas marquer SMB-01 « intégré » avant l'acceptation du propriétaire et l'intégration. `cli.py` et `tests/test_cli.py` sont aussi touchés par CONFIDENCE-CLI : conflit à arbitrer à l'intégration.
+
+**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
 
 ---
 
