@@ -24,6 +24,8 @@ from core.finding import Category, Confidence, FindingStatus, Severity
 from detect.smb_enum import (
     ENUM4LINUX_TIMEOUT_SECONDS,
     SmbEnumerationResult,
+    _SMB1_DIALECT_NAMES,
+    _extract_dialects,
     _parse_enum4linux_output,
     _run_enum4linux_ng,
     normalize_smb_output,
@@ -941,3 +943,364 @@ class TestRunSmbEnumOutcome:
              patch("detect.smb_enum.typer.confirm", return_value=True), \
              patch("detect.smb_enum.subprocess.run", side_effect=_fake_enum_run(rc=2)):
             assert smb_enum(IP, "session-smb01") == []
+
+
+# ---------------------------------------------------------------------------
+# SMB-03 — reconnaissance des dialectes SMBv1 dans la sortie JSON
+# ---------------------------------------------------------------------------
+
+class TestExtractDialects:
+    """Unit tests for _extract_dialects — the two JSON formats from SMB-03."""
+
+    # ── Format 1 : bool ────────────────────────────────────────────────────
+
+    def test_bool_true_returns_empty_dialects_and_imposed_flag(self):
+        """smb_dialects: true → no dialect name invented; smb1_imposed=True returned."""
+        dialects, smb1_imposed = _extract_dialects(True)
+        assert dialects == (), "NT1 must not be invented as a dialect name"
+        assert smb1_imposed is True
+
+    def test_bool_false_returns_empty_dialects_and_no_imposed(self):
+        """smb_dialects: false → no dialect, smb1_imposed=False."""
+        dialects, smb1_imposed = _extract_dialects(False)
+        assert dialects == ()
+        assert smb1_imposed is False
+
+    # ── Format 2 : dict de dialectes ──────────────────────────────────────
+
+    def test_dict_smb1_true_is_included(self):
+        dialects, smb1_imposed = _extract_dialects({"SMB 1.0": True, "SMB 2.0.2": False})
+        assert "SMB 1.0" in dialects
+        assert "SMB 2.0.2" not in dialects
+        assert smb1_imposed is False
+
+    def test_dict_smb1_false_is_excluded(self):
+        dialects, smb1_imposed = _extract_dialects({"SMB 1.0": False, "SMB 2.0.2": True})
+        assert "SMB 1.0" not in dialects
+        assert "SMB 2.0.2" in dialects
+        assert smb1_imposed is False
+
+    def test_dict_multiple_active_dialects(self):
+        d = {"SMB 1.0": True, "SMB 2.0.2": True, "SMB 2.1": True, "SMB 3.0": False}
+        dialects, smb1_imposed = _extract_dialects(d)
+        assert set(dialects) == {"SMB 1.0", "SMB 2.0.2", "SMB 2.1"}
+        assert smb1_imposed is False
+
+    def test_dict_all_false_returns_empty(self):
+        dialects, smb1_imposed = _extract_dialects({"SMB 1.0": False, "SMB 2.0.2": False})
+        assert dialects == ()
+        assert smb1_imposed is False
+
+    def test_dict_string_false_is_not_truthy(self):
+        """The string "false" must not be treated as the boolean True."""
+        dialects, _ = _extract_dialects({"SMB 1.0": "false"})
+        assert "SMB 1.0" not in dialects
+
+    def test_dict_string_true_is_truthy(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "true"})
+        assert "SMB 1.0" in dialects
+
+    def test_dict_integer_zero_is_excluded(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": 0})
+        assert "SMB 1.0" not in dialects
+
+    def test_dict_empty_key_is_skipped(self):
+        dialects, _ = _extract_dialects({"": True, "SMB 2.0.2": True})
+        assert "" not in dialects
+        assert "SMB 2.0.2" in dialects
+
+    # ── Fallback / edge cases ──────────────────────────────────────────────
+
+    def test_list_of_names_uses_fallback(self):
+        """Plain list → original _as_strings behaviour, unchanged."""
+        dialects, smb1_imposed = _extract_dialects(["SMBv1", "SMB2"])
+        assert "SMBv1" in dialects
+        assert "SMB2" in dialects
+        assert smb1_imposed is False
+
+    def test_none_returns_empty(self):
+        dialects, smb1_imposed = _extract_dialects(None)
+        assert dialects == ()
+        assert smb1_imposed is False
+
+    def test_string_value_uses_fallback(self):
+        dialects, smb1_imposed = _extract_dialects("SMBv1")
+        assert "SMBv1" in dialects
+        assert smb1_imposed is False
+
+
+class TestSMB1DialectNames:
+    def test_contains_all_expected_variants(self):
+        for name in ("NT1", "SMBv1", "SMB 1.0", "SMB1"):
+            assert name in _SMB1_DIALECT_NAMES, f"{name!r} missing from _SMB1_DIALECT_NAMES"
+
+    def test_does_not_contain_smb2_or_smb3(self):
+        for name in ("SMB 2.0.2", "SMB 2.1", "SMB 3.0", "SMB2", "SMB3"):
+            assert name not in _SMB1_DIALECT_NAMES, f"{name!r} should not be in _SMB1_DIALECT_NAMES"
+
+
+class TestSMB03NormalizeDialects:
+    """Integration tests: JSON normalize + Finding detection for SMB-03 formats."""
+
+    # ── Format 1 (bool) ───────────────────────────────────────────────────
+
+    def test_bool_true_produces_smbv1_finding(self):
+        raw = json.dumps({"smb_dialects": True})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        services = [f.target_service for f in findings]
+        assert "SMBv1" in services
+
+    def test_bool_false_produces_no_smbv1_finding(self):
+        raw = json.dumps({"smb_dialects": False})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_bool_true_finding_has_correct_severity(self):
+        raw = json.dumps({"smb_dialects": True})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        smb1 = next(f for f in findings if f.target_service == "SMBv1")
+        from core.finding import Severity
+        assert smb1.severity == Severity.HIGH
+
+    def test_bool_true_evidence_uses_imposed_flag_not_dialect_name(self):
+        """smb_dialects:true → evidence uses smb1_imposed:true, never a dialect name."""
+        raw = json.dumps({"smb_dialects": True})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        smb1 = next(f for f in findings if f.target_service == "SMBv1")
+        evidence = json.loads(smb1.evidence.raw)
+        # Must have smb1_imposed flag, not a invented dialect name
+        assert evidence.get("smb1_imposed") is True
+        assert "dialects" not in evidence, "no dialect list for imposed case"
+        assert "NT1" not in str(evidence), "NT1 must not be invented"
+        assert "True" not in str(evidence.get("dialects", "")), "bool repr must not appear"
+
+    # ── Format 2 (dict) ───────────────────────────────────────────────────
+
+    def test_dict_smb10_true_produces_smbv1_finding(self):
+        raw = json.dumps({"smb_dialects": {"SMB 1.0": True, "SMB 2.0.2": False}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_dict_smb10_false_produces_no_smbv1_finding(self):
+        raw = json.dumps({"smb_dialects": {"SMB 1.0": False, "SMB 2.0.2": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_dict_multiple_dialects_no_smb1(self):
+        raw = json.dumps({"smb_dialects": {"SMB 2.0.2": True, "SMB 2.1": True, "SMB 3.0": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_dict_smb10_string_false_no_finding(self):
+        """'false' as a string value must not trigger SMBv1 finding."""
+        raw = json.dumps({"smb_dialects": {"SMB 1.0": "false"}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    # ── Clé "dialects" (alias attendu par le code) ────────────────────────
+
+    def test_dialects_key_bool_true_does_not_trigger_smb1_imposed(self):
+        """V3: 'dialects':true is a generic alias; smb1_imposed requires 'smb_dialects':true."""
+        raw = json.dumps({"dialects": True})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings), (
+            "'dialects':true (generic) must not trigger SMBv1 finding; only 'smb_dialects':true can"
+        )
+
+    def test_dialects_key_dict_smb10(self):
+        raw = json.dumps({"dialects": {"SMB 1.0": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    # ── Absent ou type inattendu ──────────────────────────────────────────
+
+    def test_missing_dialects_key_no_finding(self):
+        raw = json.dumps({"shares": []})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_null_dialects_no_finding(self):
+        raw = json.dumps({"dialects": None})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    # ── Non-régression des formats existants ─────────────────────────────
+
+    def test_list_smbv1_still_works(self):
+        """Original list format ["SMBv1"] continues to produce a Finding."""
+        raw = json.dumps({"dialects": ["SMBv1"]})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_list_nt1_still_works(self):
+        raw = json.dumps({"dialects": ["NT1"]})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_list_smb2_no_smbv1_finding(self):
+        raw = json.dumps({"dialects": ["SMB2", "SMB3"]})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_normalize_smb_output_bool_true_roundtrip(self):
+        """normalize_smb_output(json) → smb1_imposed=True, dialects empty (no NT1 invented)."""
+        raw = json.dumps({"smb_dialects": True})
+        result = normalize_smb_output(raw, "192.168.57.3")
+        assert result.smb1_imposed is True
+        assert result.dialects == (), "NT1 must not be invented in dialects"
+
+    def test_normalize_smb_output_dict_roundtrip(self):
+        raw = json.dumps({"smb_dialects": {"SMB 1.0": True, "SMB 2.0.2": False}})
+        result = normalize_smb_output(raw, "192.168.57.3")
+        assert "SMB 1.0" in result.dialects
+        assert "SMB 2.0.2" not in result.dialects
+
+
+class TestExtractDialectsConf02:
+    """CONF-02: unknown/unrecognised string values must not trigger a Finding."""
+
+    def test_string_zero_is_not_active(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "0"})
+        assert "SMB 1.0" not in dialects
+
+    def test_string_none_lowercase_is_not_active(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "none"})
+        assert "SMB 1.0" not in dialects
+
+    def test_string_None_mixed_case_is_not_active(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "None"})
+        assert "SMB 1.0" not in dialects
+
+    def test_string_not_set_is_not_active(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "not set"})
+        assert "SMB 1.0" not in dialects
+
+    def test_string_unsupported_is_not_active(self):
+        dialects, _ = _extract_dialects({"SMB 1.0": "unsupported"})
+        assert "SMB 1.0" not in dialects
+
+    def test_no_smbv1_finding_for_unknown_string_values(self):
+        for s in ("0", "none", "None", "not set", "unsupported"):
+            raw = json.dumps({"smb_dialects": {"SMB 1.0": s}})
+            findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-conf02")
+            assert not any(f.target_service == "SMBv1" for f in findings),                 f"SMBv1 finding wrongly triggered for SMB 1.0: {s!r}"
+
+
+class TestSMB03Risq01Priority:
+    """RISQ-01: smb_dialects/dialects key takes priority over generic 'protocol'."""
+
+    def test_protocol_key_alone_no_smb1_finding(self):
+        """protocol='SMB2' alone should not trigger SMBv1."""
+        raw = json.dumps({"protocol": "SMB2"})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq01")
+        assert not any(f.target_service == "SMBv1" for f in findings)
+
+    def test_smb_dialects_wins_over_protocol(self):
+        """When both 'protocol':'SMB2' and 'smb_dialects':{'SMB 1.0':true} are present,
+        smb_dialects wins and SMBv1 is correctly detected."""
+        raw = json.dumps({"protocol": "SMB2", "smb_dialects": {"SMB 1.0": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq01")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_protocol_string_smbv1_still_detected_via_fallback(self):
+        """protocol='SMBv1' as a plain string still triggers detection via fallback."""
+        raw = json.dumps({"protocol": "SMBv1"})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq01")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+
+class TestSMB03Risq02CaseInsensitive:
+    """RISQ-02: dialect name comparison is case-insensitive for _SMB1_DIALECT_NAMES."""
+
+    def test_smb_1_0_lowercase_is_recognised(self):
+        """'smb 1.0' (all lower) should be recognised as SMBv1."""
+        raw = json.dumps({"dialects": {"smb 1.0": True}})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq02")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_nt1_uppercase_still_recognised(self):
+        raw = json.dumps({"dialects": ["NT1"]})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq02")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+    def test_smbv1_mixed_case_recognised(self):
+        raw = json.dumps({"dialects": ["SMBv1"]})
+        findings = _parse_enum4linux_output(raw, "192.168.57.3", "session-risq02")
+        assert any(f.target_service == "SMBv1" for f in findings)
+
+
+class TestSMB03V3Provenance:
+    """SMB-03 V3: strict provenance — only smb_dialects:true can set smb1_imposed.
+
+    Cases mandated by Antigravity final review.
+    """
+
+    @staticmethod
+    def _smb1(raw_dict):
+        raw = json.dumps(raw_dict)
+        fs = _parse_enum4linux_output(raw, "192.168.57.3", "session-smb03v3")
+        return next((f for f in fs if f.target_service == "SMBv1"), None)
+
+    def test_smb_dialects_false_wins_over_protocol_true(self):
+        """smb_dialects:false must not be overridden by protocol:true."""
+        f = self._smb1({"smb_dialects": False, "protocol": True})
+        assert f is None, "SMBv1 must not be detected when smb_dialects is explicitly false"
+
+    def test_smb_dialects_true_wins_over_protocol_false(self):
+        """smb_dialects:true is the only source of smb1_imposed."""
+        f = self._smb1({"smb_dialects": True, "protocol": False})
+        assert f is not None
+        ev = json.loads(f.evidence.raw)
+        assert ev.get("smb1_imposed") is True
+        assert "dialects" not in ev
+
+    def test_smb_dialects_false_wins_over_smbprotocol_true(self):
+        f = self._smb1({"smb_dialects": False, "smbprotocol": True})
+        assert f is None
+
+    def test_smb_dialects_empty_list_wins_over_protocol_smbv1(self):
+        """smb_dialects:[] is an explicit empty observation; protocol:SMBv1 must be ignored."""
+        f = self._smb1({"smb_dialects": [], "protocol": "SMBv1"})
+        assert f is None
+
+    def test_smb_dialects_empty_dict_wins_over_protocol_smbv1(self):
+        """smb_dialects:{} is an explicit empty observation."""
+        f = self._smb1({"smb_dialects": {}, "protocol": "SMBv1"})
+        assert f is None
+
+    def test_smb_dialects_null_wins_over_protocol_smbv1(self):
+        """smb_dialects:null is an explicit null observation; protocol must be ignored."""
+        f = self._smb1({"smb_dialects": None, "protocol": "SMBv1"})
+        assert f is None
+
+    def test_protocol_true_alone_never_triggers_smb1_imposed(self):
+        """protocol:true (generic alias) must never produce smb1_imposed=True."""
+        f = self._smb1({"protocol": True})
+        assert f is None, "protocol:true must not trigger SMBv1 finding"
+
+    def test_dialects_true_alone_never_triggers_smb1_imposed(self):
+        """dialects:true (generic alias) must never produce smb1_imposed=True."""
+        f = self._smb1({"dialects": True})
+        assert f is None, "dialects:true (generic) must not trigger SMBv1 finding"
+
+    def test_smb_dialects_true_evidence_has_imposed_flag_not_dialect_key(self):
+        """Evidence for smb_dialects:true contains smb1_imposed but not dialects."""
+        f = self._smb1({"smb_dialects": True})
+        assert f is not None
+        ev = json.loads(f.evidence.raw)
+        assert ev.get("smb1_imposed") is True
+        assert "dialects" not in ev
+        assert "NT1" not in str(ev)
+
+    def test_smb_dialects_dict_evidence_has_dialects_not_imposed_flag(self):
+        """Evidence for smb_dialects:{SMB 1.0:true} contains dialects but not smb1_imposed."""
+        f = self._smb1({"smb_dialects": {"SMB 1.0": True}})
+        assert f is not None
+        ev = json.loads(f.evidence.raw)
+        assert "dialects" in ev
+        assert "smb1_imposed" not in ev
+
+    def test_no_finding_cannot_affirm_success_that_did_not_occur(self):
+        """When smb_dialects:false, no Finding exists to affirm success."""
+        f = self._smb1({"smb_dialects": False})
+        assert f is None

@@ -96,6 +96,9 @@ class SmbEnumerationResult:
     anonymous_share_access: Optional[bool] = None
     password_policy: Optional[dict] = None   # {"min_password_length": int, "lockout_threshold": int}
     raw_output: str = ""
+    smb1_imposed: bool = False   # True when smb_dialects JSON value is bool True
+                                  # (enum4linux-ng enforce_smb1 succeeded). Never
+                                  # used as a dialect name in .dialects.
     source_format: str = "text"
 
 
@@ -343,11 +346,24 @@ def _parse_enum4linux_output(
                         source="enum4linux-ng session and share check",
                     ))
 
-    if "NT1" in result.dialects or "SMBv1" in result.dialects:
-        add_finding("SMBv1", Category.SERVICE, Severity.HIGH, _analysis_evidence(
-            dialects=[d for d in result.dialects if d in ("NT1", "SMBv1")],
-            source="enum4linux-ng dialect check",
-        ))
+    # SMBv1 is detected in two distinct ways:
+    # 1. smb1_imposed=True : enum4linux-ng bool-True (enforce_smb1 succeeded).
+    #    Evidence distinguishes this case from a named dialect.
+    # 2. A named SMBv1 dialect in result.dialects (case-insensitive comparison).
+    _smb1_from_name = [d for d in result.dialects
+                       if d.lower() in _SMB1_DIALECT_NAMES_LOWER]
+    if result.smb1_imposed or _smb1_from_name:
+        if result.smb1_imposed:
+            _smb1_evidence = _analysis_evidence(
+                smb1_imposed=True,
+                source="enum4linux-ng enforce_smb1 succeeded (smb_dialects: true)",
+            )
+        else:
+            _smb1_evidence = _analysis_evidence(
+                dialects=_smb1_from_name,
+                source="enum4linux-ng dialect check",
+            )
+        add_finding("SMBv1", Category.SERVICE, Severity.HIGH, _smb1_evidence)
 
     if result.signing_required is False:
         add_finding("smb_signing_not_required", Category.CONFIG, Severity.MEDIUM,
@@ -563,6 +579,82 @@ def _extract_password_policy(raw: Any) -> Optional[dict]:
         return None
 
 
+
+# _SMB1_DIALECT_NAMES: canonical SMBv1 identifiers found in enum4linux-ng JSON
+# dict-format dialect maps. Comparison is case-insensitive (see _extract_dialects).
+# "NT1" is kept for backward compatibility with legacy list-format output only.
+_SMB1_DIALECT_NAMES: Tuple[str, ...] = ("NT1", "SMBv1", "SMB 1.0", "SMB1")
+
+# Normalised lower-case set for case-insensitive look-up
+_SMB1_DIALECT_NAMES_LOWER: frozenset = frozenset(n.lower() for n in _SMB1_DIALECT_NAMES)
+
+
+def _extract_dialects(value: Any) -> Tuple[Tuple[str, ...], bool]:
+    """Extract dialect names and the SMBv1-imposed flag from a JSON dialect value.
+
+    enum4linux-ng 1.3.10 may produce one of three formats for smb_dialects:
+
+    * ``true`` (bool)   — SMBv1-only path: enum4linux-ng called enforce_smb1()
+      and the boolean records its success.  No dialect *name* is known from
+      the JSON in this case.  Returns ((), True): an empty dialect tuple and
+      smb1_imposed=True.  The caller must NOT place a synthetic name ("NT1")
+      into the dialect list.
+
+    * ``false`` (bool)  — enforce_smb1 failed or SMBv1 not present.
+      Returns ((), False).
+
+    * ``{<name>: <bool>, …}`` (dict) — dialect negotiation map.  Returns
+      (names_of_active_dialects, False).  A dialect is considered active only
+      when its value is explicitly True according to ``_as_bool``; unknown /
+      unrecognised values (None from _as_bool) are treated as inactive so that
+      "0", "none", "None", "not set", "unsupported" do not trigger a Finding.
+      Comparison against _SMB1_DIALECT_NAMES is case-insensitive.
+
+    * Any other type → fallback to ``_as_strings`` with smb1_imposed=False.
+
+    Returns:
+        Tuple[Tuple[str, ...], bool]: (dialect_names, smb1_imposed)
+    """
+    if isinstance(value, bool):
+        return (), value   # True → imposed; False → not present
+    if isinstance(value, dict):
+        names: List[str] = []
+        for k, v in value.items():
+            name = _as_text(k)
+            if not name:
+                continue
+            enabled = _as_bool(v)
+            if enabled is True:          # only explicit True; None → skip
+                names.append(name)
+        return tuple(dict.fromkeys(names)), False
+    # list / str / int / None → original behaviour
+    return _as_strings(value), False
+
+
+_MISSING = object()   # sentinel — distinct from None, False, {}, []
+
+
+def _find_key_value(document: Any, aliases: set[str]) -> Tuple[bool, Any]:
+    """Like _find_value but distinguishes absence from a falsy value.
+
+    Returns:
+        (True, value)  — a key matching ``aliases`` was found at the top
+                         level of the dict; ``value`` may be False, None,
+                         [], {}, or any other falsy object.
+        (False, None)  — no matching key exists in the top-level dict.
+
+    Only the top level is searched (no recursive descent), because the
+    caller needs to know that the key belongs to the root document, not
+    to a nested sub-structure.
+    """
+    if not isinstance(document, dict):
+        return False, None
+    for key, value in document.items():
+        if _normalize_key(str(key)) in aliases:
+            return True, value
+    return False, None
+
+
 def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnumerationResult:
     """Read common enum4linux-ng-style aliases without leaking them outward."""
     shares = _normalize_shares(_find_value(document, {"shares", "sharelist", "shareenum"}))
@@ -571,7 +663,35 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
     if accessible is None and shares:
         accessible = any(share.accessible is True for share in shares)
     signing = _as_bool(_find_value(document, {"signingrequired", "smbsigningrequired", "signing"}))
-    dialect_value = _find_value(document, {"dialects", "smbdialects", "protocol", "smbprotocol"})
+    # ── Dialect extraction (provenance-aware) ───────────────────────────────
+    # Rule: smb1_imposed=True is only valid when the JSON key is exactly
+    # "smb_dialects" (alias "smbdialects") AND its value is the boolean True.
+    # This matches the confirmed behaviour of enum4linux-ng 1.3.10 where a
+    # boolean True in that key means enforce_smb1() succeeded.
+    #
+    # Algorithm:
+    #   Step 1 — search the CANONICAL key ("smbdialects" / "smb_dialects").
+    #     If the key IS present, use its value exclusively regardless of
+    #     truthiness.  smb1_imposed may be set here.
+    #   Step 2 — only if the canonical key is ABSENT, fall back to "dialects"
+    #     and then to "protocol"/"smbprotocol".  These generic aliases may
+    #     supply dialect names or structures but NEVER smb1_imposed=True.
+    _canonical_found, _canonical_val = _find_key_value(
+        document, {"smbdialects"}      # "smb_dialects" normalises to "smbdialects"
+    )
+    if _canonical_found:
+        # Canonical key present: respect its value, even if falsy.
+        # _extract_dialects handles bool/dict/list/None correctly.
+        _dialects_tuple, _smb1_imposed = _extract_dialects(_canonical_val)
+    else:
+        # Canonical key absent: try "dialects" first, then generic aliases.
+        # Boolean True from these aliases must NOT set smb1_imposed.
+        _fallback_found, _fallback_val = _find_key_value(document, {"dialects"})
+        if not _fallback_found:
+            _fallback_val = _find_value(document, {"protocol", "smbprotocol"})
+        _dialects_tuple, _raw_imposed = _extract_dialects(_fallback_val)
+        # Strip smb1_imposed: generic aliases cannot guarantee enforce_smb1
+        _smb1_imposed = False
     policy_raw = _find_value(document, {"passwordpolicy", "passwdpolicy", "passwordpolicies",
                                         "password_policy", "passpol"})
     return SmbEnumerationResult(
@@ -581,7 +701,8 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
         domain=_as_text(_find_value(document, {"domain", "workgroup", "domainname"})),
         sid=_as_text(_find_value(document, {"sid", "domainsid"})),
         mac=_as_text(_find_value(document, {"mac", "macaddress"})),
-        dialects=_as_strings(dialect_value),
+        dialects=_dialects_tuple,
+        smb1_imposed=_smb1_imposed,
         signing_required=signing,
         shares=shares,
         users=_as_strings(_find_value(document, {"users", "userlist"})),
