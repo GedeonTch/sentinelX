@@ -308,7 +308,7 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 | CLI-01 | Annulation confondue avec « aucun résultat » : après « SMB enumeration cancelled », la CLI affiche « No SMB findings » (`run_smb_enum` retourne `[]` dans les deux cas) | P3 | Proposition **non bloquante**, hors séquence §5.1 ; non autorisée ; contrat à décider (option A : troisième état ; option B : confirmation déplacée hors `run_smb_enum`) | SMB-01 (en worktree) ; décision de contrat |
 | CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
 | NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
-| SMB-05 | Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone (C1-C5, D-SMB-01, D-SMB-02, scoring, tests) | P2 | **Accepté par le propriétaire le 2026-11-15 ; commité `<SMB-05-SHA>` sur `a4-arena` ; aucun push** : tests SMB 203 passed, CLI 108 passed, scoring 9 passed, `git diff --check` conforme ; test terrain propriétaire sur Metasploitable2 (35 utilisateurs, 10 résultats, 3 Security Findings scorés 45/70/70, session SQLite persistante) | SMB-01, SMB-02, SMB-03, SMB-04 |
+| SMB-05 | Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone (C1-C5, D-SMB-01, D-SMB-02, scoring, tests) | P2 | **Accepté par le propriétaire le 2026-11-15 ; commité `ac2d6bd` sur `a4-arena` ; aucun push** : tests SMB 203 passed, CLI 108 passed, scoring 9 passed, `git diff --check` conforme ; test terrain propriétaire sur Metasploitable2 (35 utilisateurs, 10 résultats, 3 Security Findings scorés 45/70/70, session SQLite persistante) | SMB-01, SMB-02, SMB-03, SMB-04 |
 
 **Précisions SMB-03 / SMB-04 / SMB-05 / D6** : SMB-03 accepté le 2026-11-14 et commité dans SMB-05. SMB-04 accepté le 2026-11-15 et commité dans SMB-05. SMB-05 (alignement JSON + persistance + restitution) commité le 2026-11-15 — voir section SMB-05 ci-dessous. D6 reste indépendant et hors de cette séquence.
 
@@ -335,7 +335,7 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 ### SMB-05 — Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone
 
 **Objectif :** corriger les décalages entre la sortie JSON réelle d'enum4linux-ng 1.3.10 et les parseurs SentinelX ; activer la persistance SQLite de `smb_enum_cmd` ; améliorer la restitution CLI et le scoring.
-**Branche :** `a4-arena` | **Commit :** `<SMB-05-SHA>` | **Base :** `ed646fc` (SMB-04 V2)
+**Branche :** `a4-arena` | **Commit :** `ac2d6bd` | **Base :** `ed646fc` (SMB-04 V2)
 **Fichiers :** `detect/smb_enum.py`, `tests/test_smb_enum.py`, `cli.py`, `tests/test_cli.py`
 **Statut :** `[x]` **Accepté et commité le 2026-11-15**
 
