@@ -1500,22 +1500,31 @@ class TestCleanup:
 # ---------------------------------------------------------------------------
 
 class TestStandaloneCommands:
-    def test_smb_enum_calls_module_without_db_persist(self):
-        finding = make_finding(module="smb_enum", target_port=445, target_service="smb")
-        with patch("detect.smb_enum.run_smb_enum", return_value=[finding]) as smb, \
-             patch("cli._render_findings_table") as render, \
-             patch("core.database.save_findings") as save:
-            result = runner.invoke(
-                app,
-                ["smb_enum", "--target", "192.168.1.50"],
-            )
+    def test_smb_enum_persists_scored_findings(self):
+        """D-SMB-01: smb_enum_cmd creates a session, scores, and persists findings."""
+        from core.finding import Severity, Confidence, Exposure, Category
+        finding = make_finding(
+            module="smb_enum", target_port=445, target_service="SMBv1",
+            severity=Severity.HIGH, confidence=Confidence.CONFIRMED,
+            exposure=Exposure.INTERNAL, category=Category.SERVICE,
+        )
+        captured_save = {}
+        def capture_save(findings):
+            captured_save["findings"] = list(findings)
+        with patch("detect.smb_enum.run_smb_enum", return_value=[finding]) as smb,              patch("core.database.save_findings", side_effect=capture_save) as save,              patch("cli._render_smb_results"):
+            result = runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
         assert result.exit_code == 0
         smb.assert_called_once()
         assert smb.call_args.args[0] == "192.168.1.50"
-        assert str(smb.call_args.args[1]).startswith("standalone-")
-        render.assert_called_once_with([finding])
-        save.assert_not_called()
-
+        assert str(smb.call_args.args[1]).startswith("session-")
+        save.assert_called_once()
+        saved = captured_save.get("findings", [])
+        assert len(saved) == 1, f"expected 1 finding, got {len(saved)}"
+        assert saved[0].risk_score is not None, (
+            "risk_score must be set before persistence — score_findings return value must be used"
+        )
+        from core.risk_scorer import calculate_score
+        assert saved[0].risk_score == calculate_score(saved[0])
     def test_creds_check_calls_module_without_db_persist(self):
         from contextlib import nullcontext
 
@@ -1633,6 +1642,120 @@ class TestContextualSuggestions:
 # config
 # ---------------------------------------------------------------------------
 
+
+
+class TestSmbEnumScoring:
+    """Verify that smb_enum_cmd scores findings before persistence."""
+
+    def test_risk_score_set_before_save(self):
+        """score_findings return value must be used; persisted findings must have risk_score."""
+        from core.finding import Severity, Confidence, Exposure, Category
+        finding = make_finding(
+            module="smb_enum", target_port=445, target_service="SMBv1",
+            severity=Severity.HIGH, confidence=Confidence.CONFIRMED,
+            exposure=Exposure.INTERNAL, category=Category.SERVICE,
+        )
+        captured = {}
+        def capture(findings):
+            captured["findings"] = list(findings)
+        with patch("detect.smb_enum.run_smb_enum", return_value=[finding]), \
+             patch("core.database.save_findings", side_effect=capture), \
+             patch("cli._render_smb_results"):
+            result = runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
+        assert result.exit_code == 0
+        saved = captured.get("findings", [])
+        assert saved, "no findings captured"
+        assert all(f.risk_score is not None for f in saved), (
+            "all eligible findings must be scored before persistence"
+        )
+
+    def test_inventory_observation_risk_score_stays_none(self):
+        """Inventory observations (device_fingerprint) must not receive a score."""
+        from core.finding import Severity, Confidence, Exposure, Category
+        inv = make_finding(
+            module="device_fingerprint", target_port=None, target_service="linux_host",
+            severity=Severity.INFO, confidence=Confidence.PROBABLE,
+            exposure=Exposure.INTERNAL, category=Category.NETWORK,
+        )
+        captured = {}
+        def capture(findings):
+            captured["findings"] = list(findings)
+        with patch("detect.smb_enum.run_smb_enum", return_value=[inv]), \
+             patch("core.database.save_findings", side_effect=capture), \
+             patch("cli._render_smb_results"):
+            runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
+        saved = captured.get("findings", [])
+        for f in [x for x in saved if x.module == "device_fingerprint"]:
+            assert f.risk_score is None, f"inventory observation must not be scored"
+
+    def test_scored_findings_match_risk_scorer(self):
+        """Scores from smb_enum_cmd must equal direct risk_scorer output."""
+        from core.finding import Severity, Confidence, Exposure, Category
+        from core.risk_scorer import calculate_score
+        finding = make_finding(
+            module="smb_enum", target_port=445, target_service="smb_signing_not_required",
+            severity=Severity.MEDIUM, confidence=Confidence.CONFIRMED,
+            exposure=Exposure.INTERNAL, category=Category.CONFIG,
+        )
+        captured = {}
+        def capture(findings):
+            captured["findings"] = list(findings)
+        with patch("detect.smb_enum.run_smb_enum", return_value=[finding]), \
+             patch("core.database.save_findings", side_effect=capture), \
+             patch("cli._render_smb_results"):
+            runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
+        saved = captured.get("findings", [])
+        for f in saved:
+            if f.risk_score is not None:
+                expected = calculate_score(f)
+                assert f.risk_score == expected, (
+                    f"{f.target_service}: risk_score {f.risk_score} != {expected}"
+                )
+
+
+
+
+
+class TestFormatEvidenceRaw:
+    """Tests for cli._format_evidence_raw — placed near CLI rendering tests."""
+
+    @staticmethod
+    def _fmt(raw):
+        from cli import _format_evidence_raw
+        return _format_evidence_raw(raw)
+
+    def test_none_returns_dash(self):
+        assert self._fmt(None) == "\u2014"
+
+    def test_empty_string_returns_dash(self):
+        assert self._fmt("") == "\u2014"
+
+    def test_valid_json_is_pretty_printed(self):
+        import json
+        raw = json.dumps({"share": "ADMIN$", "source": "test"})
+        result = self._fmt(raw)
+        assert "\n" in result, "pretty-print must produce newlines"
+        assert '"ADMIN$"' in result
+
+    def test_json_truncated_at_2000_chars(self):
+        import json
+        big = json.dumps({"key": "x" * 3000})
+        result = self._fmt(big)
+        assert len(result) <= 2100, f"result too long: {len(result)}"
+        assert "truncated" in result.lower(), "truncation must be indicated"
+
+    def test_plain_text_returned_up_to_500_chars(self):
+        raw = "A" * 600
+        result = self._fmt(raw)
+        assert "truncated" in result.lower() or len(result) <= 510
+
+    def test_important_info_not_silently_lost(self):
+        """The beginning of a 600-char plain text must be preserved."""
+        raw = "IMPORTANT:" + "x" * 599
+        result = self._fmt(raw)
+        assert "IMPORTANT:" in result, "beginning of content must be preserved"
+
+
 class TestConfig:
     def test_config_show_empty(self, tmp_path):
         """config show with no config must not crash."""
@@ -1694,16 +1817,26 @@ class TestSmbEnumCliOutcomes:
         return result, calls, render, messages
 
     def test_success_with_results_renders_findings_once(self):
-        import json
-
+        """smb_enum_cmd calls _render_smb_results once, persists findings."""
+        import json, subprocess
         export = json.dumps({"shares": [{"name": "Public", "accessible": True}]})
-        result, calls, render, messages = self._invoke(export=export)
+        calls_e = []
+        def fake_run(command, **kwargs):
+            calls_e.append(list(command))
+            base = command[command.index("-oJ") + 1]
+            with open(base + ".json", "w") as fh:
+                fh.write(export)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        with patch("detect.smb_enum._resolve_tool_path", return_value="/usr/bin/enum4linux-ng"),              patch("detect.smb_enum.typer.confirm", return_value=True),              patch("detect.smb_enum.subprocess.run", side_effect=fake_run),              patch("cli._render_smb_results") as render_smb,              patch("core.database.save_findings") as save:
+            result = runner.invoke(app, ["smb_enum", "--target", "192.168.1.50"])
         assert result.exit_code == 0
-        assert len(calls) == 1
-        render.assert_called_once()
-        assert [f.target_service for f in render.call_args.args[0]] == ["Public"]
-        assert not any("No SMB findings" in m for m in messages)
-
+        assert len(calls_e) == 1, "enum4linux-ng must be invoked exactly once"
+        render_smb.assert_called_once()
+        _target, _findings, _session_id = render_smb.call_args.args
+        assert _target == "192.168.1.50"
+        assert isinstance(_findings, list)
+        assert str(_session_id).startswith("session-")
+        save.assert_called_once()
     def test_success_without_results_shows_normal_message(self):
         result, calls, render, messages = self._invoke(export="{}")
         assert result.exit_code == 0

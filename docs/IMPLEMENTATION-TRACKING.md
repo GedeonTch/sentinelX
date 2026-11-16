@@ -287,7 +287,7 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 | SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | **Implémenté en worktree**, **non intégré** (branche `smb-01`, base `9034f01`, 4 fichiers non commités, diff `aa1d9d58…c4a4bf`) ; tests ciblés 189 passed ; suite complète 2112 passed / 1 failed (base 2082 passed / 1 failed ; échec commun `test_installed_standalone_command_exact_session`, environnement) ; revue Kiro CONFORME (rapportée, non reproduite par Arena) ; Revue Nova : avis favorable sur la base du diff et des rapports transmis ; implémentation et tests non reproduits indépendamment ; **acceptation propriétaire requise** | Étape 0 |
 | SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | **Clôturé** selon les preuves disponibles (voir bloc de clôture sous le tableau) | SMB-01 |
 | SMB-03 | Reconnaissance SMBv1 dans le JSON `enum4linux-ng` : `smb_dialects: true` (marqueur d'imposition SMBv1) et dict de dialectes booléens (clés `SMB 1.0`, …) | P2 | **Implémenté (V3), non commité** ; revue indépendante Antigravity CONFORME ; **accepté par le propriétaire le 2026-11-14** ; diff isolé `aa2cb91a…afffe7f2f` ; tests SMB 145 passed ; tests CLI 7 passed (SMB-related) ; modifications présentes dans le dépôt local, aucun commit ni push | SMB-01 (en worktree), SMB-02 |
-| SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Implémenté V2, non commité** ; revue indépendante Antigravity CONFORME (2026-11-15) ; diff isolé `4e833b58…6872856` (`detect/smb_enum.py` `40c69ea8…`, `tests/test_smb_enum.py` `79445a41…`) ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale 2026-11-15 : **2 196 passed, 2 failed** en 3 140,69 s (voir bloc de résultats sous le tableau) ; HEAD inchangé (`9034f01`), aucun commit ni push ; **acceptation propriétaire requise avant intégration** | SMB-01 (en worktree), SMB-02, SMB-03 |
+| SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Accepté par le propriétaire ; commité dans SMB-05** ; revue indépendante Antigravity CONFORME (2026-11-15) ; diff isolé `4e833b58…6872856` ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale : 2 196 passed, 2 failed (échecs environnement préexistants) ; intégré au commit SMB-05 | SMB-01, SMB-02, SMB-03 |
 | A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
 | CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
 | D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
@@ -308,8 +308,9 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 | CLI-01 | Annulation confondue avec « aucun résultat » : après « SMB enumeration cancelled », la CLI affiche « No SMB findings » (`run_smb_enum` retourne `[]` dans les deux cas) | P3 | Proposition **non bloquante**, hors séquence §5.1 ; non autorisée ; contrat à décider (option A : troisième état ; option B : confirmation déplacée hors `run_smb_enum`) | SMB-01 (en worktree) ; décision de contrat |
 | CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
 | NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
+| SMB-05 | Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone (C1-C5, D-SMB-01, D-SMB-02, scoring, tests) | P2 | **Accepté par le propriétaire le 2026-11-15 ; commité `<SMB-05-SHA>` sur `a4-arena` ; aucun push** : tests SMB 203 passed, CLI 108 passed, scoring 9 passed, `git diff --check` conforme ; test terrain propriétaire sur Metasploitable2 (35 utilisateurs, 10 résultats, 3 Security Findings scorés 45/70/70, session SQLite persistante) | SMB-01, SMB-02, SMB-03, SMB-04 |
 
-**Précisions SMB-03 / SMB-04 / D6** : SMB-03 accepté le 2026-11-14 (non commité). SMB-04 implémenté V2, revue Antigravity CONFORME (2026-11-15), non commité, acceptation propriétaire requise. Priorité P2 confirmée. Dépendent de SMB-01 (en worktree) et SMB-02 (clôturé). D6 reste indépendant et hors de cette séquence.
+**Précisions SMB-03 / SMB-04 / SMB-05 / D6** : SMB-03 accepté le 2026-11-14 et commité dans SMB-05. SMB-04 accepté le 2026-11-15 et commité dans SMB-05. SMB-05 (alignement JSON + persistance + restitution) commité le 2026-11-15 — voir section SMB-05 ci-dessous. D6 reste indépendant et hors de cette séquence.
 
 **Résultats suite générale SMB-04 V2 (2026-11-15)** :
 - Commande : `HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=.../venv/bin/sentinel bash -c "umask 022 && venv/bin/python -m pytest --tb=short -q"`
@@ -326,6 +327,142 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 **Worktree SMB-01** : ne pas marquer SMB-01 « intégré » avant l'acceptation du propriétaire et l'intégration. `cli.py` et `tests/test_cli.py` sont aussi touchés par CONFIDENCE-CLI : conflit à arbitrer à l'intégration.
 
 **Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
+
+---
+
+---
+
+### SMB-05 — Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone
+
+**Objectif :** corriger les décalages entre la sortie JSON réelle d'enum4linux-ng 1.3.10 et les parseurs SentinelX ; activer la persistance SQLite de `smb_enum_cmd` ; améliorer la restitution CLI et le scoring.
+**Branche :** `a4-arena` | **Commit :** `<SMB-05-SHA>` | **Base :** `ed646fc` (SMB-04 V2)
+**Fichiers :** `detect/smb_enum.py`, `tests/test_smb_enum.py`, `cli.py`, `tests/test_cli.py`
+**Statut :** `[x]` **Accepté et commité le 2026-11-15**
+
+#### Corrections de parsing (C1–C5)
+
+- [x] C1 — `_extract_anonymous_session()` : reconnaît `sessions.null` (enum4linux-ng 1.3.10)
+  - Proof: ✓ `test_sessions_null_true_recognized`, `test_sessions_null_false_recognized`
+- [x] C2/C3 — `_extract_password_policy()` : alias `policy` + sous-sections `domain_password_information` / `domain_lockout_information`
+  - Proof: ✓ `test_policy_nested_structure_produces_finding`
+- [x] C4 — `_extract_share_accessible()` : interprète `access.mapping: ok/denied` ; jamais de déduction WRITE
+  - Proof: ✓ `test_access_mapping_ok_is_accessible`, `test_mapping_ok_never_means_write`
+- [x] C5 — `_extract_users()` : extrait `username` depuis les dicts RID-indexés
+  - Proof: ✓ `test_users_rid_dict_extracts_usernames`
+
+#### Classification ADMIN$ (D-SMB-02)
+
+- [x] `_classify_share(name, accessible)` : MEDIUM seulement si `accessible=True` ; INFO sinon
+  - Proof: ✓ `test_admin_accessible_is_medium`, `test_admin_denied_is_info`, `test_admin_unknown_access_is_info`
+
+#### Persistance et restitution standalone (D-SMB-01)
+
+- [x] `smb_enum_cmd` : session SQLite réelle (`session-xxx`), `save_findings`, `close_session`
+  - Proof: ✓ `test_smb_enum_persists_scored_findings`, `save.assert_called_once()`
+- [x] `_render_smb_results()` : panel inventaire, Security Findings, session ID coloré, commande `findings show` copiable
+  - Proof: ✓ `test_success_with_results_renders_findings_once`
+
+#### Scoring corrigé (P1)
+
+- [x] `findings = score_findings(findings)` — valeur de retour utilisée pour `save_findings` et `_render_smb_results`
+  - Proof: ✓ `TestSmbEnumScoring` : 3 tests ; `risk_score` non None sur findings éligibles
+
+#### Formatage des preuves
+
+- [x] `_format_evidence_raw()` : JSON pretty-print jusqu'à 2 000 chars, texte brut jusqu'à 500 chars
+  - Proof: ✓ `TestFormatEvidenceRaw` : 6 tests dans `test_cli.py`
+
+#### Tests
+
+- [x] `TestSMBFinalisationParsing` (15 tests), `TestMetasploitable2Fixture` (11 tests), `TestSmbEnumScoring` (3), `TestFormatEvidenceRaw` (6), `test_smb_enum_persists_scored_findings`
+  - Proof: ✓ 203 passed (`test_smb_enum.py`), 108 passed (`test_cli.py`) — Antigravity
+- [x] Doublons de classes et fixtures supprimés ; `test_tmp_writable_anonymous_is_high` conservé
+  - Proof: ✓ `git diff --check` rc 0
+
+**Test terrain (propriétaire, Metasploitable2 `192.168.57.3`, 2026-11-15) :**
+- 35 utilisateurs récupérés sous leurs vrais noms
+- Password policy : `min_len=5`, `lockout=0`
+- 10 résultats : 3 Security Findings (scores 45, 70, 70) et 7 Inventory Observations
+- Session SQLite persistante et consultable via `findings show`
+
+**Suite générale (2026-11-15, dernière mesure connue) :** 2 196 passed, 2 failed (deux échecs d'environnement préexistants, non liés à SMB-05).
+
+---
+
+### CLI-UX-01 — Identité SentinelX et cohérence de la restitution CLI
+
+**Objectif :** harmoniser l'expérience CLI de l'ensemble de SentinelX — l'utilisateur interagit avec SentinelX, pas avec Nmap, enum4linux-ng ou les autres outils internes.
+**Statut :** `[ ]` Non commencé. **Implémentation non autorisée.** Ticket de conception.
+**Priorité :** non attribuée — à décider par le propriétaire.
+**Dépendances :** aucune dépendance technique bloquante identifiée ; l'axe B suppose que les modules modifiés sont stables.
+
+#### Périmètre transversal
+
+Deux axes indépendants mais liés :
+
+**Axe A — Présentation des résultats**
+
+Comportement actuel observé : `smb_enum` produit 3 Security Findings et 7 Inventory Observations, mais la distinction n'est pas suffisamment explicite pour l'utilisateur. Les Findings INFO peuvent provenir de modules SMB (observations légitimes) ou de `device_fingerprint` (inventaire) — ils ne sont pas tous équivalents.
+
+Comportement attendu :
+- Séparer visuellement `Security Findings` et `Inventory Observations` dans toutes les commandes standalone.
+- Afficher les décomptes réels de chaque catégorie, calculés dynamiquement (jamais codés en dur).
+- Rendre chaque résultat consultable par son ID.
+- Expliquer clairement Severity, Confidence, Finding State et Score dans `findings show`.
+- Ne pas assimiler automatiquement tous les Findings INFO aux observations d'inventaire sans vérifier `finding.module` et `finding.category`.
+
+Contrats à respecter : T21 (groupement par machine), `Finding.module`, `_is_inventory_observation()` de `cli.py`.
+
+**Axe B — Identité produit**
+
+Comportement actuel observé (exemples) :
+- `detect/smb_enum.py` l.148 : `"[cyan]Starting enum4linux-ng on {target_ip}...[/cyan]"`
+- `detect/smb_enum.py` l.133 : `"[yellow]No output from enum4linux-ng..."` (ancien texte pré-SMB-01, peut subsister dans d'autres messages)
+- `recon/device_fingerprint.py` : messages Nmap exposés à l'utilisateur (à vérifier)
+- `detect/tcp_scan.py` : messages de progression potentiellement liés à Nmap
+
+Comportement attendu :
+- Messages utilisateur formulés du point de vue SentinelX : `"Analyse SMB en cours sur {target}..."` au lieu de `"Starting enum4linux-ng on {target}..."`
+- Même principe pour Nmap, enum4linux-ng, et tout outil externe.
+- **Conserver impérativement** dans `evidence.command` la commande réelle exécutée.
+- **Conserver** le nom de l'outil dans les messages de diagnostic et d'erreur technique (ex. `"enum4linux-ng not found (run 'netlab doctor')"` reste pertinent).
+- **Conserver** les messages de débogage et les sorties de `netlab doctor`.
+
+#### Fichiers et fonctions probablement concernés
+
+| Fichier | Élément | Nature |
+|---|---|---|
+| `detect/smb_enum.py` | `display(f"[cyan]Starting enum4linux-ng on...")` l.~148 | Axe B |
+| `detect/smb_enum.py` | `_report_failure()` — messages d'échec | Axe B (distinction user/debug) |
+| `cli.py` | `_render_smb_results()` — décomptes Security / Inventory | Axe A |
+| `cli.py` | `_render_grouped_findings()`, `_render_security_block()` | Axe A |
+| `cli.py` | `_render_finding_detail()` — libellés Severity/Confidence/Score | Axe A |
+| `recon/device_fingerprint.py` | Messages utilisateur Nmap | Axe B (à vérifier) |
+| `detect/tcp_scan.py` | Messages de progression | Axe B (à vérifier) |
+
+#### Critères d'acceptation
+
+| # | Critère |
+|---|---|
+| CA-1 | `smb_enum` affiche `Security Findings (N)` et `Inventory Observations (M)` avec N et M calculés |
+| CA-2 | `findings show <ID>` affiche Severity / Confidence / Score avec libellés explicatifs |
+| CA-3 | Aucun message utilisateur ne contient `enum4linux-ng`, `nmap`, ou un nom d'outil interne — sauf dans les erreurs de diagnostic, `evidence.command`, et `netlab doctor` |
+| CA-4 | `evidence.command` conserve la commande réelle exécutée |
+| CA-5 | Les tests unitaires mockent `display()` et vérifient l'absence du nom d'outil dans les messages utilisateur normaux |
+| CA-6 | Aucune régression T21 (groupement par machine) ni `_render_grouped_findings` |
+| CA-7 | `_is_inventory_observation()` reste le seul point de classification inventaire |
+
+#### Tests nécessaires
+
+- Mocks de `display()` vérifiant que les messages nominaux ne contiennent pas de noms d'outils.
+- Tests de décompte dynamique Security vs Inventory.
+- Tests de non-régression `_render_grouped_findings`, T21, `findings show`.
+
+#### Risques de régression
+
+- **Moyen** : changer les messages de `display()` peut casser des tests qui assertent leur contenu exact (ex. `TestSmbEnumCliOutcomes` vérifie `"FAILED"`, pas le nom de l'outil — risque limité).
+- **Faible** : les décomptes dynamiques ne modifient pas la logique de Finding.
+- **Nul** : `evidence.command` n'est pas touché par cet axe.
 
 ---
 

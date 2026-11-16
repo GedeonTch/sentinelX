@@ -489,18 +489,142 @@ def _render_passive_report(report) -> None:
 def smb_enum_cmd(
     target: str = typer.Option(..., "--target", "-t", help="IPv4 address of the Windows host."),
 ) -> None:
-    """Enumerate SMB shares/domain via enum4linux. Findings are displayed, not saved."""
+    """Enumerate SMB shares/domain via enum4linux. Findings are persisted and displayed."""
+    import datetime
+    from datetime import timezone
     from detect.smb_enum import run_smb_enum
+    from core.database import close_session, init_db, save_findings, save_session
+    from core.finding import format_finding_id
+    from core.risk_scorer import score_findings
 
-    findings = run_smb_enum(target, _standalone_session_id())
-    if findings is None:
-        # Enumeration failed: the module already displayed the explicit red
-        # error. No "No SMB findings" message, which would contradict it.
+    session_id = f"session-{uuid.uuid4().hex[:8]}"
+    try:
+        init_db(session_id)
+        save_session(
+            session_id,
+            target=target,
+            profile="normal",
+            start_time=datetime.datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        display(f"[red]Could not create session: {escape(str(exc))}[/red]")
         return
+
+    findings = run_smb_enum(target, session_id)
+
+    if findings is None:
+        try:
+            close_session(session_id, status="failed")
+        except Exception:
+            pass
+        return
+
     if findings:
-        _render_findings_table(findings)
-    else:
+        # score_findings returns NEW objects (uses dataclasses.replace);
+        # the return value must be used for all subsequent operations.
+        findings = score_findings(findings)
+        try:
+            save_findings(findings)
+        except Exception as exc:
+            display(f"[yellow]Warning: could not persist findings: {escape(str(exc))}[/yellow]")
+    try:
+        close_session(session_id, status="completed")
+    except Exception:
+        pass
+
+    _render_smb_results(target, findings, session_id)
+
+
+def _render_smb_results(target: str, findings: list, session_id: str) -> None:
+    """Render SMB enumeration results: inventory, security findings, session info."""
+    from core.finding import format_finding_id
+
+    if not findings:
         display(f"[yellow]No SMB findings for {target}.[/yellow]")
+        display(f"[bold green]Session :[/bold green] {session_id}")
+        return
+
+    # ── A. Inventory / configuration panel ──────────────────────────────
+    from detect.smb_enum import normalize_smb_output
+    # Extract inventory info directly from first finding's evidence
+    # (re-derive from findings metadata)
+    domain_names = [f.target_service for f in findings
+                    if f.module == "smb_enum" and f.category.value == "network"
+                    and f.target_service not in ("smb_access_refused", "smb_anonymous_share_access",
+                                                  "smb_users_enumerated")]
+    users_findings = [f for f in findings if f.target_service == "smb_users_enumerated"]
+    policy_findings = [f for f in findings if f.target_service == "smb_weak_password_policy"]
+
+    inv_lines: list = []
+    if domain_names:
+        inv_lines.append(f"  [bold]Workgroup/Domain :[/bold] {domain_names[0]}")
+    if users_findings:
+        import json as _json
+        try:
+            ev = _json.loads(users_findings[0].evidence.raw)
+            usernames = ev.get("users", [])
+            count = ev.get("count", len(usernames))
+            inv_lines.append(f"  [bold]Users found      :[/bold] {count}")
+            if usernames:
+                inv_lines.append(f"  [bold]Usernames        :[/bold] {', '.join(str(u) for u in usernames)}")
+        except Exception:
+            pass
+    if policy_findings:
+        import json as _json
+        try:
+            ev = _json.loads(policy_findings[0].evidence.raw)
+            pol_parts = []
+            if "min_password_length" in ev:
+                pol_parts.append(f"min_len={ev['min_password_length']}")
+            if "lockout_threshold" in ev:
+                pol_parts.append(f"lockout={ev['lockout_threshold']}")
+            if pol_parts:
+                inv_lines.append(f"  [bold]Password policy  :[/bold] {', '.join(pol_parts)}")
+        except Exception:
+            pass
+
+    share_findings = [f for f in findings
+                      if f.module == "smb_enum" and f.category.value in ("service", "credential")
+                      and f.target_service not in ("smb_anonymous_share_access",
+                                                     "smb_weak_password_policy",
+                                                     "smb_signing_not_required", "SMBv1")]
+    if share_findings:
+        import json as _json
+        inv_lines.append("  [bold]Shares           :[/bold]")
+        for sf in share_findings:
+            try:
+                ev = _json.loads(sf.evidence.raw)
+                accessible = ev.get("accessible")
+                acc_str = " [accessible]" if accessible is True else (" [denied]" if accessible is False else "")
+            except Exception:
+                acc_str = ""
+            inv_lines.append(f"    {sf.target_service}{acc_str}")
+
+    if inv_lines:
+        display(Panel(
+            "\n".join(inv_lines),
+            title=f"[bold]SMB Inventory — {target}[/bold]",
+            border_style="dim",
+        ))
+
+    # ── B. Security Findings ─────────────────────────────────────────────
+    security = [f for f in findings
+                if f.severity.value not in ("info",)
+                or f.target_service in ("SMBv1", "smb_signing_not_required",
+                                         "smb_anonymous_share_access", "smb_weak_password_policy",
+                                         "smb_share_writable")]
+    if security:
+        _render_findings_table(security)
+    elif findings:
+        display("[dim]No critical security issues detected.[/dim]")
+
+    # ── C. Session info ──────────────────────────────────────────────────
+    display(f"[bold green]Session :[/bold green] {session_id}")
+    if findings:
+        first = findings[0]
+        display(
+            f"[dim]netlab findings show {format_finding_id(first.id)} --session {session_id}[/dim]"
+        )
 
 
 def _credential_error(message: str) -> None:
@@ -2045,6 +2169,23 @@ def _render_inventory_block(findings: List[Finding]) -> None:
     display(table)
 
 
+def _format_evidence_raw(raw: Optional[str]) -> str:
+    """Format evidence.raw for display: pretty-print JSON, truncate plain text."""
+    if not raw:
+        return "—"
+    try:
+        import json as _json
+        parsed = _json.loads(raw)
+        pretty = _json.dumps(parsed, indent=2, ensure_ascii=False)
+        if len(pretty) > 2000:
+            pretty = pretty[:2000] + "\n  ... (truncated)"
+        return "\n" + pretty
+    except Exception:
+        if len(raw) > 500:
+            return raw[:500] + " ... (truncated)"
+        return raw
+
+
 def _render_finding_detail(finding: object) -> None:
     from core.finding import Finding, format_finding_id
     f: Finding = finding  # type: ignore
@@ -2062,7 +2203,9 @@ def _render_finding_detail(finding: object) -> None:
         "",
         f"[bold]Evidence:[/bold]",
         f"  command : {f.evidence.command or '—'}",
-        f"  raw     : {f.evidence.raw[:200] if f.evidence.raw else '—'}",
+        "  raw     : " + _format_evidence_raw(f.evidence.raw),
+        "",
+        f"[dim]Severity: problem confirmed at this level | Confidence: how direct the proof is | Score: calculated by risk_scorer[/dim]",
     ]
     display(Panel("\n".join(lines), title="Finding Detail", border_style="cyan"))
 

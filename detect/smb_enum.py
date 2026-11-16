@@ -316,11 +316,11 @@ def _parse_enum4linux_output(
         ))
 
     for share in result.shares:
-        category, severity = _classify_share(share.name)
-        add_finding(share.name, category, severity, _analysis_evidence(
-            share=share.name,
-            source="enum4linux-ng share listing",
-        ))
+        category, severity = _classify_share(share.name, share.accessible)
+        _share_ev: dict = {"share": share.name, "source": "enum4linux-ng share listing"}
+        if share.accessible is not None:
+            _share_ev["accessible"] = share.accessible
+        add_finding(share.name, category, severity, _analysis_evidence(**_share_ev))
 
     if result.domain is not None:
         add_finding(result.domain, Category.NETWORK, Severity.INFO, _analysis_evidence(
@@ -543,7 +543,7 @@ def _normalize_shares(value: Any) -> Tuple[SmbShare, ...]:
             name=name,
             share_type=_as_text(_find_value(details, {"type", "sharetype"})),
             comment=_as_text(_find_value(details, {"comment", "description"})),
-            accessible=_as_bool(_find_value(details, {"accessible", "access", "readable"})),
+            accessible=_extract_share_accessible(details),
             permissions=_as_text(_find_value(details, {"permissions", "perms", "accessrights"})),
         ))
     return tuple(shares)
@@ -614,6 +614,19 @@ def _extract_password_policy(raw: Any) -> Optional[dict]:
         raw, {"lockoutthreshold", "accountlockoutthreshold",
               "lockout", "badpwdcount", "badpasswordcount"}
     )
+    # C2/C3: also search nested sub-dicts produced by enum4linux-ng -A -oJ
+    if not min_found and isinstance(raw, dict):
+        _dpw = _find_value(raw, {"domainpasswordinformation", "passwordinformation"})
+        if isinstance(_dpw, dict):
+            _mf, _mv = _find_key_value(_dpw, {"minpasswdlength", "minimumpasswordlength", "minpasswordlength", "minlen"})
+            if _mf:
+                min_found, min_len_raw = True, _mv
+    if not lock_found and isinstance(raw, dict):
+        _dlk = _find_value(raw, {"domainlockoutinformation", "lockoutinformation"})
+        if isinstance(_dlk, dict):
+            _lf, _lv = _find_key_value(_dlk, {"lockoutthreshold", "accountlockoutthreshold", "lockout"})
+            if _lf:
+                lock_found, lockout_raw = True, _lv
     result: dict = {}
     if min_found:
         min_len = _policy_int(min_len_raw)
@@ -702,10 +715,78 @@ def _find_key_value(document: Any, aliases: set[str]) -> Tuple[bool, Any]:
     return False, None
 
 
+
+def _extract_anonymous_session(document: Any) -> Optional[bool]:
+    """Extract anonymous/null-session status.
+
+    Supports flat aliases (anonymoussession, anonymous, nullsession)
+    and the nested format document["sessions"]["null"] from enum4linux-ng 1.3.10.
+    """
+    val = _find_value(document, {"anonymoussession", "anonymous", "nullsession"})
+    if val is not None:
+        r = _as_bool(val)
+        if r is not None:
+            return r
+    if isinstance(document, dict):
+        sessions = document.get("sessions")
+        if isinstance(sessions, dict):
+            null_val = sessions.get("null")
+            if null_val is not None:
+                return _as_bool(null_val)
+    return None
+
+
+def _extract_share_accessible(details: Any) -> Optional[bool]:
+    """Extract share accessibility, supporting access.mapping dict (C4).
+
+    Never deduces WRITE rights from mapping or listing.
+    """
+    if not isinstance(details, dict):
+        return None
+    direct = _as_bool(_find_value(details, {"accessible", "readable"}))
+    if direct is not None:
+        return direct
+    access_val = _find_value(details, {"access"})
+    if isinstance(access_val, bool):
+        return access_val
+    if isinstance(access_val, dict):
+        mapping = access_val.get("mapping")
+        if isinstance(mapping, str):
+            m = mapping.strip().lower()
+            if m == "ok":
+                return True
+            if m == "denied":
+                return False
+    return None
+
+
+def _extract_users(value: Any) -> Tuple[str, ...]:
+    """Extract usernames, supporting RID-keyed dicts (C5).
+
+    {"1000": {"username": "msfadmin"}} -> ("msfadmin",)
+    ["alice", "bob"] -> ("alice", "bob")
+    """
+    if value is None:
+        return ()
+    if isinstance(value, dict):
+        names: List[str] = []
+        for _rid, entry in value.items():
+            if isinstance(entry, dict):
+                username = _as_text(entry.get("username"))
+                if username:
+                    names.append(username)
+                    continue
+            text = _as_text(entry)
+            if text:
+                names.append(text)
+        return tuple(dict.fromkeys(names))
+    return _as_strings(value)
+
+
 def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnumerationResult:
     """Read common enum4linux-ng-style aliases without leaking them outward."""
     shares = _normalize_shares(_find_value(document, {"shares", "sharelist", "shareenum"}))
-    anonymous = _as_bool(_find_value(document, {"anonymoussession", "anonymous", "nullsession"}))
+    anonymous = _extract_anonymous_session(document)
     accessible = _as_bool(_find_value(document, {"anonymousshareaccess", "shareaccessible"}))
     if accessible is None and shares:
         accessible = any(share.accessible is True for share in shares)
@@ -740,7 +821,7 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
         # Strip smb1_imposed: generic aliases cannot guarantee enforce_smb1
         _smb1_imposed = False
     policy_raw = _find_value(document, {"passwordpolicy", "passwdpolicy", "passwordpolicies",
-                                        "password_policy", "passpol"})
+                                        "password_policy", "passpol", "policy"})
     return SmbEnumerationResult(
         target=target_ip,
         os=_as_text(_find_value(document, {"os", "operatingsystem", "targetos"})),
@@ -752,7 +833,7 @@ def _normalize_json_output(document: dict, raw: str, target_ip: str) -> SmbEnume
         smb1_imposed=_smb1_imposed,
         signing_required=signing,
         shares=shares,
-        users=_as_strings(_find_value(document, {"users", "userlist"})),
+        users=_extract_users(_find_value(document, {"users", "userlist"})),
         groups=_as_strings(_find_value(document, {"groups", "grouplist"})),
         anonymous_session=anonymous,
         anonymous_share_access=accessible,
@@ -843,19 +924,23 @@ def _extract_domain_name(raw_output: str) -> Optional[str]:
     return None
 
 
-def _classify_share(share_name: str) -> Tuple[Category, Severity]:
+def _classify_share(share_name: str, accessible: Optional[bool] = None) -> Tuple[Category, Severity]:
     """Return category and severity for a detected share.
 
-    ADMIN$ is specified by the ticket: CREDENTIAL / MEDIUM.
-    Other shares are reported as SERVICE / INFO (confirmed observation).
+    D-SMB-02: ADMIN$ severity depends on confirmed accessibility.
+    * accessible=True  -> CREDENTIAL / MEDIUM (access confirmed)
+    * accessible=False -> SERVICE   / INFO    (access denied; inventory observation)
+    * accessible=None  -> SERVICE   / INFO    (unknown; do not invent severity)
+
+    Other shares: SERVICE / INFO (confirmed observation).
 
     Args:
-        share_name: Share name as printed by enum4linux.
-
+        share_name:  Share name as printed by enum4linux.
+        accessible:  True if confirmed, False if denied, None if unknown.
     Returns:
         Tuple[Category, Severity]: Classification for this share.
     """
-    if share_name.upper() == "ADMIN$":
+    if share_name.upper() == "ADMIN$" and accessible is True:
         return Category.CREDENTIAL, Severity.MEDIUM
     return Category.SERVICE, Severity.INFO
 

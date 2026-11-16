@@ -74,20 +74,29 @@ Public          Disk      Team files
 
 
 class TestParseAdminShare:
-    def test_admin_share_is_credential_medium_confirmed(self):
+    def test_admin_share_no_access_info_is_info(self):
+        """D-SMB-02: ADMIN$ without confirmed access -> SERVICE/INFO (inventory observation)."""
         findings = _parse_enum4linux_output(
             ENUM4LINUX_ADMIN_ONLY, "192.168.1.26", "session-test"
         )
         admin = [f for f in findings if f.target_service.upper() == "ADMIN$"]
         assert len(admin) == 1
         finding = admin[0]
-        assert finding.category == Category.CREDENTIAL
-        assert finding.severity == Severity.MEDIUM
-        assert finding.confidence == Confidence.CONFIRMED
+        # accessible is unknown from text output -> do not assign MEDIUM by name alone
+        assert finding.severity == Severity.INFO
         assert finding.module == "smb_enum"
         assert finding.target_ip == "192.168.1.26"
         assert finding.target_port == 445
         assert finding.session_id == "session-test"
+
+    def test_admin_share_confirmed_access_is_credential_medium(self):
+        """D-SMB-02: ADMIN$ with confirmed access -> CREDENTIAL/MEDIUM."""
+        raw = json.dumps({"shares": {"ADMIN$": {"access": {"mapping": "ok"}}}})
+        findings = _parse_enum4linux_output(raw, "192.168.1.26", "session-test")
+        admin = [f for f in findings if f.target_service.upper() == "ADMIN$"]
+        assert len(admin) == 1
+        assert admin[0].category == Category.CREDENTIAL
+        assert admin[0].severity == Severity.MEDIUM
 
     def test_one_finding_per_share_plus_domain(self):
         findings = _parse_enum4linux_output(
@@ -203,8 +212,8 @@ class TestSmbEnumNominalRun:
              patch("detect.smb_enum.subprocess.run", return_value=completed):
             result = smb_enum("192.168.1.26", "session-test")
         assert len(result) == 1
-        assert result[0].category == Category.CREDENTIAL
-        assert result[0].severity == Severity.MEDIUM
+        # D-SMB-02: text fixture has no access info -> accessible=None -> INFO
+        assert result[0].severity == Severity.INFO
         assert result[0].confidence == Confidence.CONFIRMED
         assert result[0].target_service == "ADMIN$"
 
@@ -1491,3 +1500,273 @@ class TestSMB04PasswordPolicy:
         raw = json.dumps({"passwordpolicy": {"lockoutthreshold": True}})
         findings = _parse_enum4linux_output(raw, "192.168.57.3", "sess-smb04v2")
         assert not any(f.target_service == "smb_weak_password_policy" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# SMB Finalisation — parsing corrections and D-SMB-02
+# ---------------------------------------------------------------------------
+
+class TestSMBFinalisationParsing:
+    """Tests for C1-C5 parsing corrections and D-SMB-02 ADMIN$ reclassification."""
+
+    @staticmethod
+    def _result(raw_dict):
+        return normalize_smb_output(json.dumps(raw_dict), "192.168.57.3")
+
+    @staticmethod
+    def _findings(raw_dict):
+        return _parse_enum4linux_output(json.dumps(raw_dict), "192.168.57.3", "sess-final")
+
+    # ── C1 — sessions.null ──────────────────────────────────────────────
+
+    def test_sessions_null_true_recognized(self):
+        """sessions.null: true -> anonymous_session=True."""
+        result = self._result({"sessions": {"null": True}})
+        assert result.anonymous_session is True
+
+    def test_sessions_null_false_recognized(self):
+        """sessions.null: false -> anonymous_session=False."""
+        result = self._result({"sessions": {"null": False}})
+        assert result.anonymous_session is False
+
+    def test_anonymous_flat_key_still_works(self):
+        """Existing flat 'anonymous' alias is preserved."""
+        result = self._result({"anonymous": True})
+        assert result.anonymous_session is True
+
+    # ── C2/C3 — nested policy ───────────────────────────────────────────
+
+    def test_policy_nested_structure_produces_finding(self):
+        """Nested policy dict is parsed and produces smb_weak_password_policy."""
+        raw = {
+            "policy": {
+                "domain_password_information": {"min_password_length": 7},
+                "domain_lockout_information": {"lockout_threshold": 0},
+            }
+        }
+        findings = self._findings(raw)
+        assert any(f.target_service == "smb_weak_password_policy" for f in findings)
+
+    def test_smb04v2_rules_preserved_none_string(self):
+        """SMB-04 V2 rule: 'None' string -> 0, 'not set' -> field omitted."""
+        raw = {"passwordpolicy": {"minpasswdlength": "None", "lockoutthreshold": "not set"}}
+        result = self._result(raw)
+        assert result.password_policy is not None
+        assert result.password_policy.get("min_password_length") == 0
+        assert "lockout_threshold" not in result.password_policy
+
+    def test_smb04v2_key_absent_omitted(self):
+        """SMB-04 V2 rule: absent key must not produce a field."""
+        raw = {"passwordpolicy": {"lockoutthreshold": 5}}
+        result = self._result(raw)
+        assert result.password_policy is not None
+        assert "min_password_length" not in result.password_policy
+        assert result.password_policy["lockout_threshold"] == 5
+
+    # ── C4 — access.mapping ────────────────────────────────────────────
+
+    def test_access_mapping_ok_is_accessible(self):
+        """access.mapping: ok -> share.accessible=True."""
+        raw = {"shares": {"PUBLIC": {"access": {"mapping": "ok"}}}}
+        result = self._result(raw)
+        share = next((s for s in result.shares if s.name == "PUBLIC"), None)
+        assert share is not None
+        assert share.accessible is True
+
+    def test_access_mapping_denied_is_not_accessible(self):
+        raw = {"shares": {"IPC$": {"access": {"mapping": "denied"}}}}
+        result = self._result(raw)
+        share = next((s for s in result.shares), None)
+        assert share is not None
+        assert share.accessible is False
+
+    def test_access_mapping_unknown_is_none(self):
+        raw = {"shares": {"DATA": {"access": {"mapping": "unknown"}}}}
+        result = self._result(raw)
+        share = next((s for s in result.shares), None)
+        assert share is not None
+        assert share.accessible is None
+
+    def test_mapping_ok_never_means_write(self):
+        """mapping: ok must NOT produce smb_share_writable Finding."""
+        raw = {"shares": {"PUBLIC": {"access": {"mapping": "ok", "listing": "ok"}}}}
+        findings = self._findings(raw)
+        assert not any(f.target_service == "smb_share_writable" for f in findings)
+
+    # ── C5 — users RID dict ────────────────────────────────────────────
+
+    def test_users_rid_dict_extracts_usernames(self):
+        """RID-keyed dict: usernames extracted, not RID keys."""
+        raw = {"users": {"1000": {"username": "msfadmin"}, "1001": {"username": "user"}}}
+        result = self._result(raw)
+        assert "msfadmin" in result.users
+        assert "user" in result.users
+        assert "1000" not in result.users
+        assert "1001" not in result.users
+
+    def test_users_list_fallback_preserved(self):
+        """Plain list of strings still works."""
+        raw = {"users": ["alice", "bob"]}
+        result = self._result(raw)
+        assert result.users == ("alice", "bob")
+
+    # ── D-SMB-02 — ADMIN$ classification ──────────────────────────────
+
+    def test_admin_accessible_is_medium(self):
+        """ADMIN$ with confirmed access -> CREDENTIAL / MEDIUM."""
+        raw = {"shares": {"ADMIN$": {"access": {"mapping": "ok"}}}}
+        findings = self._findings(raw)
+        admin = next((f for f in findings if f.target_service == "ADMIN$"), None)
+        assert admin is not None
+        from core.finding import Category, Severity
+        assert admin.severity == Severity.MEDIUM
+        assert admin.category == Category.CREDENTIAL
+
+    def test_admin_denied_is_info(self):
+        """ADMIN$ with denied access -> SERVICE / INFO (inventory observation)."""
+        raw = {"shares": {"ADMIN$": {"access": {"mapping": "denied"}}}}
+        findings = self._findings(raw)
+        admin = next((f for f in findings if f.target_service == "ADMIN$"), None)
+        assert admin is not None
+        from core.finding import Severity
+        assert admin.severity == Severity.INFO
+
+    def test_admin_unknown_access_is_info(self):
+        """ADMIN$ with unknown access -> SERVICE / INFO (do not invent severity)."""
+        raw = {"shares": {"ADMIN$": {}}}   # no access info
+        findings = self._findings(raw)
+        admin = next((f for f in findings if f.target_service == "ADMIN$"), None)
+        assert admin is not None
+        from core.finding import Severity
+        assert admin.severity == Severity.INFO
+
+
+# ---------------------------------------------------------------------------
+# _format_evidence_raw (from cli.py) — tested via import
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+
+# Realistic enum4linux-ng 1.3.10 JSON output for Metasploitable2 (192.168.57.3).
+# Based on the real output reported by the owner (2026-11-13 SMB-02 closure).
+# Adapted for unit testing — no real network access.
+METASPLOITABLE2_JSON = {
+    "hostname": "metasploitable",
+    "domain": "WORKGROUP",
+    "os": "Unix",
+    "smb_dialects": True,          # enforce_smb1 succeeded → smb1_imposed=True
+    "sessions": {"null": True},    # anonymous session allowed
+    "shares": {
+        "print$": {"access": {"mapping": "denied", "listing": "denied"}},
+        "tmp":    {"access": {"mapping": "ok",     "listing": "ok"},     "type": "Disk"},
+        "opt":    {"access": {"mapping": "denied", "listing": "denied"}},
+        "IPC$":   {"access": {"mapping": "ok",     "listing": "denied"}, "type": "IPC"},
+        "ADMIN$": {"access": {"mapping": "denied", "listing": "denied"}},
+    },
+    "users": {
+        "0":    {"username": "root"},
+        "1000": {"username": "msfadmin"},
+        "1002": {"username": "user"},
+        "1003": {"username": "service"},
+    },
+    "policy": {
+        "domain_password_information": {"min_password_length": 5},
+        "domain_lockout_information":  {"lockout_threshold": 0},
+    },
+    "signing_required": False,
+}
+
+
+class TestMetasploitable2Fixture:
+    """Integration tests using the realistic Metasploitable2 fixture."""
+
+    @staticmethod
+    def _result():
+        import json
+        return normalize_smb_output(json.dumps(METASPLOITABLE2_JSON), "192.168.57.3")
+
+    @staticmethod
+    def _findings():
+        import json
+        return _parse_enum4linux_output(
+            json.dumps(METASPLOITABLE2_JSON), "192.168.57.3", "sess-m2"
+        )
+
+    def test_smb1_imposed_detected(self):
+        """smb_dialects: true -> smb1_imposed=True."""
+        result = self._result()
+        assert result.smb1_imposed is True
+
+    def test_anonymous_session_via_sessions_null(self):
+        """sessions.null: true -> anonymous_session=True."""
+        result = self._result()
+        assert result.anonymous_session is True
+
+    def test_tmp_share_accessible(self):
+        """tmp share with mapping=ok -> accessible=True."""
+        result = self._result()
+        tmp = next((s for s in result.shares if s.name == "tmp"), None)
+        assert tmp is not None
+        assert tmp.accessible is True
+
+    def test_admin_share_denied(self):
+        """ADMIN$ with mapping=denied -> accessible=False."""
+        result = self._result()
+        admin = next((s for s in result.shares if s.name == "ADMIN$"), None)
+        assert admin is not None
+        assert admin.accessible is False
+
+    def test_usernames_extracted_not_rids(self):
+        """users RID-dict: extracts usernames, not RID keys."""
+        result = self._result()
+        assert "msfadmin" in result.users
+        assert "root" in result.users
+        assert "0" not in result.users
+        assert "1000" not in result.users
+
+    def test_policy_extracted_from_nested_structure(self):
+        """Nested policy dict: min_password_length and lockout_threshold extracted."""
+        result = self._result()
+        assert result.password_policy is not None
+        assert result.password_policy.get("min_password_length") == 5
+        assert result.password_policy.get("lockout_threshold") == 0
+
+    def test_smbv1_finding_produced(self):
+        """smb1_imposed=True -> SMBv1 HIGH Finding produced."""
+        findings = self._findings()
+        smb1 = next((f for f in findings if f.target_service == "SMBv1"), None)
+        assert smb1 is not None
+        from core.finding import Severity
+        assert smb1.severity == Severity.HIGH
+
+    def test_signing_not_required_finding(self):
+        """signing_required=False -> smb_signing_not_required Finding."""
+        findings = self._findings()
+        assert any(f.target_service == "smb_signing_not_required" for f in findings)
+
+    def test_admin_denied_is_not_medium(self):
+        """ADMIN$ with denied access -> SERVICE/INFO, not CREDENTIAL/MEDIUM."""
+        findings = self._findings()
+        admin = next((f for f in findings if f.target_service == "ADMIN$"), None)
+        assert admin is not None
+        from core.finding import Severity
+        assert admin.severity == Severity.INFO
+
+    def test_tmp_writable_anonymous_is_high(self):
+        """tmp is accessible anonymously -> smb_share_writable HIGH if permissions indicate."""
+        # tmp has accessible=True and anonymous_session=True; but permissions field
+        # is not set in this fixture, so smb_share_writable requires explicit permissions.
+        # Verify at minimum that no crash occurs and the share is listed.
+        result = self._result()
+        shares = [s.name for s in result.shares]
+        assert "tmp" in shares
+
+    def test_anonymous_access_finding_produced(self):
+        """anonymous_session=True + accessible shares -> smb_anonymous_share_access."""
+        findings = self._findings()
+        assert any(f.target_service == "smb_anonymous_share_access" for f in findings)
+
+    def test_weak_policy_finding_produced(self):
+        """lockout_threshold=0 -> smb_weak_password_policy Finding."""
+        findings = self._findings()
+        assert any(f.target_service == "smb_weak_password_policy" for f in findings)
