@@ -62,9 +62,13 @@ def presentation_detail(change):
 
 
 class MonitorView:
-    def __init__(self, network, interval, window, console=None, *, session_id):
+    def __init__(self, network, interval, window, console=None, *, session_id,
+                 deferred_hosts=None):
         self.network, self.interval, self.window = network, interval, window
         self.session_id = session_id
+        # Keep the live deferred set by reference: successful initialization
+        # removes an IP and the next frame reflects that transition immediately.
+        self.deferred_hosts = deferred_hosts if deferred_hosts is not None else set()
         self.footer_written = False
         self.emitted = 0  # notifications actually written to the terminal, TTY or plain log
         self.cycle_emitted = 0  # notifications written during the current check cycle
@@ -108,10 +112,25 @@ class MonitorView:
         return Group(table, Text(f'{identity_label} :', style='dim'),
                      Text(identity, overflow='fold'))
 
+    def _host_rows(self):
+        # Network-scoped notifications retain a quota bucket but never become
+        # equipment rows in the host inventory.
+        return [(host, row) for host, row in self.window.summary().items()
+                if row.get('scope', 'host') == 'host']
+
     def hosts(self):
-        return self._host_table(sorted(self.window.summary().items()))
+        return self._host_table(sorted(self._host_rows()))
 
     def _host_table(self, items):
+        # Deferred hosts are known through discovery but have no initialized
+        # baseline/quota history; render them separately as UNKNOWN / DEGRADED.
+        items = list(items)
+        present = {host for host, _ in items}
+        deferred_items = [(ip, {'displayed': 0, 'masked': 0, 'reserved': 0,
+                                'unknown': 0, 'scope': 'host',
+                                'state': 'UNKNOWN / DÉGRADÉ'})
+                          for ip in sorted(self.deferred_hosts) if ip not in present]
+        items.extend(deferred_items)
         # Numbers follow the order of ``items`` (the display order), starting at 1. They are
         # computed on each render, so they follow the list; they are never stored.
         if self.console.width < 60:
@@ -151,7 +170,7 @@ class MonitorView:
         # The frame never exceeds the terminal height: the host table keeps as many
         # hosts as fit (binary search on the rendered height; height grows with hosts)
         # and the hidden ones are announced. Notifications are not part of the frame.
-        hosts = sorted(self.window.summary().items())
+        hosts = sorted(self._host_rows())
         # One row stays free: Live.stop() ends with a newline, and a frame using the
         # full height would scroll its own header into the scrollback.
         budget = options.size.height - 1

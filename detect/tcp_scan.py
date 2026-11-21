@@ -67,6 +67,202 @@ PROFILE_FLAGS = {
 # Public scan outcomes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# TCP-01 — Port state model (A1 / SENTINEL-TCP-STATES.md)
+# ---------------------------------------------------------------------------
+from enum import Enum, auto
+
+
+class PortState(Enum):
+    """State of one TCP port as reported by a complete nmap scan."""
+    OPEN = auto()       # explicit state="open"
+    CLOSED = auto()     # explicit state="closed"
+    FILTERED = auto()   # explicit state="filtered"
+    UNCERTAIN = auto()  # absent, invalid, state="open|filtered", or unresolvable
+
+
+@dataclass(frozen=True)
+class HostTcpObservation:
+    """Result of one Sentinel TCP scan for a single host.
+
+    status == COMPLETE means every expected port was accounted for without
+    contradiction.  status == INCOMPLETE means the XML is malformed, ambiguous,
+    or the port coverage could not be established.
+
+    ``ports`` is the backward-compatibility property used by existing callers:
+      - None   if INCOMPLETE
+      - []     if COMPLETE and no port is OPEN
+      - sorted list of OPEN ports otherwise
+    """
+    status: str                       # "COMPLETE" or "INCOMPLETE"
+    states: Dict[int, PortState]      # port → PortState (populated when COMPLETE)
+
+    @property
+    def open_ports(self) -> List[int]:
+        """Sorted list of ports with PortState.OPEN."""
+        return sorted(p for p, s in self.states.items() if s is PortState.OPEN)
+
+    @property
+    def ports(self) -> Optional[List[int]]:
+        """Backward-compatible view: None / [] / [ports...] (Sentinel contract)."""
+        if self.status == "INCOMPLETE":
+            return None
+        return self.open_ports
+
+    @classmethod
+    def incomplete(cls) -> "HostTcpObservation":
+        return cls(status="INCOMPLETE", states={})
+
+    @classmethod
+    def complete(cls, states: Dict[int, PortState]) -> "HostTcpObservation":
+        return cls(status="COMPLETE", states=states)
+
+
+def _parse_extrareasons_ports(extrareasons_elem: ET.Element) -> Optional[frozenset]:
+    """Extract the set of ports from an <extrareasons ports="..."> element.
+
+    Returns None if the attribute is absent or unparseable.
+    """
+    raw = extrareasons_elem.get("ports")
+    return _expand_port_spec(raw) if raw else None
+
+
+def _parse_host_tcp_states(
+    host_elem: ET.Element,
+    expected: frozenset,
+) -> HostTcpObservation:
+    """Parse one host's <ports> section into a HostTcpObservation.
+
+    Implements rules P1-P7, P11-P12 from SENTINEL-TCP-STATES.md §3.
+
+    Args:
+        host_elem: The <host> element from nmap XML.
+        expected:  Frozenset of port numbers that must all be accounted for.
+
+    Returns:
+        HostTcpObservation — COMPLETE with per-port states, or INCOMPLETE.
+    """
+    ports_elem = host_elem.find("ports")
+    if ports_elem is None:
+        return HostTcpObservation.incomplete()
+
+    states: Dict[int, PortState] = {}
+
+    # P1 / P2 — explicit <port> elements
+    for port_elem in ports_elem.findall("port"):
+        if port_elem.get("protocol") != "tcp":
+            continue
+        portid_raw = port_elem.get("portid", "")
+        try:
+            portid = int(portid_raw)
+        except ValueError:
+            return HostTcpObservation.incomplete()
+        if portid not in expected:
+            return HostTcpObservation.incomplete()          # P11: out of scope
+        if portid in states:
+            return HostTcpObservation.incomplete()          # P7: duplicate
+        state_elem = port_elem.find("state")
+        raw_state = state_elem.get("state", "") if state_elem is not None else ""
+        if raw_state == "open":
+            states[portid] = PortState.OPEN
+        elif raw_state == "closed":
+            states[portid] = PortState.CLOSED
+        elif raw_state == "filtered":
+            states[portid] = PortState.FILTERED
+        else:
+            # P2 / P4-style: open|filtered, unfiltered, unknown, etc. → UNCERTAIN
+            states[portid] = PortState.UNCERTAIN
+
+    # Ports not yet assigned come from <extraports> groups
+    unassigned = expected - frozenset(states.keys())
+
+    for group in ports_elem.findall("extraports"):
+        group_state_raw = group.get("state", "")
+        # P4: extraports state="open" → never OPEN
+        if group_state_raw == "open":
+            group_port_state = PortState.UNCERTAIN
+        elif group_state_raw == "closed":
+            group_port_state = PortState.CLOSED
+        elif group_state_raw == "filtered":
+            group_port_state = PortState.FILTERED
+        else:
+            group_port_state = PortState.UNCERTAIN
+
+        # Gather ports explicitly listed in <extrareasons ports="...">
+        explicit_ports: set = set()
+        for er in group.findall("extrareasons"):
+            port_set = _parse_extrareasons_ports(er)
+            if port_set is not None:
+                # P7: overlap with already-attributed ports → INCOMPLETE
+                overlap = port_set & frozenset(states.keys())
+                if overlap:
+                    return HostTcpObservation.incomplete()
+                # P7 intra-group: overlap between multiple <extrareasons> in same group
+                overlap_intra = port_set & explicit_ports
+                if overlap_intra:
+                    return HostTcpObservation.incomplete()
+                explicit_ports |= port_set
+
+        if explicit_ports:
+            # P11: validate that the group count matches the explicit port set size
+            count_raw = group.get("count")
+            try:
+                group_count = int(count_raw) if count_raw is not None else None
+            except ValueError:
+                return HostTcpObservation.incomplete()
+            if group_count is not None and group_count != len(explicit_ports):
+                return HostTcpObservation.incomplete()
+            # P3: attribute the state from the parent group
+            for p in explicit_ports:
+                if p not in expected:
+                    return HostTcpObservation.incomplete()  # P11
+                if p in states:
+                    return HostTcpObservation.incomplete()  # P7
+                states[p] = group_port_state
+            unassigned -= explicit_ports
+        else:
+            # P5 / P6: no explicit port list in this group
+            count_raw = group.get("count")
+            try:
+                count = int(count_raw) if count_raw is not None else None
+            except ValueError:
+                return HostTcpObservation.incomplete()
+
+            if count is None:
+                return HostTcpObservation.incomplete()
+
+            # Count how many groups have no explicit ports (for P6)
+            groups_without_explicit = sum(
+                1 for g in ports_elem.findall("extraports")
+                if not any(g.findall("extrareasons"))
+                   or all(_parse_extrareasons_ports(er) is None
+                          for er in g.findall("extrareasons"))
+            )
+
+            if groups_without_explicit > 1:
+                # P6: multiple groups without explicit attribution → UNCERTAIN
+                if count > len(unassigned):
+                    return HostTcpObservation.incomplete()
+                # Cannot determine which ports belong to which group → UNCERTAIN
+                # We will assign UNCERTAIN to all remaining unassigned after the loop
+                for p in sorted(unassigned)[:count]:
+                    states[p] = PortState.UNCERTAIN
+                unassigned -= frozenset(sorted(unassigned)[:count])
+            else:
+                # P5: exactly one group without explicit ports — count must match residual
+                if count != len(unassigned):
+                    return HostTcpObservation.incomplete()
+                for p in unassigned:
+                    states[p] = group_port_state
+                unassigned = frozenset()
+
+    # P12: all expected ports must be attributed
+    if unassigned:
+        return HostTcpObservation.incomplete()
+
+    return HostTcpObservation.complete(states)
+
+
 class TcpScanFailed(Exception):
     """Raised when a TCP scan cannot produce a valid result."""
 
@@ -594,16 +790,15 @@ def parse_sentinel_open_ports(
             _expand_port_spec(info.get("services")) != expected for info in tcp_scaninfo
         ):
             return None
-        ports_elem = hosts[0].find("ports")
-        for port_elem in ports_elem.findall("port") if ports_elem is not None else []:
-            if port_elem.get("protocol") == "tcp" and int(port_elem.get("portid", "")) not in expected:
-                return None
-        findings, _ = _parse_tcp_xml_with_states(xml_output, target, "sentinel")
+        # Verify the host address matches the requested target
+        addr_elem = hosts[0].find("address[@addrtype='ipv4']")
+        host_ip = addr_elem.get("addr") if addr_elem is not None else None
+        if host_ip != target:
+            return None
+        obs = _parse_host_tcp_states(hosts[0], expected)
     except (TcpScanFailed, ET.ParseError, ValueError):
         return None
-    if any(finding.target_ip != target for finding in findings):
-        return None
-    return sorted({finding.target_port for finding in findings if finding.target_port is not None})
+    return obs.ports
 
 
 def _extract_service(

@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Set
 import typer
 
 from core import database as _database
+from detect.tcp_scan import PortState as TcpPortState  # A1 TCP-02
 from core.database import (
     SentinelStorageError,
     init_db,
@@ -47,14 +48,23 @@ from core.database import (
     sentinel_count_unresolved_events,
     sentinel_get_state,
     sentinel_identity_machine_counts,
+    sentinel_identity_machine_inventory,
+    sentinel_identity_deferred_ips,
+    sentinel_identity_absent_ips,
     sentinel_has_conflicting_baseline,
     sentinel_update_state,
     close_session,
 )
 from core.logger import display
-from sentinel.alerting import AlertCounter, EventStamp, process_changes
+from sentinel.alerting import (
+    AlertCounter,
+    EventStamp,
+    _make_initialization_event_record,
+    process_changes,
+)
 from sentinel.arp_probe import ArpProbeStatus
 from sentinel.baseline import (
+    BASELINE_INITIALIZATION_EVENT,
     BaselineEntry,
     NetworkIdentity,
     baseline_exists,
@@ -62,6 +72,7 @@ from sentinel.baseline import (
     detect_network_identity,
     get_baseline,
     learn_baseline,
+    store_recovered_host_baseline,
 )
 from sentinel.monitor import (
     CycleObservations,
@@ -257,10 +268,17 @@ def _start_owned(target_network, network_id, run_session_id, identity,
         return "failed"
     state.target_network = target_network
 
-    # Step 7 — record initial state in sentinel DB
+    # Step 7 — record initial state in sentinel DB. A partial initial baseline
+    # starts degraded: usable hosts are monitored, deferred hosts stay UNKNOWN.
+    initial_status = "degraded" if state.deferred_initialization else "active"
+    if state.deferred_initialization:
+        display(
+            f"[yellow]{len(state.deferred_initialization)} host(s) awaiting their first "
+            "complete TCP observation; Sentinel starts in degraded mode.[/yellow]"
+        )
     sentinel_update_state(
         network_id=network_id,
-        sentinel_status="active",
+        sentinel_status=initial_status,
         target_network=target_network,
         gateway_ip=identity.gateway_ip,
         gateway_mac=identity.gateway_mac,
@@ -271,6 +289,7 @@ def _start_owned(target_network, network_id, run_session_id, identity,
     counter.bind(network_id)
     with MonitorView(target_network, interval, counter, session_id=run_session_id) as view:
         counter.view = view
+        view.deferred_hosts = state.deferred_initialization
         _run_loop(
             target_network=target_network, network_id=network_id,
             run_session_id=run_session_id, identity=identity, interval=interval,
@@ -292,6 +311,9 @@ class NetworkState:
     notified_port_not_open: Dict[str, Set[int]]
     host_absent_count: Dict[str, int]
     host_not_observed: Set[str]
+    # Hosts known to have answered discovery but never initialized by a complete
+    # baseline scan. Restored from BASELINE_INITIALIZATION_EVENT.
+    deferred_initialization: Set[str] = field(default_factory=set)
     scan_degraded_active: bool = False    # never restored (§9.8)
     # Monitored CIDR, needed by the L2 classification. Set by _start_owned.
     target_network: str = ""
@@ -319,6 +341,7 @@ def _rebuild_transition_state(network_id: str, baseline: Dict[str, BaselineEntry
         notified_port_not_open={},
         host_absent_count={},
         host_not_observed=set(),
+        deferred_initialization=set(),
     )
     for ip, entry in baseline.items():
         ports = list(entry.ports or [])
@@ -338,15 +361,34 @@ def _rebuild_transition_state(network_id: str, baseline: Dict[str, BaselineEntry
                 state.ports_initialized[ip] = True
                 state.initial_ports[ip] = ports
                 state.open_ports[ip] = set(ports)
+                state.deferred_initialization.discard(ip)
             else:
                 state.ports_initialized[ip] = False
                 state.initial_ports[ip] = None
                 state.open_ports[ip] = set()
+                state.deferred_initialization.add(ip)
+        elif kind == BASELINE_INITIALIZATION_EVENT:
+            # Latest learning outcome is authoritative: a newer event replaces
+            # the deferred set (an empty list clears it after a complete relearn).
+            state.deferred_initialization.clear()
+            deferred = details.get("deferred_ips")
+            if isinstance(deferred, list):
+                for deferred_ip in deferred:
+                    if not isinstance(deferred_ip, str) or not deferred_ip:
+                        continue
+                    if deferred_ip in baseline or state.ports_initialized.get(deferred_ip, False):
+                        continue
+                    state.known_hosts.add(deferred_ip)
+                    state.ports_initialized[deferred_ip] = False
+                    state.initial_ports[deferred_ip] = None
+                    state.open_ports[deferred_ip] = set()
+                    state.deferred_initialization.add(deferred_ip)
         elif kind == "host_ports_initialized" and ip:
             ports = list(details.get("initial_ports") or [])
             state.ports_initialized[ip] = True
             state.initial_ports[ip] = ports
             state.open_ports[ip] = set(ports)
+            state.deferred_initialization.discard(ip)
         elif kind == "new_port" and ip and port is not None:
             state.open_ports.setdefault(ip, set()).add(port)
             state.notified_port_not_open.get(ip, set()).discard(port)
@@ -419,6 +461,7 @@ def _normalize_and_filter(observations: CycleObservations, state: NetworkState) 
             state.ports_initialized[ip] = True
             state.initial_ports[ip] = ports
             state.open_ports[ip] = set(ports)
+            state.deferred_initialization.discard(ip)
             changes.append(NetworkChange(
                 change_type="host_ports_initialized",
                 asset_ip=ip,
@@ -443,6 +486,7 @@ def _normalize_and_filter(observations: CycleObservations, state: NetworkState) 
         state.ports_initialized[ip] = True
         state.initial_ports[ip] = ports
         state.open_ports[ip] = set(ports)
+        state.deferred_initialization.discard(ip)
         changes.append(NetworkChange(
             change_type="host_ports_initialized",
             asset_ip=ip,
@@ -458,51 +502,126 @@ def _normalize_and_filter(observations: CycleObservations, state: NetworkState) 
 
 
 def _compute_port_transitions(observations: CycleObservations, state: NetworkState) -> List[NetworkChange]:
-    """Unified new_port / port_not_open (§9.5 step 3, §9.6)."""
+    """new_port / port_not_open — A1/TCP-02 state-aware version.
+
+    Uses per-port PortState (OPEN/CLOSED/FILTERED/UNCERTAIN) when available from
+    HostTcpObservation.states.  Falls back to the binary ports-list behaviour when
+    states is not available (backward-compatible with existing tests and code).
+
+    Rules (SENTINEL-TCP-STATES.md §2 / §5):
+      OPEN      -> reset counter; emit new_port if first opening.
+      CLOSED    -> increment counter; confirm closure after 2 consecutive observations.
+      FILTERED  -> reset counter; no closure event (R3).
+      UNCERTAIN -> reset counter; no closure event.
+      Host absent or INCOMPLETE scan -> reset all counters for that host (D-A1).
+    """
     changes: List[NetworkChange] = []
+    current_set = set(observations.current_hosts)
+
+    # D-A1: reset counters for initialized hosts absent from this cycle.
+    # A host that is not observed this cycle cannot have its port states
+    # confirmed as closed — reset all its absence counters to prevent
+    # stale counters from producing a false closure on reappearance.
+    for ip in list(state.ports_initialized.keys()):
+        if state.ports_initialized.get(ip, False) and ip not in current_set:
+            state.port_absent_count.get(ip, {}).clear()
+
     for ip in observations.current_hosts:
         if not state.ports_initialized.get(ip, False):
             continue
         observed = observations.tcp_observations.get(ip)
-        counts = state.port_absent_count.setdefault(ip, {})
-        if observed is None or observed.ports is None:
-            counts.clear()  # unknown state: no conclusion, no counter kept (§9.6)
+        if not state.ports_initialized.get(ip, False):
             continue
-        present = set(observed.ports)
+        observed = observations.tcp_observations.get(ip)
+        counts = state.port_absent_count.setdefault(ip, {})
+
+        # Host absent or scan INCOMPLETE: no conclusion, reset all counters
+        if observed is None or observed.ports is None:
+            counts.clear()
+            continue
+
         known_open = state.open_ports.setdefault(ip, set())
+        per_port_states = getattr(observed, "states", None)
 
-        for port in sorted(present):
-            counts.pop(port, None)
-            if port not in known_open:
-                known_open.add(port)  # first opening or reopening
-                state.notified_port_not_open.get(ip, set()).discard(port)
-                changes.append(NetworkChange(
-                    change_type="new_port",
-                    asset_ip=ip,
-                    detail=f"port {port} opened",
-                    evidence=f"Port {port}/tcp open on {ip} in a complete TCP scan.",
-                    port=port,
-                ))
+        if per_port_states is not None:
+            # ── State-aware path (TCP-02) ─────────────────────────────────────
+            all_relevant = known_open | {
+                p for p, s in per_port_states.items() if s is TcpPortState.OPEN
+            }
+            for port in sorted(all_relevant):
+                port_state = per_port_states.get(port, TcpPortState.UNCERTAIN)
 
-        for port in sorted(known_open - present):
-            count = counts.get(port, 0) + 1
-            counts[port] = count
-            if count < 2:
-                continue
-            counts[port] = 0  # always reset after two complete observations
-            known_open.discard(port)  # a later reappearance is a new opening
-            notified = state.notified_port_not_open.setdefault(ip, set())
-            if port not in notified:
-                changes.append(NetworkChange(
-                    change_type="port_not_open",
-                    asset_ip=ip,
-                    detail=f"port {port} not open",
-                    evidence=f"Port {port}/tcp absent from two complete TCP scans of {ip}.",
-                    port=port,
-                ))
-                notified.add(port)
+                if port_state is TcpPortState.OPEN:
+                    counts.pop(port, None)
+                    if port not in known_open:
+                        known_open.add(port)
+                        state.notified_port_not_open.get(ip, set()).discard(port)
+                        changes.append(NetworkChange(
+                            change_type="new_port",
+                            asset_ip=ip,
+                            detail=f"port {port} opened",
+                            evidence=f"Port {port}/tcp open on {ip} in a complete TCP scan.",
+                            port=port,
+                        ))
+
+                elif port_state is TcpPortState.CLOSED and port in known_open:
+                    count = counts.get(port, 0) + 1
+                    counts[port] = count
+                    if count >= 2:
+                        counts[port] = 0
+                        known_open.discard(port)
+                        notified = state.notified_port_not_open.setdefault(ip, set())
+                        if port not in notified:
+                            changes.append(NetworkChange(
+                                change_type="port_not_open",
+                                asset_ip=ip,
+                                detail=f"port {port} not open",
+                                evidence=(
+                                    f"Port {port}/tcp explicitly closed in two consecutive "
+                                    f"complete TCP scans of {ip}."
+                                ),
+                                port=port,
+                            ))
+                            notified.add(port)
+
+                else:
+                    # FILTERED, UNCERTAIN, or absent -> reset counter (R3/R4/R5/D-A1)
+                    counts.pop(port, None)
+
+        else:
+            # ── Legacy / backward-compatible path ─────────────────────────────
+            present = set(observed.ports)
+            for port in sorted(present):
+                counts.pop(port, None)
+                if port not in known_open:
+                    known_open.add(port)
+                    state.notified_port_not_open.get(ip, set()).discard(port)
+                    changes.append(NetworkChange(
+                        change_type="new_port",
+                        asset_ip=ip,
+                        detail=f"port {port} opened",
+                        evidence=f"Port {port}/tcp open on {ip} in a complete TCP scan.",
+                        port=port,
+                    ))
+            for port in sorted(known_open - present):
+                count = counts.get(port, 0) + 1
+                counts[port] = count
+                if count < 2:
+                    continue
+                counts[port] = 0
+                known_open.discard(port)
+                notified = state.notified_port_not_open.setdefault(ip, set())
+                if port not in notified:
+                    changes.append(NetworkChange(
+                        change_type="port_not_open",
+                        asset_ip=ip,
+                        detail=f"port {port} not open",
+                        evidence=f"Port {port}/tcp absent from two complete TCP scans of {ip}.",
+                        port=port,
+                    ))
+                    notified.add(port)
+
     return changes
-
 
 def _compute_host_transitions(observations: CycleObservations, state: NetworkState) -> List[NetworkChange]:
     """host_not_observed (two NOT_OBSERVED ARP answers, L2 direct only) and host_recovered."""
@@ -648,7 +767,39 @@ def _do_check(
             counter.phase("erreur", finished=True)
             return
 
+        deferred_before = set(state.deferred_initialization)
         changes = _normalize_and_filter(observations, state)
+
+        # A deferred host's first complete observation establishes its baseline
+        # before its initialization event is persisted. If storage fails, the
+        # cycle stops and the host remains deferred on restart: never a false
+        # initialization, never a duplicate new_host.
+        # R3: build the initialization event record here so it can be passed
+        # atomically into store_recovered_host_baseline. Building it consumes
+        # one EventStamp value; the change is then marked pre-persisted so
+        # process_changes() reuses that identity/timestamp without writing a
+        # second event. Later changes receive strictly later stamps.
+        for change in changes:
+            if (change.change_type == "host_ports_initialized"
+                    and change.asset_ip in deferred_before
+                    and change.initial_ports is not None):
+                init_ev = _make_initialization_event_record(
+                    change=change,
+                    network_id=network_id,
+                    run_session_id=run_session_id,
+                    stamp=state.stamp,
+                )
+                store_recovered_host_baseline(
+                    network_id, identity, change.asset_ip,
+                    list(change.initial_ports),
+                    initialization_event=init_ev,
+                )
+                # The event is already durable: process_changes() must use this
+                # identity/timestamp and never persist a second copy.
+                change.event_id = init_ev["event_id"]
+                change.event_timestamp = init_ev["timestamp"]
+                change.event_pre_persisted = True
+
         if partial is not None and not state.scan_degraded_active:
             # One scan_degraded per episode, after the exploitable transitions of this cycle.
             changes.append(_scan_degraded_change(target_network, str(partial)))
@@ -674,6 +825,13 @@ def _do_check(
         # storage failure above raises before this point, so last_check_time
         # is not advanced and the cycle is not reported as successful.
         state.scan_degraded_active = False
+        if state.deferred_initialization:
+            # Usable hosts were checked, but a known host still has no complete
+            # baseline observation: the cycle is not a full success and must not
+            # advance last_check_time as if initialization were complete.
+            sentinel_update_state(network_id=network_id, sentinel_status="degraded")
+            counter.phase("dégradé", finished=True)
+            return
         now = datetime.datetime.now(timezone.utc).isoformat()
         sentinel_update_state(
             network_id=network_id,
@@ -746,14 +904,22 @@ def status(network_id: Optional[str] = None) -> dict:
     gateway_mac = state.get("gateway_mac", "")
 
     display_state = _compute_display_state(sentinel_state, last_check, interval)
-    # Machines are the hosts of this identity's baseline (spec §8: actives/connues).
-    # An incomplete identity or an unreadable count is unavailable (None), never 0.
+    # Initialized machines and deferred discovered hosts are separate quantities:
+    # deferred IPs count as known, but never as initialized/active machines.
+    # An unreadable inventory is unavailable (None), never a fabricated zero.
     identity = _state_identity(state)
     known_hosts = active_hosts = None
+    inventory = deferred_ips = absent_ips = None
     if identity is not None:
         try:
-            known_hosts, active_hosts = sentinel_identity_machine_counts(network_id, *identity)
+            inventory = sentinel_identity_machine_inventory(network_id, *identity)
+            deferred_ips = sentinel_identity_deferred_ips(network_id, *identity)
+            absent_ips = sentinel_identity_absent_ips(network_id, *identity)
+            known_hosts, active_hosts = sentinel_identity_machine_counts(
+                network_id, *identity, deferred_ips=deferred_ips,
+            )
         except Exception:
+            inventory = deferred_ips = absent_ips = None
             known_hosts = active_hosts = None
 
     try:
@@ -773,6 +939,28 @@ def status(network_id: Optional[str] = None) -> dict:
         except Exception:
             pass
 
+    # R1: initialized, deferred and historical (absent) hosts are separate
+    # quantities. A deferred host is known but has no baseline row, so it is
+    # never counted as initialized or active. An absent host is retained only
+    # for its event history and is not a current machine either. The three
+    # lists are made disjoint: a currently deferred IP is not also "absent".
+    if deferred_ips is not None and absent_ips is not None:
+        deferred_set = set(deferred_ips)
+        absent_ips = [ip for ip in absent_ips if ip not in deferred_set]
+    deferred_count = None if deferred_ips is None else len(deferred_ips)
+    absent_count = None if absent_ips is None else len(absent_ips)
+    host_inventory = None
+    if inventory is not None and deferred_ips is not None and absent_ips is not None:
+        rows = {}
+        for row in inventory:
+            rows[row["ip"]] = {"ip": row["ip"], "state": "INITIALIZED",
+                               "active": row["active"]}
+        for ip in deferred_ips:
+            rows.setdefault(ip, {"ip": ip, "state": "UNKNOWN / DEGRADED",
+                                 "active": False})
+        for ip in absent_ips:
+            rows.setdefault(ip, {"ip": ip, "state": "ABSENT", "active": False})
+        host_inventory = [rows[ip] for ip in sorted(rows)]
     return {
         "network_id": network_id,
         "sentinel_state": sentinel_state,
@@ -785,6 +973,10 @@ def status(network_id: Optional[str] = None) -> dict:
         "seconds_until_check": seconds_until,
         "active_hosts": active_hosts,
         "known_hosts": known_hosts,
+        "initialized_hosts": None if inventory is None else len(inventory),
+        "deferred_hosts": deferred_count,
+        "absent_hosts": absent_count,
+        "host_inventory": host_inventory,
         "unresolved_alerts": unresolved,
     }
 
@@ -802,6 +994,10 @@ def display_status(network_id: Optional[str] = None) -> None:
         machines = "machines indisponibles"
     else:
         machines = f"{s['active_hosts']}/{s['known_hosts']} machines"
+        if s.get("deferred_hosts"):
+            machines += f" | différés: {s['deferred_hosts']}"
+        if s.get("absent_hosts"):
+            machines += f" | absents: {s['absent_hosts']}"
     unresolved = s.get("unresolved_alerts")
     alerts = "indisponible" if unresolved is None else unresolved
     changes = "—"  # total changes requires session event count — omitted for compactness
@@ -820,6 +1016,21 @@ def display_status(network_id: Optional[str] = None) -> None:
 
     display(line1)
     display(line2)
+    if s.get("host_inventory") is None:
+        display("[dim]    inventaire des hôtes indisponible[/dim]")
+    elif s["host_inventory"]:
+        display("[bold]Hôtes connus :[/bold]")
+        for host in s["host_inventory"]:
+            if host["state"] == "INITIALIZED":
+                label = "INITIALIZED / ACTIF" if host["active"] else "INITIALIZED / INACTIF"
+                color = "green" if host["active"] else "dim"
+            elif host["state"] == "ABSENT":
+                label, color = "ABSENT / HISTORIQUE", "dim"
+            else:
+                label, color = "UNKNOWN / DEGRADED", "yellow"
+            display(f"    [{color}]{host['ip']} — {label}[/{color}]")
+    else:
+        display("[dim]    aucun hôte connu[/dim]")
     _display_hints(state.lower())
 
 

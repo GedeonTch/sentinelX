@@ -23,15 +23,15 @@
 ## 2. État réel du dépôt
 
 ```
-Dépôt    : /home/anonymous/sentinelX
+Dépôt    : $SENTINELX_REPO
 Branche  : a4-arena
-HEAD     : 365749878aa3e886da9cd33c2322fb75277c16ce  (T23-B, commit Arena)
-Tests    : 2024–2026 passed à HEAD 3657498 (2 tests lifecycle flaky sous forte charge CPU — passent en isolation)
+HEAD     : 9034f0131ebeaf63dc51bf217cea3ec3f6ab068e  (origin/a4-arena, ticket 4 ; T23-B = 365749878aa3e886da9cd33c2322fb75277c16ce)
+Tests    : 2024–2026 passed à HEAD 3657498 (2 tests lifecycle flaky sous forte charge CPU — passent en isolation) ; 2083 passed à HEAD 9034f01 (ticket 4, mesure de l'agent, non revue par tiers)
 Deps     : paramiko 5.1.0, smbprotocol 1.17.0 (installés dans venv principal)
 ```
 
-**Modifications locales non commitées :**
-- `cli.py` — colonne Confidence dans les tables Security Findings (Confidence CLI, 14/14 tests ✓)
+**Modifications locales (non vérifiées) :**
+- `cli.py` — colonne Confidence (Confidence CLI) : commit `85870ac` présent dans `origin/a4-arena` ; l'état du poste du propriétaire n'est pas vérifié
 - `tests/test_cli.py` — tests correspondants
 
 **Fichiers non suivis (préservés) :** `.vscode/`, `cli.py.rej`
@@ -87,6 +87,22 @@ Ces décisions sont closes et ne peuvent être remises en question sans autorisa
 | T23-B : `new_port` HIGH provisoire | Verrouillée |
 | T22 scope V1 : FTP, SNMP, SSH-password, SMB | Verrouillée |
 | T21 critère 7 : colonne `Target` → `Port`, IP portée par l'en-tête de groupe | Déviation acceptée (2026-11-08) |
+
+**Décisions A1 approuvées par le propriétaire** (inscription à l'Étape 0 ; plan V2.2 approuvé, DEC-02, 2026-11-13) :
+
+| Décision | Statut |
+|---|---|
+| A1 : hôte absent du cycle → remise à zéro des compteurs de ses ports (V4) | Approuvée |
+| A1 : fermeture individuelle après deux observations `closed` explicites consécutives, pour chaque port connu ; aucun seuil global (G-b écartée ; G-c reportée) | Approuvée |
+| A1 : aucune fermeture confirmée sur passage `closed` → `filtered` | Approuvée (réserve à consigner) |
+| A1 : validation XML commune au monitor et à l'apprentissage de baseline | Approuvée |
+| A1 : compteurs intermédiaires non restaurés après redémarrage (R7) ; redémarrages répétés = conséquence documentée | Approuvée |
+| D5-B : preuve de fermeture dans `events.details` | Conception approuvée ; implémentation non autorisée |
+| D1 : distinction preuve / historique | Approuvée (forme) ; libellé ouvert (DEC-03) |
+| D6 : ticket indépendant hors A1 | Approuvé ; DEC-04 examinée au moment du ticket |
+| CRED-02 : absence de candidats SSH génériques | Conforme à `docs/T22-CREDENTIALS.md` ; sans ticket |
+| NET-01 : réseau `192.168.57.0/24` | Non reproduit ; `--target` obligatoire ; sans ticket de code |
+| ARENA §9.6 | Supersédée par la politique A1 approuvée ; `docs/MASTER-REFERENCE.md` est le document maître officiel |
 
 ---
 
@@ -156,19 +172,35 @@ Les statuts ci-dessous sont établis à partir de `git log`, `git show --stat`, 
 |---|---|---|---|
 | **T20** | Rapport HTML — refonte présentation | — | Approuvée (voir §7) |
 
-### 6.4 Tâches locales en attente de commit
+### 6.4 Confidence CLI (commit présent, revue non tracée)
 
 | Tâche | Fichiers | État |
 |---|---|---|
-| Confidence CLI | `cli.py`, `tests/test_cli.py` | Modifié local, 14/14 tests ✓, commit en attente d'autorisation |
+| Confidence CLI | `cli.py`, `tests/test_cli.py` | Commit `85870ac` présent dans `origin/a4-arena` (vérifié 2026-11-12) ; revue Kiro non tracée |
+
+### 6.4bis Commits de `origin/a4-arena` non consignés (audit 2026-11-12)
+
+| Commit | Date (git) | Sujet (git) | État consigné |
+|---|---|---|---|
+| `85870ac` | 2026-11-10 | feat(cli): add confidence column to findings tables | Consigné en 6.4 (CONFIDENCE-CLI) |
+| `7ff3d89` | 2026-11-10 | docs: add master reference, implementation tracking and agent skill | Ajoute le document maître (version antérieure) |
+| `13e7849` | 2026-11-10 | fix Commit 3657498 (`requirements.txt`, 1 ligne) | Non consigné |
+| `63e1a7b` | 2026-11-10 | feat(sentinel): interrupt nmap on stop request (point 1) | Non consigné |
+| `b1ab727` | 2026-11-11 | fix(sentinel): detect gateway on connected routes (point 2) | Non consigné |
+| `e4f3f9e` | 2026-11-11 | feat(sentinel): colour event types and label closed ports (ticket 3) | Non consigné |
+| `9034f01` | 2026-11-11 | feat(sentinel): number hosts in monitor table (ticket 4) | Non consigné (HEAD réel) |
+
+Dates git (2026-11-10 et 2026-11-11) antérieures à la date de référence de la mission (2026-11-12). Date de rédaction de cette proposition : 2026-11-12.
 
 ### 6.5 Proposition d'ordre de la feuille de route
 
 ```
-Confidence CLI (commit) → T20
+Confidence CLI (commité, `85870ac`) → T20
 ```
 
-🔒 Proposition uniquement. T24 et T25 partiellement livrés — leur validation finale peut s'insérer à tout moment selon la décision du propriétaire. Aucune réorganisation sans autorisation explicite.
+Ordre approuvé (plan v2.2, `docs-proposees/PLAN-tickets-global.md` §5, DEC-02) : Étape 0 (documentation préalable, §5.0) → SMB-01 → A1 (ticket parent unique) → CRED-01 → D5 (après A1) → D1 (après D5) ; autres tickets selon dépendances et priorité ; D6 indépendant.
+
+🔒 Ordre validé ; aucun ticket autorisé. T24 et T25 partiellement livrés — leur validation finale peut s'insérer à tout moment selon la décision du propriétaire. Aucune réorganisation sans autorisation explicite.
 
 ---
 
@@ -307,8 +339,8 @@ Spécification complète, critères d'acceptation et décisions de révision 12 
 
 ```bash
 TESTHOME=$(mktemp -d /tmp/sentinelx-test-XXXXXX)
-cd /home/anonymous/sentinelX
-HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=/home/anonymous/sentinelX/venv/bin/sentinel \
+cd $SENTINELX_REPO
+HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=$SENTINELX_REPO/venv/bin/sentinel \
   bash -c "umask 022 && venv/bin/python -m pytest --tb=short -q"
 git diff --check
 git rev-parse HEAD

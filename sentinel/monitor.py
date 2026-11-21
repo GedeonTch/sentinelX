@@ -27,12 +27,20 @@ Failure contract (§9.4):
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from sentinel.arp_probe import ArpProbeResult, ArpProbeStatus, arp_probe
 from core.process_control import ScanInterrupted
 from sentinel.baseline import SENTINEL_TCP_PORTS, BaselineEntry, NetworkIdentity
+from detect.tcp_scan import PortState as TcpPortState  # A1 TCP-01
+from detect.tcp_scan import (  # A1 TCP-02
+    _expand_port_spec,
+    _parse_host_tcp_states,
+    _run_nmap_tcp as _tcp_run_nmap,
+    parse_sentinel_open_ports,
+)
 
 
 class ScanFailedError(Exception):
@@ -46,10 +54,15 @@ class HostTcpObservation:
     ports: None = unknown (scan incomplete or not performed),
            []   = complete scan, no open port,
            [..] = complete scan, these ports are open.
+
+    states: per-port PortState dict from TCP-01 (None when unavailable).
+            Present only when the scan is COMPLETE; used by TCP-02 to
+            distinguish CLOSED from FILTERED in _compute_port_transitions.
     """
 
     ip: str
     ports: Optional[List[int]]
+    states: Optional[Dict[int, TcpPortState]] = None  # A1 TCP-02
 
 
 @dataclass
@@ -68,6 +81,12 @@ class NetworkChange:
     port: Optional[int] = None
     initial_ports: Optional[List[int]] = None
     initial_ports_known: bool = False
+    # Recovery metadata is transient: a deferred-host initialization event may
+    # already have been committed atomically with its baseline before the
+    # normal event pipeline reaches this change.
+    event_id: Optional[str] = None
+    event_timestamp: Optional[str] = None
+    event_pre_persisted: bool = False
 
 
 @dataclass
@@ -155,11 +174,11 @@ def check_network(
         _checkpoint(should_stop)
         if ip in ping_hosts:
             # ordinary scan, same call as before T23-B
-            ports = _get_open_ports(ip, should_stop=should_stop)
+            tcp_observations[ip] = _get_host_tcp_observation(ip, should_stop=should_stop)
         else:
             # ARP-only host: -Pn
-            ports = _get_open_ports(ip, skip_host_discovery=True, should_stop=should_stop)
-        tcp_observations[ip] = HostTcpObservation(ip=ip, ports=ports)
+            tcp_observations[ip] = _get_host_tcp_observation(
+                ip, skip_host_discovery=True, should_stop=should_stop)
     services_degraded = any(obs.ports is None for obs in tcp_observations.values())
 
     candidates: List[NetworkChange] = []
@@ -261,6 +280,56 @@ def _get_active_hosts(
         return None
 
 
+def _get_host_tcp_observation(
+    ip: str,
+    skip_host_discovery: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> HostTcpObservation:
+    """Run exactly ONE TCP scan and return a validated HostTcpObservation.
+
+    This is the primary Sentinel Monitor path (A1/TCP-02). It calls _run_nmap_tcp
+    exactly once, then applies ``parse_sentinel_open_ports`` — the same complete
+    acceptance gate used by baseline learning. That gate proves the run finished,
+    the host is up and not timed out, the XML has one host with the requested
+    address, the planned port set and <scaninfo services> match SENTINEL_TCP_PORTS,
+    and every planned port is attributed exactly once.
+
+    Only after that acceptance are per-port states parsed with
+    ``_parse_host_tcp_states``. Any failure (timeout, missing tool, malformed or
+    inconsistent XML, wrong address, etc.) returns HostTcpObservation(ip=ip,
+    ports=None) — INCOMPLETE, never an empty observation, no silent fallback.
+    """
+    try:
+        xml = _tcp_run_nmap(
+            ip, "normal", SENTINEL_TCP_PORTS,
+            strict=True, skip_host_discovery=skip_host_discovery,
+            should_stop=should_stop,
+        )
+        if not xml:
+            return HostTcpObservation(ip=ip, ports=None)
+
+        # Authoritative acceptance gate shared with baseline learning: the same
+        # validation and the same refusals, including exact scaninfo services.
+        ports = parse_sentinel_open_ports(xml, ip, SENTINEL_TCP_PORTS)
+        if ports is None:
+            return HostTcpObservation(ip=ip, ports=None)
+
+        expected = _expand_port_spec(SENTINEL_TCP_PORTS)
+        if expected is None:
+            return HostTcpObservation(ip=ip, ports=None)
+        root = ET.fromstring(xml)
+        hosts = root.findall("host")
+        if len(hosts) != 1:
+            return HostTcpObservation(ip=ip, ports=None)
+        obs = _parse_host_tcp_states(hosts[0], expected)
+        if obs.status != "COMPLETE" or obs.ports != ports:
+            # The detailed parse must also prove a complete observation.
+            return HostTcpObservation(ip=ip, ports=None)
+        return HostTcpObservation(ip=ip, ports=obs.ports, states=obs.states)
+    except Exception:
+        # Any error → INCOMPLETE; never fall back to a previous scan result
+        return HostTcpObservation(ip=ip, ports=None)
+
 def _get_open_ports(
     ip: str,
     skip_host_discovery: bool = False,
@@ -268,21 +337,14 @@ def _get_open_ports(
 ) -> Optional[List[int]]:
     """Open TCP ports of a proven complete scan; None means the state is unknown.
 
-    skip_host_discovery adds -Pn for hosts that were found by ARP but not by ping.
-    ScanInterrupted (BaseException) is not caught: an interruption is not an
-    unknown state.
+    Compatibility wrapper: delegates to _get_host_tcp_observation and returns
+    only the .ports property. This function is kept for callers that still use
+    the binary ports-list contract and for test compatibility.
     """
-    try:
-        from detect.tcp_scan import _run_nmap_tcp, parse_sentinel_open_ports
-        xml = _run_nmap_tcp(
-            ip, "normal", SENTINEL_TCP_PORTS,
-            strict=True, skip_host_discovery=skip_host_discovery,
-            should_stop=should_stop,
-        )
-        return parse_sentinel_open_ports(xml, ip, SENTINEL_TCP_PORTS)
-    except Exception:
-        return None
-
+    obs = _get_host_tcp_observation(
+        ip, skip_host_discovery=skip_host_discovery, should_stop=should_stop,
+    )
+    return obs.ports
 
 def _get_arp_mac(ip: str) -> str:
     """Return a MAC only when an active targeted ARP probe responds."""

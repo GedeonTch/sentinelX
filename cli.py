@@ -1773,6 +1773,114 @@ sentinel_findings_app = typer.Typer(help="Consultation explicite des Findings Se
 sentinel_app.add_typer(sentinel_findings_app, name="findings")
 
 
+@sentinel_findings_app.command("list")
+def sentinel_findings_list(
+    session: str = typer.Option(..., "--session", "-s",
+        help="Session Sentinel (session_id des Findings a lister)."),
+) -> None:
+    """Lister les Findings Sentinel en trois groupes : EMISES / MASQUEES / INDETERMINE.
+
+    Liaison Finding/evenement explicite via finding_id dans events.details.
+    Anciens evenements sans finding_id -> INDETERMINE (aucune association supposee).
+    """
+    from core.database import (
+        sentinel_read_findings, sentinel_network_snapshot,
+        sentinel_find_network_for_session,
+    )
+    from core.finding import format_finding_id
+    from core.logger import get_console
+    from rich.table import Table
+    from rich import box as rich_box
+
+    try:
+        sentinel_fs = sorted(sentinel_read_findings(session),
+                             key=lambda f: f.created_at or "")
+    except ValueError as exc:
+        display(f"[red]Impossible de lire la session {escape(session)!r} : "
+                f"{escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        display(f"[red]Impossible de lire la session {escape(session)!r} : "
+                f"{type(exc).__name__}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if not sentinel_fs:
+        display(f"[yellow]Aucun Finding Sentinel dans la session {escape(session)}.[/yellow]")
+        return
+
+    notif_by_finding: dict = {}
+    network_id = sentinel_find_network_for_session(session)
+    if network_id:
+        try:
+            evts = sorted(sentinel_network_snapshot(network_id)["events"],
+                          key=lambda ev: ev.get("timestamp") or "")
+            for ev in evts:
+                details = ev.get("details", {})
+                if not isinstance(details, dict):
+                    continue
+                fid = details.get("finding_id")
+                if not fid:
+                    continue
+                notif = details.get("notification", {})
+                state = notif.get("state", "unknown") if isinstance(notif, dict) else "unknown"
+                if state in ("confirmed", "masked"):
+                    # Chronological iteration: the latest state wins.
+                    notif_by_finding[fid] = state
+        except Exception:
+            pass
+
+    confirmed_fs, masked_fs, unknown_fs = [], [], []
+    for f in sentinel_fs:
+        s = notif_by_finding.get(f.id)
+        if s == "confirmed":
+            confirmed_fs.append(f)
+        elif s == "masked":
+            masked_fs.append(f)
+        else:
+            unknown_fs.append(f)
+
+    def _render_group(title, findings, style):
+        # Narrow terminals: one vertical entry per Finding so the short ID and
+        # the complete UUID each stay on their own line (never truncated).
+        if get_console().width < 100:
+            display(f"[bold {style}]{title}[/bold {style}]")
+            for f in findings:
+                display(Text(f"  {format_finding_id(f.id)}", style="dim"))
+                display(Text(f"  {f.id}", style="dim"))
+                display(Text(
+                    f"  {f.target_ip or '?'}  "
+                    f"{f.module.removeprefix('sentinel.')}  {f.severity.value}"
+                ))
+            return
+
+        t = Table(title=title, box=rich_box.SIMPLE_HEAD, show_lines=False, border_style=style)
+        t.add_column("ID court", style="dim", no_wrap=True)
+        t.add_column("UUID complet", style="dim", no_wrap=True, min_width=36)
+        t.add_column("Hote")
+        t.add_column("Type")
+        t.add_column("Severite")
+        for f in findings:
+            t.add_row(format_finding_id(f.id), f.id, f.target_ip or "?",
+                      f.module.removeprefix("sentinel."), f.severity.value)
+        display(t)
+
+    if confirmed_fs:
+        _render_group("NOTIFICATIONS EMISES", confirmed_fs, "green")
+    if masked_fs:
+        _render_group("NOTIFICATIONS MASQUEES (quota)", masked_fs, "yellow")
+    if unknown_fs:
+        _render_group("STATUT INDETERMINE", unknown_fs, "dim")
+
+    display(
+        f"[dim]{len(sentinel_fs)} Finding(s) : "
+        f"{len(confirmed_fs)} emis, {len(masked_fs)} masques, "
+        f"{len(unknown_fs)} indetermines[/dim]"
+    )
+    if not network_id:
+        display("[dim](Network_id non resolu : etats de notification non disponibles)[/dim]")
+    display(f"[dim]netlab sentinel findings show <UUID> --session {escape(session)}[/dim]")
+
+
 @sentinel_findings_app.command("show")
 def sentinel_findings_show(
     finding_id: str = typer.Argument(..., help="UUID complet du Finding Sentinel."),

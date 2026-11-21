@@ -16,7 +16,7 @@ from core import process_control as pc
 from core.process_control import ScanInterrupted, run_process
 from sentinel import monitor, sentinel_manager as manager
 from sentinel.baseline import BaselineEntry, NetworkIdentity
-from sentinel.monitor import _get_active_hosts, _get_open_ports, check_network
+from sentinel.monitor import _get_active_hosts, _get_host_tcp_observation, check_network
 from tests.fake_nmap import install, kill_leftovers, pid_alive, runs
 from tests.test_sentinel_baseline_reliability import nmap_tcp_xml
 
@@ -113,7 +113,7 @@ class TestMonitorReactivity:
     def test_stop_during_tcp_scan_is_an_interruption_not_an_unknown_result(self, fake_nmap, monkeypatch):
         monkeypatch.setenv('FAKE_NMAP_MODE', 'sleep')
         with pytest.raises(ScanInterrupted):
-            _get_open_ports('192.0.2.10', should_stop=started(fake_nmap))
+            _get_host_tcp_observation('192.0.2.10', should_stop=started(fake_nmap))
         assert not pid_alive(pid_of(fake_nmap))
 
     def test_stop_between_two_hosts_skips_the_next_host(self, fake_nmap, monkeypatch):
@@ -121,15 +121,15 @@ class TestMonitorReactivity:
         (fake_nmap / '192.0.2.10.xml').write_text(nmap_tcp_xml('192.0.2.10', open_ports=[22]), encoding='utf-8')
         done = {'hosts': 0}
         attempted = []   # every attempt, even one that the scanner refuses to start
-        real_get_open_ports = monitor._get_open_ports
+        real_get_host_tcp_observation = monitor._get_host_tcp_observation
 
         def counting(ip, skip_host_discovery=False, should_stop=None):
             attempted.append(ip)
-            result = real_get_open_ports(ip, skip_host_discovery=skip_host_discovery, should_stop=should_stop)
+            result = real_get_host_tcp_observation(ip, skip_host_discovery=skip_host_discovery, should_stop=should_stop)
             done['hosts'] += 1
             return result
 
-        monkeypatch.setattr(monitor, '_get_open_ports', counting)
+        monkeypatch.setattr(monitor, '_get_host_tcp_observation', counting)
         monkeypatch.setattr(monitor, '_get_active_hosts',
                             lambda target, should_stop=None: ['192.0.2.10', '192.0.2.11'])
         with pytest.raises(ScanInterrupted):
@@ -143,7 +143,7 @@ class TestMonitorReactivity:
         stop = lambda: False
         with patch('detect.tcp_scan.run_process',
                    return_value=subprocess.CompletedProcess([], 0, nmap_tcp_xml('192.0.2.10'), '')) as tcp_run:
-            assert _get_open_ports('192.0.2.10', should_stop=stop) == []
+            assert _get_host_tcp_observation('192.0.2.10', should_stop=stop).ports == []
         assert tcp_run.call_args.args[1] == 300 and tcp_run.call_args.args[2] is stop
         with patch('recon.device_fingerprint.run_process',
                    return_value=subprocess.CompletedProcess([], 0, '', '')) as ping_run:
@@ -158,17 +158,17 @@ class TestMonitorReactivity:
             return real_run(cmd, 0.5, should_stop)
 
         monkeypatch.setattr('detect.tcp_scan.run_process', short_deadline)
-        assert _get_open_ports('192.0.2.10', should_stop=lambda: False) is None
+        assert _get_host_tcp_observation('192.0.2.10', should_stop=lambda: False).ports is None
         assert not pid_alive(pid_of(fake_nmap))
 
     def test_complete_scan_without_open_port_is_empty_list(self, fake_nmap, monkeypatch):
         monkeypatch.setenv('FAKE_NMAP_MODE', 'xml-by-ip')
         (fake_nmap / '192.0.2.10.xml').write_text(nmap_tcp_xml('192.0.2.10'), encoding='utf-8')
-        assert _get_open_ports('192.0.2.10', should_stop=lambda: False) == []
+        assert _get_host_tcp_observation('192.0.2.10', should_stop=lambda: False).ports == []
 
     def test_non_zero_exit_is_unknown_with_the_interruptible_runner(self, fake_nmap, monkeypatch):
         monkeypatch.setenv('FAKE_NMAP_MODE', 'exit1')
-        assert _get_open_ports('192.0.2.10', should_stop=lambda: False) is None
+        assert _get_host_tcp_observation('192.0.2.10', should_stop=lambda: False).ports is None
 
 
 class TestCycleAbandon:

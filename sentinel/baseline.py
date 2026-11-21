@@ -28,6 +28,8 @@ import ipaddress
 import re
 import socket
 import subprocess
+import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
@@ -37,9 +39,14 @@ import typer
 
 from core.database import (
     SentinelStorageError,
+    _open_sentinel_event_connection,  # R3: atomic recovery
+    _reuse_or_create_asset,           # R3: atomic recovery
+    _sentinel_storage_error,          # R3: atomic recovery
     sentinel_baseline_exists as db_baseline_exists,
     sentinel_get_baseline_entries,
+    sentinel_network_snapshot,
     sentinel_replace_baseline,
+    sentinel_upsert_baseline_entries,
 )
 from core.logger import display
 
@@ -83,6 +90,12 @@ def _run_nmap_ping(target: str):
 
 # Ports scanned for every Sentinel host (baseline and monitor share this scope).
 SENTINEL_TCP_PORTS = "1-1024,3389,5432,3306,1433,8080,8443"
+
+# Internal, persisted outcome of the latest baseline learning. Its
+# ``deferred_ips`` list is authoritative for hosts that answered discovery but
+# never produced a complete TCP observation: they stay known and UNINITIALIZED
+# across restarts until their first complete scan (no schema change).
+BASELINE_INITIALIZATION_EVENT = "baseline_initialization"
 
 
 def _run_nmap_tcp(target: str, profile: str, ports: str):
@@ -428,19 +441,151 @@ def get_baseline(
 # learn_baseline
 # ---------------------------------------------------------------------------
 
+def _baseline_initialization_event(
+    network_id: str,
+    target_network: str,
+    deferred_ips: List[str],
+    successful_ips: List[str],
+    active_ips: List[str],
+) -> dict:
+    """Build the internal durable record of one baseline learning outcome.
+
+    The event is written in the same transaction as the baseline rows. Its
+    ``deferred_ips`` list lets a restart distinguish a host that failed its
+    initial scan (known, uninitialized) from a genuinely new host. A later
+    learning event supersedes it, including a later complete one (empty list).
+    """
+    from sentinel.alerting import EventStamp
+    from sentinel.notifications import VERSION
+
+    snapshot = sentinel_network_snapshot(network_id)
+    stamp = EventStamp.restore(network_id, snapshot["events"])
+    timestamp = stamp.next()
+    details = {
+        # Network scope, like scan_degraded: never a fake host.
+        "ip": target_network,
+        "detail": "baseline initialization",
+        "deferred_ips": sorted(set(deferred_ips)),
+        "successful_ips": sorted(set(successful_ips)),
+        "active_ips": sorted(set(active_ips)),
+        "whitelisted": False,
+        # Internal bookkeeping, never a notification nor a quota reservation.
+        "notification": {
+            "version": VERSION,
+            "state": "whitelisted",
+            "decided_at": timestamp,
+        },
+    }
+    return {
+        "event_id": str(uuid.uuid4()),
+        "type": BASELINE_INITIALIZATION_EVENT,
+        "timestamp": timestamp,
+        "details": details,
+        "resolved": True,
+    }
+
+
+def store_recovered_host_baseline(
+    network_id: str,
+    identity: NetworkIdentity,
+    ip: str,
+    ports: List[int],
+    last_scan: Optional[str] = None,
+    initialization_event: Optional[dict] = None,
+) -> None:
+    """Persist the first complete baseline of a previously deferred host.
+
+    When ``initialization_event`` is provided, the baseline row and the event
+    are written in one transaction (R3: atomic recovery). Without the event
+    argument, only the baseline row is written (backward-compatible path).
+
+    Storage errors propagate: a host is never reported as initialized before
+    its baseline row (and optional event) are durable.
+    """
+    if ports is None:
+        raise ValueError("a deferred host baseline needs a complete port list")
+    scan_time = last_scan or datetime.datetime.now(timezone.utc).isoformat()
+
+    if initialization_event is None:
+        sentinel_upsert_baseline_entries(
+            network_id,
+            identity.target_network,
+            identity.gateway_ip,
+            identity.gateway_mac,
+            [{"ip": ip, "mac": _get_arp_mac(ip),
+              "ports": list(ports), "last_scan": scan_time}],
+            scan_time,
+        )
+        return
+
+    # R3: atomic path — baseline row + initialization event in one transaction.
+    mac = _get_arp_mac(ip)
+    subject = "baseline recuperee (hote differe)"
+    conn = _open_sentinel_event_connection(network_id, subject)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        previous = conn.execute(
+            "SELECT b.asset_id FROM baseline b JOIN assets a ON a.id=b.asset_id "
+            "WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=? "
+            "AND a.ip=? ORDER BY b.rowid LIMIT 1",
+            (identity.target_network, identity.gateway_ip, identity.gateway_mac, ip),
+        ).fetchone()
+        asset_id = _reuse_or_create_asset(
+            conn, ip, previous[0] if previous else None, mac, scan_time,
+        )
+        conn.execute(
+            "DELETE FROM baseline WHERE target_network=? AND gateway_ip=? "
+            "AND gateway_mac=? "
+            "AND asset_id IN (SELECT id FROM assets WHERE ip=?)",
+            (identity.target_network, identity.gateway_ip, identity.gateway_mac, ip),
+        )
+        conn.execute(
+            "INSERT INTO baseline "
+            "(id,asset_id,target_network,gateway_ip,gateway_mac,ports,services,mac,last_scan) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), asset_id,
+             identity.target_network, identity.gateway_ip, identity.gateway_mac,
+             json.dumps(list(ports)), "{}", mac, scan_time),
+        )
+        ev = initialization_event
+        conn.execute(
+            "INSERT OR IGNORE INTO events "
+            "(id,timestamp,type,asset_id,details,resolved) VALUES (?,?,?,?,?,?)",
+            (ev["event_id"], ev["timestamp"], ev["type"],
+             None, json.dumps(ev["details"]), int(ev.get("resolved", False))),
+        )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise _sentinel_storage_error(exc, subject) from exc
+    finally:
+        conn.close()
+
+
 def learn_baseline(
     target_network: str,
     network_id: str,
     identity: NetworkIdentity,
     force_relearn: bool = False,
 ) -> bool:
-    """Discover active hosts and their open ports, store as baseline.
+    """Discover active hosts and their open ports, store the usable baseline.
 
-    Stores in the persistent sentinel DB (~/.netlab/sentinel/<network_id>.db).
-    Learning is all-or-nothing: every active host needs a proven complete port
-    scan (an unknown host aborts it, with no partial baseline). With
-    force_relearn, the old baseline is replaced in the same transaction as the
-    new one, so a failure leaves the previous baseline untouched.
+    Each host is handled on its own outcome:
+
+    - a complete TCP observation stores (or updates) that host's baseline;
+    - a failed or incomplete observation never stores ``[]``. If the host had a
+      previous baseline, that entry is retained unchanged. Otherwise the host
+      is recorded as deferred (known, uninitialized) in an internal event, so a
+      restart cannot mistake it for a genuinely new host;
+    - when no host produces a complete observation, the baseline is not
+      modified and the function returns False (Sentinel must not start healthy).
+
+    With force_relearn, the old identity baseline is replaced in the same
+    transaction as the new rows, but retained entries for failed hosts keep
+    their previous ports, MAC and last_scan. A storage failure rolls everything
+    back. The internal baseline-initialization event is committed with the
+    baseline, so partial initialization is never persisted without its durable
+    deferred markers.
 
     Args:
         target_network: CIDR to scan.
@@ -449,7 +594,8 @@ def learn_baseline(
         force_relearn:  If True, replace existing baseline for this identity.
 
     Returns:
-        bool: True if baseline was successfully learned and stored.
+        bool: True if at least one host was stored and monitoring may start
+              (possibly degraded). False when no usable observation exists.
     """
     from detect.tcp_scan import parse_sentinel_open_ports
     from recon.device_fingerprint import DiscoveryFailed
@@ -472,34 +618,83 @@ def learn_baseline(
         return False
 
     display(f"[green]{len(active_ips)} host(s) found.[/green]")
+    previous = get_baseline(network_id, identity)
 
-    # Step 2 — every host needs a proven complete port scan. One unknown host
-    # aborts the whole learning: no partial baseline is ever stored.
+    # Step 2 — per-host outcome. A failed host never blocks usable peers and is
+    # never stored as an empty port list.
     now = datetime.datetime.now(timezone.utc).isoformat()
-    new_entries: List[dict] = []
+    successful_entries: List[dict] = []
+    retained_entries: List[dict] = []
+    deferred_ips: List[str] = []
     for ip in active_ips:
         ports = parse_sentinel_open_ports(
             _run_nmap_tcp(ip, "normal", SENTINEL_TCP_PORTS), ip, SENTINEL_TCP_PORTS,
         )
-        if ports is None:
-            display(
-                f"[red]Port state of {ip} is unknown (scan failed or incomplete). "
-                "Baseline not stored; previous baseline unchanged.[/red]"
-            )
-            return False
-        new_entries.append({"ip": ip, "mac": _get_arp_mac(ip), "ports": ports})
-        display(f"  [dim]{ip:15} — {len(ports)} port(s)[/dim]")
+        if ports is not None:
+            successful_entries.append({
+                "ip": ip,
+                "mac": _get_arp_mac(ip),
+                "ports": ports,
+                "last_scan": now,
+            })
+            display(f"  [dim]{ip:15} — {len(ports)} port(s)[/dim]")
+            continue
 
-    # Step 3 — one transaction: the old baseline goes only if the new one is stored.
+        old = previous.get(ip)
+        if old is not None:
+            retained_entries.append({
+                "ip": ip,
+                "mac": old.mac,
+                "ports": list(old.ports or []),
+                "last_scan": old.last_scan,
+            })
+            display(
+                f"  [yellow]{ip:15} — port state unknown; previous baseline retained "
+                f"({len(old.ports or [])} port(s)).[/yellow]"
+            )
+        else:
+            deferred_ips.append(ip)
+            display(
+                f"  [yellow]{ip:15} — port state unknown; baseline initialization "
+                "deferred (host stays UNKNOWN).[/yellow]"
+            )
+
+    if not successful_entries:
+        display(
+            "[red]No host produced a complete TCP observation. "
+            "Baseline not changed; Sentinel will not start as healthy.[/red]"
+        )
+        return False
+
+    # Step 3 — one transaction for the baseline rows and the durable
+    # initialization outcome. The event is required even on full success: an
+    # empty deferred list supersedes an older partial outcome after relearn.
+    entries = successful_entries + retained_entries
+    try:
+        internal_event = _baseline_initialization_event(
+            network_id,
+            identity.target_network,
+            deferred_ips=deferred_ips,
+            successful_ips=[entry["ip"] for entry in successful_entries],
+            active_ips=active_ips,
+        )
+    except Exception as exc:
+        display(
+            f"[red]Durable baseline-initialization state could not be prepared "
+            f"({type(exc).__name__}). Baseline not changed.[/red]"
+        )
+        return False
+
     try:
         replaced = sentinel_replace_baseline(
             network_id,
             identity.target_network,
             identity.gateway_ip,
             identity.gateway_mac,
-            new_entries,
+            entries,
             now,
             replace=force_relearn,
+            internal_events=[internal_event],
         )
     except SentinelStorageError as exc:
         display(f"[red]{exc}[/red]")
@@ -507,5 +702,15 @@ def learn_baseline(
 
     if force_relearn and replaced:
         display(f"[dim]Replaced {replaced} old baseline entry(ies).[/dim]")
-    display(f"[green]Baseline stored — {len(new_entries)} host(s), identity: {identity}[/green]")
+    if deferred_ips:
+        display(
+            f"[yellow]Partial baseline stored — {len(successful_entries)} host(s) usable, "
+            f"{len(deferred_ips)} host(s) deferred. Sentinel starts degraded until they "
+            "provide a complete scan.[/yellow]"
+        )
+    display(
+        f"[green]Baseline stored — {len(successful_entries)} updated host(s), "
+        f"{len(retained_entries)} retained, {len(deferred_ips)} deferred, "
+        f"identity: {identity}[/green]"
+    )
     return True

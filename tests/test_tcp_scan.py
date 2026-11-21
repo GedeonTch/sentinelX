@@ -33,6 +33,11 @@ from detect.tcp_scan import (
     _extract_service,
     _run_nmap_tcp,
     PROFILE_FLAGS,
+    PortState,
+    HostTcpObservation,
+    _parse_host_tcp_states,
+    _expand_port_spec,
+    parse_sentinel_open_ports,
 )
 import xml.etree.ElementTree as ET
 
@@ -987,9 +992,9 @@ class TestTcpRunnerContracts:
             assert baseline_run("192.168.1.1", "normal", "1-1024") == TCP_XML_UP_NO_OPEN_PORTS
 
     def test_sentinel_monitor_open_ports_keeps_legacy_contract(self):
-        from sentinel.monitor import _get_open_ports
+        from sentinel.monitor import _get_host_tcp_observation
         with patch("detect.tcp_scan.subprocess.run", side_effect=RuntimeError("bug")):
-            assert _get_open_ports("192.168.1.1") is None
+            assert _get_host_tcp_observation("192.168.1.1").ports is None
 
 
 class TestSkipHostDiscovery:
@@ -1035,3 +1040,319 @@ class TestSkipHostDiscovery:
 
     def test_strict_pipeline_without_request_has_no_pn(self):
         assert "-Pn" not in self._strict_command(strict=True)
+
+
+def _nmap_xml(host_status="up", ports_xml="", scaninfo_ports="1-1024", numservices="1024"):
+    """Build a minimal valid nmap XML string for testing."""
+    return (
+        f'<?xml version="1.0"?>\n'
+        f'<nmaprun scanner="nmap" args="nmap -p {scaninfo_ports}">'
+        f'<scaninfo type="syn" protocol="tcp" numservices="{numservices}" services="{scaninfo_ports}"/>'
+        f'<host><status state="{host_status}"/>'
+        f'<address addr="192.168.1.10" addrtype="ipv4"/>'
+        f'<ports>{ports_xml}</ports>'
+        f'</host>'
+        f'<runstats><finished exit="success"/></runstats>'
+        f'</nmaprun>'
+    )
+
+def _port_xml(portid, state, proto="tcp"):
+    return f'<port protocol="{proto}" portid="{portid}"><state state="{state}"/></port>'
+
+def _extraports_xml(state, count, extrareasons_ports=None):
+    er = ''
+    if extrareasons_ports:
+        er = f'<extrareasons reason="no-responses" ports="{extrareasons_ports}"/>'
+    return f'<extraports state="{state}" count="{count}">{er}</extraports>'
+
+EXPECTED = frozenset(range(1, 1025))
+
+
+
+class TestParseHostTcpStates:
+    """TCP-01: _parse_host_tcp_states — rules P1-P7, P11-P12."""
+
+    def test_all_explicit_open_closed_filtered(self):
+        """P1: explicit <port> states: open -> OPEN, closed -> CLOSED, filtered -> FILTERED."""
+        ports_xml = _port_xml(80, "open") + _port_xml(22, "closed") + _port_xml(443, "filtered")
+        # Fill remaining with extraports
+        remaining = EXPECTED - {80, 22, 443}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.OPEN
+        assert obs.states[22] is PortState.CLOSED
+        assert obs.states[443] is PortState.FILTERED
+
+    def test_unknown_state_is_uncertain(self):
+        """P2: state not in {open,closed,filtered} -> UNCERTAIN."""
+        ports_xml = _port_xml(80, "open|filtered")
+        remaining = EXPECTED - {80}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("closed", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.UNCERTAIN
+
+    def test_extraports_with_extrareasons(self):
+        """P3: <extrareasons ports="..."> carries the parent group state."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        # Split remaining (all except 80) as "filtered" via extrareasons
+        er_ports = ",".join(str(p) for p in sorted(EXPECTED - {80}))
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining), extrareasons_ports=er_ports))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.OPEN
+        assert obs.states[22] is PortState.FILTERED
+
+    def test_extraports_open_state_is_uncertain(self):
+        """P4: <extraports state="open"> -> UNCERTAIN, never OPEN."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("open", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.OPEN
+        assert obs.states[22] is PortState.UNCERTAIN  # not OPEN
+
+    def test_single_extraports_group_matches_residual(self):
+        """P5: one <extraports> without extrareasons, count matches residual."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("closed", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.OPEN
+        assert obs.states[22] is PortState.CLOSED
+
+    def test_multiple_groups_without_explicit_ports(self):
+        """P6: multiple <extraports> groups without port lists -> residual UNCERTAIN."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        # Two groups: closed for 500, filtered for the rest
+        half1 = len(remaining) // 2
+        half2 = len(remaining) - half1
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("closed", half1) + _extraports_xml("filtered", half2))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        # With P6, the remaining ports get UNCERTAIN
+        assert obs.status == "COMPLETE"
+        assert obs.states[80] is PortState.OPEN
+        assert obs.states[22] is PortState.UNCERTAIN  # cannot attribute to a specific group
+
+    def test_duplicate_port_is_incomplete(self):
+        """P7: port listed twice -> INCOMPLETE."""
+        ports_xml = _port_xml(80, "open") + _port_xml(80, "closed")
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(EXPECTED) - 2))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE"
+
+    def test_out_of_scope_port_is_incomplete(self):
+        """P11: port outside expected scope -> INCOMPLETE."""
+        ports_xml = _port_xml(9999, "open")
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(EXPECTED) - 1),
+                        scaninfo_ports="1-1024,9999")
+        # Use a wider expected set that includes 9999 but we test with expected=1-1024 only
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE"
+
+    def test_missing_ports_is_incomplete(self):
+        """P12: not all expected ports accounted for -> INCOMPLETE."""
+        ports_xml = _port_xml(80, "open")
+        # Only 100 ports in extraports, but 1023 remaining expected
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", 100))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE"
+
+    def test_no_ports_element_is_incomplete(self):
+        """Missing <ports> element -> INCOMPLETE."""
+        xml = _nmap_xml(ports_xml="")
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE"
+
+    def test_open_ports_property(self):
+        """open_ports returns sorted list of OPEN ports only."""
+        ports_xml = _port_xml(443, "open") + _port_xml(80, "open") + _port_xml(22, "closed")
+        remaining = EXPECTED - {443, 80, 22}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.open_ports == [80, 443]
+
+    def test_ports_property_compat(self):
+        """ports property: None for INCOMPLETE, [] for no open, list for open."""
+        # INCOMPLETE
+        inc = HostTcpObservation.incomplete()
+        assert inc.ports is None
+        # COMPLETE with no open
+        ports_xml = _port_xml(22, "closed")
+        remaining = EXPECTED - {22}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.ports == []
+        # COMPLETE with open
+        ports_xml2 = _port_xml(80, "open")
+        xml2 = _nmap_xml(ports_xml=ports_xml2 + _extraports_xml("filtered", len(EXPECTED) - 1))
+        root2 = ET.fromstring(xml2)
+        host2 = root2.find("host")
+        obs2 = _parse_host_tcp_states(host2, EXPECTED)
+        assert obs2.ports == [80]
+
+
+class TestParseSentinelOpenPortsCompat:
+    """Verify parse_sentinel_open_ports backward compatibility with new parser."""
+
+    def test_returns_open_ports_list(self):
+        """parse_sentinel_open_ports returns sorted open ports for a valid scan."""
+        ports_xml = _port_xml(80, "open") + _port_xml(443, "open")
+        remaining = EXPECTED - {80, 443}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        result = parse_sentinel_open_ports(xml, "192.168.1.10", "1-1024")
+        assert result == [80, 443]
+
+    def test_returns_none_for_bad_xml(self):
+        result = parse_sentinel_open_ports("not xml", "192.168.1.10", "1-1024")
+        assert result is None
+
+    def test_returns_empty_for_no_open(self):
+        """A complete scan with no open ports returns [], not None."""
+        ports_xml = _port_xml(22, "closed")
+        remaining = EXPECTED - {22}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        result = parse_sentinel_open_ports(xml, "192.168.1.10", "1-1024")
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# A1 corrections — P7 intra-group, P11 count, IP address validation
+# ---------------------------------------------------------------------------
+
+class TestP7IntraGroupOverlap:
+    """P7: overlapping <extrareasons> within the same <extraports> group → INCOMPLETE."""
+
+    def test_two_extrareasons_share_a_port(self):
+        """Two <extrareasons> elements that declare an overlapping port → INCOMPLETE."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        # Two extrareasons groups, both claiming port 22
+        er1_ports = "22,23,24"
+        er2_ports = "22,25,26"
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining), extrareasons_ports=er1_ports))
+        # Need a second extrareasons in the same group — build manually
+        xml2 = (
+            f'<?xml version="1.0"?>\n'
+            f'<nmaprun><scaninfo type="syn" protocol="tcp" numservices="1024" services="1-1024"/>'
+            f'<host><status state="up"/><address addr="192.168.1.10" addrtype="ipv4"/>'
+            f'<ports>'
+            f'<port protocol="tcp" portid="80"><state state="open"/></port>'
+            f'<extraports state="filtered" count="{len(remaining)}">'
+            f'<extrareasons reason="no-responses" ports="{er1_ports}"/>'
+            f'<extrareasons reason="host-unreaches" ports="{er2_ports}"/>'
+            f'</extraports>'
+            f'</ports></host>'
+            f'<runstats><finished exit="success"/></runstats></nmaprun>'
+        )
+        root = ET.fromstring(xml2)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE", "overlapping extrareasons must produce INCOMPLETE"
+
+
+class TestP11CountValidation:
+    """P11: validate that count attribute matches actual port set sizes."""
+
+    def test_count_matches_explicit_ports(self):
+        """count attribute matches the number of explicit ports in extrareasons."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        er_ports = ",".join(str(p) for p in sorted(remaining))
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining), extrareasons_ports=er_ports))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "COMPLETE"
+
+    def test_count_mismatch_with_explicit_ports(self):
+        """count attribute does not match explicit ports → INCOMPLETE."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        er_ports = ",".join(str(p) for p in sorted(remaining))
+        # Set count to 5 but the extrareasons actually list 1023 ports
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", 5, extrareasons_ports=er_ports))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE", "count mismatch must produce INCOMPLETE"
+
+    def test_parent_count_incorrect_single_group(self):
+        """Single group without explicit ports: count must match residual."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        # Set wrong count
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining) + 5))
+        root = ET.fromstring(xml)
+        host = root.find("host")
+        obs = _parse_host_tcp_states(host, EXPECTED)
+        assert obs.status == "INCOMPLETE"
+
+
+class TestIPAddressValidation:
+    """Correction 1: parse_sentinel_open_ports must verify host IP matches target."""
+
+    def test_correct_address_returns_ports(self):
+        """XML with matching address → returns open ports."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        xml = _nmap_xml(ports_xml=ports_xml + _extraports_xml("filtered", len(remaining)))
+        result = parse_sentinel_open_ports(xml, "192.168.1.10", "1-1024")
+        assert result == [80]
+
+    def test_different_address_returns_none(self):
+        """XML with a different IP address → None."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        xml = (
+            f'<?xml version="1.0"?>\n'
+            f'<nmaprun><scaninfo type="syn" protocol="tcp" numservices="1024" services="1-1024"/>'
+            f'<host><status state="up"/><address addr="10.0.0.99" addrtype="ipv4"/>'
+            f'<ports>{ports_xml}{_extraports_xml("filtered", len(remaining))}</ports></host>'
+            f'<runstats><finished exit="success"/></runstats></nmaprun>'
+        )
+        result = parse_sentinel_open_ports(xml, "192.168.1.10", "1-1024")
+        assert result is None, "different address must return None"
+
+    def test_missing_address_returns_none(self):
+        """XML with no IPv4 address element → None."""
+        ports_xml = _port_xml(80, "open")
+        remaining = EXPECTED - {80}
+        xml = (
+            f'<?xml version="1.0"?>\n'
+            f'<nmaprun><scaninfo type="syn" protocol="tcp" numservices="1024" services="1-1024"/>'
+            f'<host><status state="up"/>'
+            f'<ports>{ports_xml}{_extraports_xml("filtered", len(remaining))}</ports></host>'
+            f'<runstats><finished exit="success"/></runstats></nmaprun>'
+        )
+        result = parse_sentinel_open_ports(xml, "192.168.1.10", "1-1024")
+        assert result is None, "missing address must return None"

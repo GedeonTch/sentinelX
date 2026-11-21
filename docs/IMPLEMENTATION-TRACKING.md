@@ -288,7 +288,7 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 | SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | **Clôturé** selon les preuves disponibles (voir bloc de clôture sous le tableau) | SMB-01 |
 | SMB-03 | Reconnaissance SMBv1 dans le JSON `enum4linux-ng` : `smb_dialects: true` (marqueur d'imposition SMBv1) et dict de dialectes booléens (clés `SMB 1.0`, …) | P2 | **Implémenté (V3), non commité** ; revue indépendante Antigravity CONFORME ; **accepté par le propriétaire le 2026-11-14** ; diff isolé `aa2cb91a…afffe7f2f` ; tests SMB 145 passed ; tests CLI 7 passed (SMB-related) ; modifications présentes dans le dépôt local, aucun commit ni push | SMB-01 (en worktree), SMB-02 |
 | SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Accepté par le propriétaire ; commité dans SMB-05** ; revue indépendante Antigravity CONFORME (2026-11-15) ; diff isolé `4e833b58…6872856` ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale : 2 196 passed, 2 failed (échecs environnement préexistants) ; intégré au commit SMB-05 | SMB-01, SMB-02, SMB-03 |
-| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
+| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Implémenté, non commité** ; TCP-01 (`PortState`, `HostTcpObservation`, `_parse_host_tcp_states`) + TCP-02 (transitions state-aware, D-A1) + TCP-03 (25 nouveaux tests) + TCP-04 (non-régression 357 tests) ; corrections post-revue Antigravity appliquées (IP check, single scan, no silent fallback, P7 intra-group, P11 count) ; **audit Arena R1–R4 corrigé et couvert** (visibilité des hôtes différés, quota réseau, récupération atomique sans duplication, régression XML invalide intégrée) ; suites ciblées R1–R4 vertes ; `git diff --check` rc 0 ; **revue indépendante et acceptation propriétaire requises** | — |
 | CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
 | D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
 | D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
@@ -463,6 +463,118 @@ Comportement attendu :
 - **Moyen** : changer les messages de `display()` peut casser des tests qui assertent leur contenu exact (ex. `TestSmbEnumCliOutcomes` vérifie `"FAILED"`, pas le nom de l'outil — risque limité).
 - **Faible** : les décomptes dynamiques ne modifient pas la logique de Finding.
 - **Nul** : `evidence.command` n'est pas touché par cet axe.
+
+---
+
+---
+
+### SENTINEL-LIST-01 — Accès aux Findings Sentinel masqués par le quota
+
+**Objectif :** permettre à l'utilisateur de retrouver et de consulter les Findings Sentinel dont la notification a été masquée par le quota de 3 notifications/60 min, sans connaître préalablement leur UUID.
+**Branche :** `a4-arena` | **Base :** HEAD courant | **Statut :** `[x]` **Implémenté, non commité ; corrections R1–R4 appliquées ; acceptation propriétaire avec réserves de sécurité documentées**
+**Fichiers :** `cli.py`, `core/database.py`, `sentinel/alerting.py`, `tests/test_sentinel_findings_list.py`
+
+**Contexte :** `save_finding()` persiste le Finding dans la session SQLite ; `sentinel_save_event()` enregistre l'événement dans la DB Sentinel avec `notification.state = "masked"`. Aucune commande CLI ne permettait de lister ces Findings sans leur UUID complet.
+
+**Implémentation réelle :**
+- Commande `netlab sentinel findings list -s SESSION_ID` (également `sentinel findings list -s SESSION_ID` en exécutable autonome).
+- Résolution automatique session → réseau : `sentinel_find_network_for_session()` lit `sentinel_control.run_session_id` dans les DB Sentinel existantes via une connexion SQLite en lecture seule.
+- Trois groupes : `confirmed` (notifications émises), `masked` (masquées par le quota), `indeterminate` (relation non prouvable).
+- Corrélation Finding/événement explicite : `sentinel_link_finding()` écrit `finding_id` dans `events.details` juste après `save_finding()`. Aucune correspondance par `(ip, event_type)` n'est utilisée.
+- Les anciens événements sans `finding_id` restent `indeterminate` : aucune association n'est supposée.
+- Ordre chronologique croissant (`created_at`) à l'intérieur de chaque groupe.
+- Affichage : ID court stable et UUID complet. En terminal étroit (< 100 colonnes), présentation verticale par Finding pour que les deux identifiants restent complets ; au-delà, tableau habituel.
+- Intégrité : `findings list` utilise la même barrière read-only que `findings show` (une seule ligne de session correspondante, profil `sentinel`, uniquement des Findings `sentinel.*`, aucun `scan_outcomes`). Une session inconnue est refusée avant toute ouverture SQLite. Une session mixte ou de profil invalide est détectée après ouverture d'une connexion SQLite en lecture seule.
+- Lecture seule : le contenu principal de la base n'est pas modifié par le chemin d'accès en lecture seule. SQLite peut toutefois créer des fichiers de coordination `-wal` et `-shm` à l'ouverture d'une base WAL, même avec `mode=ro`. Les contrôles de session mixte ou invalide, effectués après ouverture, ne garantissent donc pas l'absence de ces fichiers sidecar.
+- La commande `sentinel findings show <UUID> --session <id>` existante est conservée pour la consultation détaillée.
+- Aucun changement de schéma SQLite, aucune migration, aucune modification des contrats quota/déduplication/persistance.
+
+**Couverture de régression exécutée :**
+- `tests/test_sentinel_findings_list.py` : 20 passed (10 tests existants préservés + R2 création de DB, R3 acceptation/refus list↔show, liaison réelle `finding_id` + résolution session→réseau, R4 largeurs 40/50/120 et trois groupes).
+- `SENTINEL_TEST_EXECUTABLE=venv/bin/sentinel tests/test_sentinel_consultation.py` : 31 passed.
+- `tests/test_database.py tests/test_database_paths.py` : 47 passed.
+- `tests/test_sentinel_alerting.py tests/test_sentinel_notifications.py` : 56 passed.
+- `tests/test_sentinel_manager.py` : 51 passed.
+- `git diff --check` : rc 0.
+
+**Limites connues :** la résolution session → réseau retient le premier `network_id` correspondant si un même `run_session_id` apparaît dans plusieurs DB ; le lien `finding_id` est non bloquant (un échec d'écriture laisse le Finding en `indeterminate`). Aucune pagination ni reprise rétroactive des anciens événements n'est implémentée (hors périmètre).
+
+**Limites de sécurité des chemins (acceptées et différées par le propriétaire) :**
+- Le lien symbolique final du fichier de session est rejeté.
+- Les liens symboliques des répertoires parents ne sont pas rejetés actuellement.
+- Une exposition structurelle TOCTOU existe entre la validation du chemin et l'ouverture SQLite.
+- La détection des hardlinks n'est pas implémentée.
+
+Ces limitations de durcissement des chemins sont consciemment différées ; aucun changement de schéma ni durcissement supplémentaire n'est inclus dans ce ticket.
+
+---
+
+### SENTINEL-MONITOR — Corrections R1–R4 (audit Arena)
+
+**Objectif :** corriger les quatre défauts identifiés par l'audit indépendant sur la baseline partielle, la visibilité des hôtes différés, le quota réseau et la régression XML invalide.
+**Branche :** `a4-arena` | **Base :** `519d618a1bffc8a3f65a4de3601ba17894f6d232` | **Statut :** `[x]` **Corrigé, non commité ; acceptation propriétaire requise**
+**Fichiers :** `core/database.py`, `sentinel/alerting.py`, `sentinel/baseline.py`, `sentinel/monitor.py`, `sentinel/monitor_view.py`, `sentinel/notifications.py`, `sentinel/sentinel_manager.py`, `tests/test_sentinel_manager.py`, `tests/test_sentinel_presentation.py`, `docs/SENTINEL-TCP-STATES.md`, `docs/IMPLEMENTATION-TRACKING.md`.
+
+**R1 — visibilité des hôtes différés.**
+- `status()` expose `initialized_hosts`, `deferred_hosts`, `absent_hosts`, `known_hosts`, `active_hosts` et `host_inventory`.
+- Les hôtes différés apparaissent avec l'état `UNKNOWN / DEGRADED` ; ils comptent dans `known_hosts`, jamais dans `active_hosts`.
+- Les anciens hôtes conservés seulement pour leur historique apparaissent séparément avec l'état `ABSENT`.
+- `display_status()` affiche les IP et leur état, ainsi que les compteurs de différés/absents.
+- La reconstruction `sentinel_identity_deferred_ips()` est filtrée par identité et retire toute IP qui possède déjà une ligne de baseline. Une base ancienne sans événement `baseline_initialization`, ou avec un événement historique déjà réconcilié par une baseline, ne signale donc pas à tort un hôte initialisé comme différé.
+- `sentinel_identity_machine_counts()` accepte l'ensemble différé explicite ; le fallback utilise désormais la même reconstruction filtrée par identité.
+
+**R2 — portée réseau du quota.**
+- `host_summary()` exclut uniquement `baseline_initialization` (bookkeeping interne).
+- `scan_degraded` reste un événement de portée réseau (`scope='network'`) avec le CIDR comme clé de quota ; il conserve sa réservation et n'est pas transformé en équipement.
+- `MonitorView._host_rows()` exclut les lignes de portée réseau ; les hôtes différés sont ajoutés séparément comme `UNKNOWN / DÉGRADÉ`.
+- La séquence de quota sur quatre épisodes dégradés produit bien `confirmed, confirmed, confirmed, masked`.
+
+**R3 — une seule initialisation par hôte différé récupéré.**
+- `_do_check()` construit l'événement `host_ports_initialized` avec `stamp.next()`, le persiste atomiquement avec la ligne de baseline via `store_recovered_host_baseline()`, puis marque le changement `event_pre_persisted` avec son `event_id` et son `event_timestamp`.
+- `process_changes()` réutilise ces valeurs et **ne réécrit pas** l'événement déjà durable. Il continue à rafraîchir le compteur de notification sans afficher ni budgéter cet événement silencieux.
+- Après redémarrage, `_rebuild_transition_state()` lit la baseline et les événements : l'hôte n'est plus différé. Une interruption entre le commit atomique et `process_changes()` ne produit aucune duplication au cycle suivant.
+- La transaction reste celle de `store_recovered_host_baseline()` : baseline + événement dans le même `BEGIN IMMEDIATE` / `COMMIT`. Un échec d'écriture de l'événement annule aussi la ligne de baseline.
+- L'historique `baseline_initialization` d'origine n'est ni modifié ni supprimé ; la réconciliation se fait par la baseline et par les événements `host_ports_initialized` ultérieurs.
+
+**R4 — régression XML invalide.**
+- Le test intégré crée une baseline avec deux hôtes à port 22 ouvert, mocke uniquement `_tcp_run_nmap` (XML invalide pour l'hôte affecté, XML complet pour l'hôte sain), puis exécute réellement `_get_host_tcp_observation()` → `check_network()` → `_do_check()` avec `process_changes()` réel et SQLite isolé.
+- Vérifications : `ports is None`, aucun `port_not_open`, aucun `host_ports_initialized` avec liste vide, aucun faux `new_port`/`new_host`, port 22 préservé dans la baseline, réseau `degraded`, `last_check_time` inchangé, hôte sain réellement scanné et traité, aucun faux succès enregistré.
+
+**Validation exécutée (résultats réels, sans suite complète du dépôt) :**
+- `python3 -m pytest -q tests/test_sentinel_manager.py` : **73 passed**, 436.56 s.
+- `python3 -m pytest -q tests/test_sentinel_baseline_reliability.py` : **77 passed**, 144.23 s.
+- `python3 -m pytest -q tests/test_sentinel_notifications.py` : **16 passed**, 248.41 s.
+- `python3 -m pytest -q tests/test_sentinel_presentation.py` : **47 passed**, 643.52 s.
+- `python3 -m pytest -q tests/test_sentinel_monitor.py` : **35 passed**, 0.36 s.
+- `python3 -m pytest -q tests/test_tcp_scan.py` : **133 passed**, 0.73 s.
+- `python3 -m pytest -q tests/test_sentinel_persistence.py` : **9 passed**, 144.72 s.
+- `python3 -m pytest -q tests/test_sentinel_baseline.py` : **38 passed**, 156.80 s.
+- `python3 -m pytest -q tests/test_sentinel_lifecycle.py tests/test_sentinel_stop_during_scan.py tests/test_sentinel_arp_probe.py tests/test_sentinel_findings_list.py` : **156 passed**, 535.60 s.
+- `git diff --check` : rc 0.
+
+**Limites connues :**
+- Les événements `baseline_initialization` et `host_ports_initialized` ne contiennent pas `gateway_ip`/`gateway_mac`. Dans une base partagée par plusieurs identités, la reconstruction filtre le CIDR mais ne peut pas distinguer deux identités de même CIDR.
+- Les hôtes absents sont déduits des assets conservés par des événements ; ils ne constituent pas une preuve de présence actuelle et ne sont jamais comptés comme machines actives.
+- Aucun changement de schéma SQLite, aucune migration, aucun commit ni push. La suite complète du dépôt n'a pas été exécutée dans ce passage ; seules les suites listées ci-dessus l'ont été.
+
+---
+
+### Perspectives Sentinel V2 — Documentation uniquement
+
+Ces éléments sont des **perspectives futures** pour Sentinel V2. Ils ne font pas partie du périmètre de CRED-01 ni d'aucun ticket en cours. Aucune autorisation d'implémentation n'est accordée.
+
+**Axe 1 — Couverture TCP complète et configurable :**
+Étudier la surveillance de tous les ports TCP (au-delà de `SENTINEL_TCP_PORTS`), avec des profils de couverture configurables (étendu, ciblé, complet). Points à examiner : impact performance, faux positifs sur plages larges, stockage de baseline, configuration par réseau.
+
+**Axe 2 — Surveillance événementielle / hybride :**
+Étudier les technologies complémentaires aux scans périodiques nmap :
+- **eBPF** : capture d'événements réseau en espace noyau (connexions, écoutes)
+- **auditd** : audit système Linux (exécutions, accès fichiers, connexions)
+- **Falco** : détection comportementale temps réel (conteneurs, système)
+- **Zeek** : analyse réseau passive (DNS, HTTP, connexions)
+- **inotify** : surveillance événementielle du système de fichiers
+
+Ces technologies permettraient une détection quasi-temps-réel en complément des scans périodiques. Architecture cible : Sentinel Monitor comme orchestrateur recevant des événements de ces sources.
 
 ---
 

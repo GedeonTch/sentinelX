@@ -58,6 +58,26 @@ def test_tables_do_not_replay_masked_details_or_count_refreshes(store, tty, widt
         assert text.count('visible-0') == 1
 
 
+def test_deferred_host_is_visible_and_network_scope_is_not_an_equipment(store):
+    """R2/R1: the CIDR stays out of the host table; deferred hosts are shown."""
+    c = AlertCounter(clock=store)
+    c.bind(NET)
+    send(c, NetworkChange('new_port', HOST, 'port 8080 opened', 'simulated'))
+    send(c, NetworkChange('scan_degraded', '192.0.2.0/24', 'scan degraded', 'simulated'))
+
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, width=120)
+    view = MonitorView('192.0.2.0/24', 60, c, console, session_id=RUN,
+                       deferred_hosts={'192.0.2.99'})
+    console.print(view.hosts())
+    text = output.getvalue()
+
+    assert '192.0.2.99' in text
+    assert 'UNKNOWN / DÉGRADÉ' in text
+    assert HOST in text
+    assert '192.0.2.0/24' not in text
+
+
 @pytest.mark.parametrize('tty,width', [(True, 120), (True, 35), (False, 120), (False, 35)])
 def test_view_closes_on_interrupt(store, tty, width):
     c = AlertCounter(clock=store)

@@ -1423,28 +1423,53 @@ def sentinel_get_baseline_entries(
         conn.close()
 
 
+def sentinel_identity_machine_inventory(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> List[dict]:
+    """Return the current IP/activity inventory for one exact baseline identity."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        rows = conn.execute(
+            """SELECT a.ip, MAX(a.active) AS active
+               FROM baseline b JOIN assets a ON a.id=b.asset_id
+               WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
+               GROUP BY a.ip ORDER BY a.ip""",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchall()
+        return [{"ip": row["ip"], "active": bool(row["active"])} for row in rows]
+    finally:
+        conn.close()
+
+
 def sentinel_identity_machine_counts(
     network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+    deferred_ips: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """Return ``(known, active)`` machines of one NetworkIdentity baseline.
 
-    known:  distinct IPs that have a baseline row for this exact identity. A
-            host is counted once, however many rows or assets carry its IP.
-    active: the known hosts whose asset still has ``active=1``.
+    known:  distinct initialized IPs with a baseline row for this exact identity
+            plus the explicitly deferred IPs supplied by the live state. A host
+            is counted once, however many rows or assets carry its IP.
+    active: initialized known hosts whose asset still has ``active=1``. Deferred
+            hosts have no asset/baseline row and are never counted as active.
     Assets kept only for their events are not in the baseline, so they are not
     counted. Rows of other identities in the same DB are not counted either.
     """
     conn = get_sentinel_connection(network_id)
     try:
-        row = conn.execute(
-            """SELECT COUNT(*), COALESCE(SUM(active_any), 0) FROM (
-                   SELECT a.ip AS ip, MAX(a.active) AS active_any
-                   FROM baseline b JOIN assets a ON a.id = b.asset_id
-                   WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
-                   GROUP BY a.ip)""",
+        rows = conn.execute(
+            """SELECT a.ip AS ip, MAX(a.active) AS active_any
+               FROM baseline b JOIN assets a ON a.id = b.asset_id
+               WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
+               GROUP BY a.ip""",
             (target_network, gateway_ip, gateway_mac),
-        ).fetchone()
-        return int(row[0]), int(row[1])
+        ).fetchall()
+        initialized_ips = {row["ip"] for row in rows}
+        active = sum(int(row["active_any"]) for row in rows)
+        deferred = (set(deferred_ips) if deferred_ips is not None
+                    else set(sentinel_identity_deferred_ips(
+                        network_id, target_network, gateway_ip, gateway_mac)))
+        return len(initialized_ips | deferred), active
     finally:
         conn.close()
 
@@ -1503,16 +1528,24 @@ def _reuse_or_create_asset(conn, ip: str, previous_id: Optional[str], mac: Optio
 def sentinel_replace_baseline(
     network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
     entries: List[dict], last_scan: str, replace: bool,
+    internal_events: Optional[List[dict]] = None,
 ) -> int:
     """Store one identity's complete baseline in a single transaction.
 
-    ``entries`` are validated dicts ``{"ip", "mac", "ports"}``. With ``replace``,
-    the identity's previous rows are deleted in the same transaction, so any
-    failure rolls everything back and the previous baseline stays intact.
-    Assets are reused per IP. With ``replace``, every asset that no baseline row
-    references any more is marked ``active=0``: it is historical. It is kept only
-    while an event references it, and pruned once nothing references it. Assets
-    of other identities are protected by their own baseline rows.
+    ``entries`` are validated dicts ``{"ip", "mac", "ports"}`` and may carry a
+    per-entry ``last_scan`` (used to preserve the previous scan time of a host
+    whose new scan failed). With ``replace``, the identity's previous rows are
+    deleted in the same transaction, so any failure rolls everything back and
+    the previous baseline stays intact. Assets are reused per IP. With
+    ``replace``, every asset that no baseline row references any more is marked
+    ``active=0``: it is historical. It is kept only while an event references
+    it, and pruned once nothing references it. Assets of other identities are
+    protected by their own baseline rows.
+
+    ``internal_events`` are persisted in the same transaction (same commit or
+    rollback as the baseline). Each item is a dict with ``event_id``, ``type``,
+    ``timestamp``, ``details`` and an optional boolean ``resolved``.
+
     Returns the number of replaced baseline rows.
     """
     subject = "baseline non modifiée"
@@ -1534,13 +1567,14 @@ def sentinel_replace_baseline(
             ).rowcount
         for entry in entries:
             mac = entry["mac"] or None
-            asset_id = _reuse_or_create_asset(conn, entry["ip"], previous.get(entry["ip"]), mac, last_scan)
+            scan_time = entry.get("last_scan") or last_scan
+            asset_id = _reuse_or_create_asset(conn, entry["ip"], previous.get(entry["ip"]), mac, scan_time)
             conn.execute(
                 """INSERT INTO baseline
                    (id,asset_id,target_network,gateway_ip,gateway_mac,ports,services,mac,last_scan)
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 (str(uuid.uuid4()), asset_id, target_network, gateway_ip, gateway_mac,
-                 json.dumps(entry["ports"]), "{}", mac, last_scan),
+                 json.dumps(entry["ports"]), "{}", mac, scan_time),
             )
         if replace:
             # Historical assets (no baseline row left) are never active. Their
@@ -1555,8 +1589,67 @@ def sentinel_replace_baseline(
                WHERE id NOT IN (SELECT asset_id FROM baseline WHERE asset_id IS NOT NULL)
                  AND id NOT IN (SELECT asset_id FROM events WHERE asset_id IS NOT NULL)"""
         )
+        for event in internal_events or ():
+            conn.execute(
+                "INSERT OR IGNORE INTO events (id,timestamp,type,asset_id,details,resolved) "
+                "VALUES (?,?,?,?,?,?)",
+                (event["event_id"], event["timestamp"], event["type"], None,
+                 json.dumps(event["details"]), int(event.get("resolved", True))),
+            )
         conn.commit()
         return removed
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise _sentinel_storage_error(exc, subject) from exc
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def sentinel_upsert_baseline_entries(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+    entries: List[dict], last_scan: str,
+) -> None:
+    """Insert or replace specific hosts' baseline rows in one transaction.
+
+    Used when a host whose baseline initialization was deferred finally provides
+    a complete observation. Only the listed hosts are touched: every other
+    baseline row of the same identity, and rows of other identities, is left
+    unchanged. A host's existing row (if any) is collapsed to one row, and its
+    asset is reused. Any failure rolls the whole batch back.
+    """
+    subject = "baseline non modifiée"
+    conn = _open_sentinel_event_connection(network_id, subject)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for entry in entries:
+            ip = entry["ip"]
+            mac = entry["mac"] or None
+            scan_time = entry.get("last_scan") or last_scan
+            previous = conn.execute(
+                "SELECT b.asset_id FROM baseline b JOIN assets a ON a.id=b.asset_id "
+                "WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=? "
+                "AND a.ip=? ORDER BY b.rowid LIMIT 1",
+                (target_network, gateway_ip, gateway_mac, ip),
+            ).fetchone()
+            asset_id = _reuse_or_create_asset(
+                conn, ip, previous[0] if previous else None, mac, scan_time,
+            )
+            conn.execute(
+                "DELETE FROM baseline WHERE target_network=? AND gateway_ip=? AND gateway_mac=? "
+                "AND asset_id IN (SELECT id FROM assets WHERE ip=?)",
+                (target_network, gateway_ip, gateway_mac, ip),
+            )
+            conn.execute(
+                """INSERT INTO baseline
+                   (id,asset_id,target_network,gateway_ip,gateway_mac,ports,services,mac,last_scan)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), asset_id, target_network, gateway_ip, gateway_mac,
+                 json.dumps(entry["ports"]), "{}", mac, scan_time),
+            )
+        conn.commit()
     except sqlite3.Error as exc:
         conn.rollback()
         raise _sentinel_storage_error(exc, subject) from exc
@@ -2031,25 +2124,168 @@ def sentinel_set_notification(network_id, event_id, notification, expected=None)
         conn.execute("UPDATE events SET details=? WHERE id=?", (json.dumps(details), event_id))
 
 
-def sentinel_read_finding(session_id: str, finding_id: str) -> Finding:
-    """Dedicated Sentinel consultation. No initialization, migration or recovery.
 
-    Reject mixed/unknown contexts using retained data, not a reconstructed link.
-    This cannot recover provenance whose every marker was historically erased.
+
+def sentinel_identity_absent_ips(
+    network_id: str, target_network: str, gateway_ip: str, gateway_mac: str,
+) -> List[str]:
+    """Return historical asset IPs retained for events but not in this baseline."""
+    conn = get_sentinel_connection(network_id)
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT a.ip FROM assets a
+               JOIN events e ON e.asset_id=a.id
+               WHERE a.ip NOT IN (
+                   SELECT DISTINCT a2.ip FROM baseline b
+                   JOIN assets a2 ON a2.id=b.asset_id
+                   WHERE b.target_network=? AND b.gateway_ip=? AND b.gateway_mac=?
+               ) ORDER BY a.ip""",
+            (target_network, gateway_ip, gateway_mac),
+        ).fetchall()
+        return [row["ip"] for row in rows]
+    finally:
+        conn.close()
+
+
+def sentinel_identity_deferred_ips(
+    network_id: str,
+    target_network: Optional[str] = None,
+    gateway_ip: Optional[str] = None,
+    gateway_mac: Optional[str] = None,
+) -> List[str]:
+    """Reconstruct currently deferred IPs from durable initialization history.
+
+    A baseline-initialization record is historical and remains unchanged after
+    recovery. Later ``host_ports_initialized`` events reconcile that history
+    into the active deferred set. Replay in timestamp/id order, matching the
+    transition-state reconstruction rules. Read errors propagate so callers can
+    report the inventory as unavailable rather than as an empty set.
+
+    When the full identity is supplied, an IP that already has a baseline row
+    for that identity is never reported as deferred. This is what keeps a
+    database written before the initialization event existed (or before R3
+    recorded a recovery event) from flagging an initialized host as deferred.
+    A baseline-initialization event is also ignored when its network CIDR does
+    not match the requested target network.
     """
+    snapshot = sentinel_network_snapshot(network_id)
+    events = snapshot["events"]
+    deferred = set()
+    for event in events:
+        details = event.get("details") or {}
+        if event.get("type") == "baseline_initialization":
+            if target_network is not None and details.get("ip") != target_network:
+                continue
+            ips = details.get("deferred_ips")
+            deferred = {ip for ip in ips if isinstance(ip, str) and ip} if isinstance(ips, list) else set()
+        elif event.get("type") == "host_ports_initialized":
+            ip = details.get("ip")
+            if isinstance(ip, str):
+                deferred.discard(ip)
+    if target_network is not None and gateway_ip is not None and gateway_mac is not None:
+        initialized = set()
+        assets = {row["id"]: row.get("ip") for row in snapshot["assets"]}
+        for row in snapshot["baseline"]:
+            if (row.get("target_network") == target_network
+                    and row.get("gateway_ip") == gateway_ip
+                    and row.get("gateway_mac") == gateway_mac):
+                ip = assets.get(row.get("asset_id"))
+                if isinstance(ip, str) and ip:
+                    initialized.add(ip)
+        deferred -= initialized
+    return sorted(deferred)
+
+
+def sentinel_identity_deferred_count(
+    network_id: str, deferred_ips: Optional[List[str]] = None,
+) -> int:
+    """Return the number of currently deferred (known, uninitialized) hosts.
+
+    A caller with live reconstructed state can provide its set directly. The
+    fallback replays durable initialization and recovery events; it does not
+    mistake the historical ``deferred_ips`` in the original initialization
+    event for active deferred state after recovery.
+    """
+    if deferred_ips is not None:
+        return len(set(deferred_ips))
+    return len(sentinel_identity_deferred_ips(network_id))
+
+def sentinel_link_finding(network_id: str, event_id: str, finding_id: str) -> None:
+    """Record the finding_id in an event's details for explicit later lookup.
+
+    Called once from process_changes, immediately after save_finding(), so that
+    ``sentinel findings list`` can build a certified finding↔event link.
+    No schema change — finding_id is stored inside the existing JSON details column.
+    If the event does not exist the call is silently ignored (the finding is still
+    persisted; it will appear as STATUT INDÉTERMINÉ on listing).
+    """
+    try:
+        with _sentinel_control_connection(network_id) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT details FROM events WHERE id=?", (event_id,)
+            ).fetchone()
+            if row is None:
+                return
+            details = json.loads(row["details"])
+            details["finding_id"] = finding_id
+            conn.execute(
+                "UPDATE events SET details=? WHERE id=?",
+                (json.dumps(details), event_id),
+            )
+    except Exception:
+        # Non-fatal: the finding is already saved; listing falls back to INDÉTERMINÉ.
+        pass
+
+
+def sentinel_find_network_for_session(run_session_id: str) -> Optional[str]:
+    """Return the network_id whose sentinel DB recorded run_session_id, or None.
+
+    Scans all known sentinel network DBs for a sentinel_control row whose
+    run_session_id matches the given value. Returns the first match; returns None
+    when no match is found or when the sentinel directory does not exist.
+    This is a read-only lookup: it never creates a network DB or WAL files.
+    """
+    for network_id in list_sentinel_network_ids():
+        try:
+            with _sentinel_read_snapshot(network_id) as conn:
+                if not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sentinel_control'"
+                ).fetchone():
+                    continue
+                row = conn.execute(
+                    "SELECT 1 FROM sentinel_control WHERE run_session_id=? LIMIT 1",
+                    (run_session_id,),
+                ).fetchone()
+                if row is not None:
+                    return network_id
+        except Exception:
+            continue
+    return None
+
+
+def _sentinel_existing_session_path(session_id: str) -> Path:
+    """Resolve an existing session DB without creating a directory or file."""
     import re
     if (not isinstance(session_id, str)
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', session_id)
             or re.fullmatch(r'(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])', session_id, re.I)):
         raise ValueError('Identifiant de session invalide')
-    try:
-        if str(uuid.UUID(finding_id)) != finding_id:
-            raise ValueError
-    except (ValueError, TypeError, AttributeError):
-        raise ValueError('UUID complet canonique requis') from None
     path = _real_user_home() / '.netlab' / 'sessions' / f'{session_id}.db'
     if path.is_symlink() or not path.is_file():
         raise ValueError('Session inconnue ou chemin non pris en charge')
+    return path
+
+
+def _sentinel_read_validated_finding_rows(session_id: str) -> List[sqlite3.Row]:
+    """Read rows from a valid Sentinel session through a strict, read-only gate.
+
+    Shared by ``sentinel_read_findings`` (list) and ``sentinel_read_finding``
+    (show): exactly one matching session row, profile 'sentinel', only
+    ``sentinel.*`` Findings, and no scan outcomes. Unknown sessions are refused
+    from the filesystem before any SQLite connection can create a database file.
+    """
+    path = _sentinel_existing_session_path(session_id)
     try:
         conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
         conn.row_factory = sqlite3.Row
@@ -2069,14 +2305,43 @@ def sentinel_read_finding(session_id: str, finding_id: str) -> Finding:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'scan_outcomes' in tables and conn.execute('SELECT 1 FROM scan_outcomes LIMIT 1').fetchone():
                 raise ValueError('Session mixte : résultats de scan présents')
-            for row in rows:
-                if row['id'] == finding_id:
-                    try:
-                        return _row_to_finding(row)
-                    except (ValueError, TypeError, KeyError, IndexError):
-                        raise ValueError('Finding Sentinel illisible') from None
-            raise ValueError('Finding absent de cette session Sentinel')
+            return rows
         finally:
             conn.close()
     except sqlite3.Error:
         raise ValueError('Session illisible ou schéma indéterminé') from None
+
+
+def sentinel_read_findings(session_id: str) -> List[Finding]:
+    """Read all Findings of an existing valid Sentinel session, read-only.
+
+    Applies the same integrity gate as ``sentinel_read_finding`` so that
+    ``sentinel findings list`` and ``sentinel findings show`` accept or refuse
+    the same sessions. Never initializes or creates a session database.
+    """
+    rows = _sentinel_read_validated_finding_rows(session_id)
+    try:
+        return [_row_to_finding(row) for row in rows]
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise ValueError('Finding Sentinel illisible') from None
+
+
+def sentinel_read_finding(session_id: str, finding_id: str) -> Finding:
+    """Dedicated Sentinel consultation. No initialization, migration or recovery.
+
+    Reject mixed/unknown contexts using retained data, not a reconstructed link.
+    This cannot recover provenance whose every marker was historically erased.
+    """
+    try:
+        if str(uuid.UUID(finding_id)) != finding_id:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError('UUID complet canonique requis') from None
+    rows = _sentinel_read_validated_finding_rows(session_id)
+    for row in rows:
+        if row['id'] == finding_id:
+            try:
+                return _row_to_finding(row)
+            except (ValueError, TypeError, KeyError, IndexError):
+                raise ValueError('Finding Sentinel illisible') from None
+    raise ValueError('Finding absent de cette session Sentinel')

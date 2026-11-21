@@ -42,7 +42,9 @@ if not REAL_NMAP:
     subprocess.Popen = forbidden
 monitor._get_arp_mac = lambda ip: ''
 if not REAL_NMAP:
-    monitor._get_open_ports = lambda ip, **kwargs: None if mode == 'degraded' else [22]
+    monitor._get_host_tcp_observation = lambda ip, **kwargs: monitor.HostTcpObservation(
+        ip=ip, ports=None if mode == 'degraded' else [22]
+    )
     monitor._get_active_hosts = lambda target, **kwargs: ['192.0.2.10', '192.0.2.99']
 manager.detect_network_identity = lambda target: NetworkIdentity(target, '192.0.2.1', '02:00:00:00:00:01')
 manager._load_interval = lambda: .05

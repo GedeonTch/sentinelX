@@ -25,7 +25,7 @@ from sentinel.baseline import (
     get_baseline,
     learn_baseline,
 )
-from sentinel.monitor import _get_open_ports
+from sentinel.monitor import _get_host_tcp_observation, HostTcpObservation
 
 # Real implementation, captured before the autouse fixture neutralises it.
 REAL_GET_ARP_MAC = _get_arp_mac
@@ -187,15 +187,38 @@ class TestB1FailedScanIsNotEmptyBaseline:
         assert learn({"192.168.1.10": xml}) is False
         assert not baseline_exists(SESSION, IDENTITY)
 
-    def test_one_unknown_host_aborts_the_whole_learning(self):
+    def test_one_unknown_host_does_not_abort_usable_peers(self):
+        """Partial initialization: usable host stored, failed host deferred."""
         scans = {
             "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
             "192.168.1.11": None,
         }
-        assert learn(scans) is False
+        assert learn(scans) is True
+        assert stored_ports() == {"192.168.1.10": [22]}
+        assert raw("SELECT COUNT(*) FROM baseline")[0][0] == 1
+        assert raw("SELECT COUNT(*) FROM assets")[0][0] == 1
+
+    def test_unknown_host_is_recorded_as_deferred_for_restart(self, status_network):
+        """A failed initial host stays known and uninitialized after a restart."""
+        from sentinel.sentinel_manager import _rebuild_transition_state
+        from sentinel.baseline import BASELINE_INITIALIZATION_EVENT
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22]), "192.168.1.11": None}) is True
+        events = db.sentinel_network_snapshot(SESSION)["events"]
+        deferred_events = [e for e in events if e["type"] == BASELINE_INITIALIZATION_EVENT]
+        assert len(deferred_events) == 1
+        assert deferred_events[0]["details"]["deferred_ips"] == ["192.168.1.11"]
+        state = _rebuild_transition_state(SESSION, get_baseline(SESSION, IDENTITY))
+        assert state is not None
+        assert state.ports_initialized["192.168.1.11"] is False
+        assert state.deferred_initialization == {"192.168.1.11"}
+
+    def test_all_hosts_failing_stores_no_misleading_baseline(self):
+        """Case 3: no usable host → no baseline, never a fake empty one."""
+        assert learn({"192.168.1.10": None, "192.168.1.11": "not xml <<<"}) is False
         assert not baseline_exists(SESSION, IDENTITY)
         assert raw("SELECT COUNT(*) FROM baseline")[0][0] == 0
         assert raw("SELECT COUNT(*) FROM assets")[0][0] == 0
+        assert stored_ports() == {}
 
     def test_partial_extra_host_in_xml_is_unknown(self):
         scans = {"192.168.1.10": nmap_tcp_xml(open_ports=[22], extra_host_ip="192.168.1.99")}
@@ -221,10 +244,13 @@ class TestB2B5RelearnIsAllOrNothing:
         assert "Replaced" not in capsys.readouterr().out
 
     def test_relearn_with_unknown_second_host_keeps_previous_baseline(self):
+        """Partial relearn: failed new host is deferred, successful peer is updated."""
         before_rows, _ = self._reliable_baseline()
         scans = {"192.168.1.10": nmap_tcp_xml(open_ports=[443]), "192.168.1.11": "not xml <<<"}
-        assert learn(scans, force=True) is False
-        assert baseline_snapshot() == before_rows
+        assert learn(scans, force=True) is True
+        # The successful peer updated its baseline; the unrecoverable host is deferred.
+        assert stored_ports() == {"192.168.1.10": [443]}
+        assert raw("SELECT COUNT(*) FROM baseline")[0][0] == 1
 
     def test_relearn_with_malformed_ping_keeps_previous_baseline(self):
         before_rows, _ = self._reliable_baseline()
@@ -483,7 +509,7 @@ def monitor_open_ports(completed=None, side_effect=None, ip="192.168.1.10"):
     run = (patch("detect.tcp_scan.subprocess.run", side_effect=side_effect) if side_effect
            else patch("detect.tcp_scan.subprocess.run", return_value=completed))
     with run:
-        return _get_open_ports(ip)
+        return _get_host_tcp_observation(ip).ports
 
 
 def _done(stdout, rc=0):
@@ -614,14 +640,17 @@ class TestB6ActiveAndHistory:
         assert stored_ports() == {"192.168.1.10": [443]}
 
     def test_relearn_with_failed_scan_leaves_activity_unchanged(self, status_network):
+        """Failed host keeps its previous baseline entry; partial relearn still succeeds."""
         assert learn({
             "192.168.1.10": nmap_tcp_xml(open_ports=[22]),
             "192.168.1.11": nmap_tcp_xml(ip="192.168.1.11", open_ports=[80]),
         }) is True
         before = assets_snapshot()
-        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22]), "192.168.1.11": None}, force=True) is False
+        assert learn({"192.168.1.10": nmap_tcp_xml(open_ports=[22]), "192.168.1.11": None}, force=True) is True
         assert assets_snapshot() == before
-        assert raw("SELECT active FROM assets WHERE ip='192.168.1.11'") == [(1,)]
+        assert stored_ports() == {"192.168.1.10": [22], "192.168.1.11": [80]}
+        status = manager.status(SESSION)
+        assert status["sentinel_state"] == "active"
 
 
 # ---------------------------------------------------------------------------

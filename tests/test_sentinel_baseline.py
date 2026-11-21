@@ -23,6 +23,7 @@ from sentinel.baseline import (
     detect_network_identity,
     _get_gateway_ip,
     _get_arp_mac,
+    store_recovered_host_baseline,
 )
 
 
@@ -404,3 +405,34 @@ def test_port_xml_one_is_a_complete_sentinel_run():
     from detect.tcp_scan import parse_sentinel_open_ports
     from sentinel.baseline import SENTINEL_TCP_PORTS
     assert parse_sentinel_open_ports(PORT_XML_ONE, "192.168.1.10", SENTINEL_TCP_PORTS) == [22]
+
+
+class TestStoreRecoveredHostBaseline:
+    """Issue B recovery: the first complete scan of a deferred host is stored as its baseline."""
+
+    def test_recovered_deferred_host_baseline_is_persisted_once(self):
+        with patch("sentinel.baseline._run_nmap_ping", return_value=PING_XML_ONE), \
+             patch("sentinel.baseline._run_nmap_tcp", return_value=PORT_XML_ONE), \
+             patch("sentinel.baseline._get_arp_mac", return_value=""):
+            assert learn_baseline("192.168.1.0/24", SESSION, IDENTITY_A) is True
+        assert get_baseline(SESSION, IDENTITY_A)["192.168.1.10"].ports == [22]
+
+        store_recovered_host_baseline(
+            SESSION, IDENTITY_A, "192.168.1.10", [22, 80],
+            last_scan="2026-10-29T12:00:00+00:00",
+        )
+        # The recovered host replaces its deferred state, without duplicating its row.
+        assert get_baseline(SESSION, IDENTITY_A)["192.168.1.10"].ports == [22, 80]
+        conn = db.get_sentinel_connection(SESSION)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM baseline").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_complete_zero_open_port_baseline_is_a_valid_entry(self):
+        """A complete scan with no open port stores [] and not an unknown state."""
+        store_recovered_host_baseline(
+            SESSION, IDENTITY_A, "192.168.1.10", [],
+            last_scan="2026-10-29T12:00:00+00:00",
+        )
+        assert get_baseline(SESSION, IDENTITY_A)["192.168.1.10"].ports == []

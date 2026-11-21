@@ -52,8 +52,19 @@ def host_summary(events, now, exclude=None):
         if event['id'] == exclude:
             continue
         details = event.get('details', {})
-        host = host_key(details.get('ip', 'inconnu'))
-        row = hosts.setdefault(host, dict(host=host, displayed=0, masked=0,
+        raw_ip = details.get('ip', '')
+        # Internal baseline bookkeeping is neither a host nor a notification.
+        # Network-scoped notifications (notably scan_degraded) deliberately keep
+        # their CIDR key here so they share the network quota across episodes.
+        event_type = event.get('type')
+        if event_type == 'baseline_initialization':
+            continue
+        # scan_degraded is explicitly network-scoped and its CIDR is the quota
+        # key. Other event types remain host-scoped even if malformed details
+        # happen to contain a slash.
+        scope = 'network' if event_type == 'scan_degraded' else 'host'
+        host = host_key(raw_ip or 'inconnu')
+        row = hosts.setdefault(host, dict(host=host, scope=scope, displayed=0, masked=0,
                                          reserved=0, unknown=0))
         meta = metadata(event)
         state = meta.get('state', 'unknown')

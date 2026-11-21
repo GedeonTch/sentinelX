@@ -37,7 +37,7 @@ import uuid
 import datetime as _dt
 from typing import Callable, List, Optional
 
-from core.database import sentinel_save_event, save_finding
+from core.database import sentinel_save_event, save_finding, sentinel_link_finding
 from core.finding import (
     Category,
     Confidence,
@@ -146,6 +146,43 @@ def _detail_extras(change: NetworkChange) -> dict:
     return extras
 
 
+def _make_initialization_event_record(
+    change: "NetworkChange",
+    network_id: str,
+    run_session_id: str,
+    stamp: "EventStamp",
+) -> dict:
+    """Build the event record dict for a host_ports_initialized change.
+
+    R3: Build the one durable event record committed with the recovered
+    baseline. The timestamp is consumed here, before subsequent cycle events
+    receive their strictly later EventStamp values. The caller must mark the
+    change ``event_pre_persisted`` with this record's ``event_id`` and
+    ``timestamp`` before handing it to process_changes(), which then reuses
+    them and does not write the event a second time.
+    """
+    now = stamp.next()
+    event_id = str(uuid.uuid4())
+    details = {
+        "ip": change.asset_ip,
+        "detail": change.detail,
+        "whitelisted": False,
+    }
+    details.update(_detail_extras(change))
+    details["notification"] = {
+        "version": VERSION,
+        "state": "whitelisted",
+        "decided_at": now,
+    }
+    return {
+        "event_id": event_id,
+        "timestamp": now,
+        "type": change.change_type,
+        "details": details,
+        "resolved": True,  # host_ports_initialized is always resolved
+    }
+
+
 def process_changes(changes: List[NetworkChange], session_id: str, whitelist: Whitelist,
                     counter: NotificationWindow, *, network_id: str,
                     stamp: EventStamp) -> List[Finding]:
@@ -159,8 +196,18 @@ def process_changes(changes: List[NetworkChange], session_id: str, whitelist: Wh
     counter.bind(network_id)
     shown = []
     for change in changes:
-        now = stamp.next()
-        event_id = str(uuid.uuid4())
+        # R3: a deferred-host initialization event is committed atomically with
+        # its baseline by store_recovered_host_baseline(). It must not be written
+        # a second time here. Its timestamp was already consumed from the same
+        # EventStamp, so later changes keep strictly increasing timestamps.
+        if change.event_pre_persisted:
+            if not change.event_id or not change.event_timestamp:
+                raise ValueError("pre-persisted change lacks its event id or timestamp")
+            now = change.event_timestamp
+            event_id = change.event_id
+        else:
+            now = stamp.next()
+            event_id = str(uuid.uuid4())
         authorized = is_whitelisted(change_type=change.change_type,
                                     asset_ip=change.asset_ip, detail=change.detail,
                                     whitelist=whitelist)
@@ -170,8 +217,9 @@ def process_changes(changes: List[NetworkChange], session_id: str, whitelist: Wh
         if authorized or silent:
             details['notification'] = {'version': VERSION, 'state': 'whitelisted', 'decided_at': now}
         # host_ports_initialized is initialization bookkeeping, not an alert: resolved.
-        sentinel_save_event(network_id, event_id, change.change_type, now, None,
-                            details, resolved=authorized or silent)
+        if not change.event_pre_persisted:
+            sentinel_save_event(network_id, event_id, change.change_type, now, None,
+                                details, resolved=authorized or silent)
         if authorized:
             display(Text(safe_text(f"[INFO] {change.asset_ip} — {presentation_detail(change)} (changement autorisé / whitelisté)"), style='dim'))
             counter.refresh()
@@ -194,6 +242,7 @@ def process_changes(changes: List[NetworkChange], session_id: str, whitelist: Wh
         finding_id = str(uuid.uuid4())
         finding = _make_finding(change, session_id, finding_id, now)
         save_finding(finding)
+        sentinel_link_finding(network_id, event_id, finding_id)
 
         def emit():
             if counter.view is None:

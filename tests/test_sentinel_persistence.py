@@ -50,7 +50,7 @@ def isolated(tmp_path, monkeypatch):
         '192.0.2.10': BaselineEntry(asset_id='known', ip='192.0.2.10', mac='', ports=[22], last_scan=NOW.isoformat())
     })
     monkeypatch.setattr(monitor, '_get_arp_mac', lambda ip: '')
-    monkeypatch.setattr(monitor, '_get_open_ports', lambda ip, **kwargs: [22])
+    monkeypatch.setattr(monitor, '_get_host_tcp_observation', lambda ip, **kwargs: monitor.HostTcpObservation(ip=ip, ports=[22]))
     return session_path, network_path
 
 
@@ -66,7 +66,7 @@ def test_start_routes_events_to_network_and_findings_to_run(isolated, monkeypatc
     monkeypatch.setattr(manager, 'load_whitelist', lambda: wl)
     monkeypatch.setattr(monitor, '_get_active_hosts', lambda target, **kwargs: ['192.0.2.10', *new_hosts])
     if degraded:
-        monkeypatch.setattr(monitor, '_get_open_ports', lambda ip, **kwargs: None)
+        monkeypatch.setattr(monitor, '_get_host_tcp_observation', lambda ip, **kwargs: monitor.HostTcpObservation(ip=ip, ports=None))
     shown = Mock()
     monkeypatch.setattr(alerting, 'display', shown)
     alerts = Mock()
