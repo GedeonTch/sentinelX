@@ -148,6 +148,9 @@ def locked(t, event):
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     monkeypatch.setenv('USERPROFILE', str(tmp_path))
+    # CRED-01: the credential resolver uses the effective UID, not HOME.
+    # Keep the existing test isolation by replacing only this test seam.
+    monkeypatch.setattr(dc, 'real_user_home', lambda: tmp_path)
     monkeypatch.setattr(dc.socket, 'socket', Mock(side_effect=AssertionError('No real network')))
     monkeypatch.setattr(dc.typer, 'confirm', Mock(return_value=True))
     clock = FakeClock()

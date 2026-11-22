@@ -24,6 +24,7 @@ import typer
 from core.finding import Category, Confidence, Evidence, Exposure, Finding, Severity
 from core.credential_vault import VaultError, VaultWriteUncertain
 from core.logger import display
+from core.user_paths import real_user_home, require_unprivileged_credentials
 from detect.credential_dictionary import Candidate, SUPPORTED, load_catalog
 from detect.credential_snmp import build_get, classify_response, InvalidResponse, new_request_id
 
@@ -217,8 +218,8 @@ def _try_ftp_login(target_ip: str, username: str, password: str) -> CredentialPr
 
 
 def ssh_trust_path() -> Path:
-    """SentinelX-owned trust file (Path.home() / '.netlab'); ~/.ssh/known_hosts is never read or written."""
-    return Path.home() / '.netlab' / SSH_TRUST_FILE
+    """SentinelX-owned trust file (~/.netlab); ~/.ssh/known_hosts is never read or written."""
+    return real_user_home() / '.netlab' / SSH_TRUST_FILE
 
 
 class TrustFileUnsafe(OSError):
@@ -737,6 +738,7 @@ def check_default_creds(target_ip: str, session_id: str, *,
                         recorder: Optional[Recorder] = None,
                         report: Optional[CheckReport] = None) -> List[Finding]:
     """One prompt per service, one Finding per qualified service; no secret output."""
+    require_unprivileged_credentials()
     # IPv4 only in this first lot: no DNS or endpoint expansion from candidate data.
     try:
         target_ip = str(ipaddress.IPv4Address(target_ip))

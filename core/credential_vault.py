@@ -14,6 +14,8 @@ import tempfile
 import uuid
 from typing import Iterator, Optional
 
+from core.user_paths import real_user_home
+
 MAX_VAULT = 16 * 1024 * 1024
 AAD = b'SentinelX credential vault v1'
 N, R, P = 2**17, 8, 1
@@ -32,7 +34,36 @@ class VaultWriteUncertain(VaultError):
 
 
 def default_vault_path() -> Path:
-    return Path.home() / '.netlab' / 'credentials' / 'vault.enc'
+    return real_user_home() / '.netlab' / 'credentials' / 'vault.enc'
+
+
+def validate_vault_location(path: Path) -> bool:
+    """Validate existing vault objects without creating anything.
+
+    Return True only when the vault file is absent. Existing paths with unsafe
+    types, ownership, links, or permissions are rejected rather than treated as
+    an invitation to initialize a replacement.
+    """
+    path = Path(path)
+    for parent in reversed(path.parents):
+        if parent.is_symlink() or (parent.exists() and getattr(parent.lstat(), 'st_file_attributes', 0) & 0x400):
+            raise VaultError('Vault directory links are not allowed')
+        if parent.exists() and not parent.is_dir():
+            raise VaultError('Vault directory is unavailable')
+    if path.is_symlink() or (path.exists() and getattr(path.lstat(), 'st_file_attributes', 0) & 0x400):
+        raise VaultError('Vault links or reparse points are not allowed')
+    if not path.exists():
+        # A dangling symlink was handled above; check the final parent if present.
+        if path.parent.exists():
+            if not path.parent.is_dir():
+                raise VaultError('Vault directory is unavailable')
+            _private(path.parent)
+        return True
+    _private(path.parent)
+    _private(path)
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise VaultError('Vault must be a regular file')
+    return False
 
 
 def _windows_acl(path: Path, create: bool) -> None:

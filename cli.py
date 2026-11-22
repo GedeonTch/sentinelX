@@ -41,6 +41,11 @@ from core.dependencies import (
 )
 from core.finding import Finding, Severity, format_finding_id
 from core.logger import display
+from core.user_paths import (
+    CredentialHomeError,
+    CredentialPrivilegeError,
+    require_unprivileged_credentials,
+)
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -627,6 +632,14 @@ def _render_smb_results(target: str, findings: list, session_id: str) -> None:
         )
 
 
+def _require_unprivileged_credentials() -> None:
+    """Enforce DEC-05 before any credential-specific filesystem or network work."""
+    try:
+        require_unprivileged_credentials()
+    except CredentialPrivilegeError as exc:
+        _credential_error(str(exc))
+
+
 def _credential_error(message: str) -> None:
     """Never let a diagnostic failure expose secret-bearing stack locals."""
     try:
@@ -638,8 +651,9 @@ def _credential_error(message: str) -> None:
 
 def _open_credential_vault(writable: bool = False) -> AbstractContextManager[CredentialVault]:
     """Interactive preparation only; keys never enter CLI arguments or config."""
+    require_unprivileged_credentials()
     import sys
-    from core.credential_vault import VaultError, default_vault_path, open_vault
+    from core.credential_vault import VaultError, default_vault_path, open_vault, validate_vault_location
     # Fail before requesting secrets if a required backend cannot be loaded.
     try:
         import cryptography  # noqa: F401
@@ -650,14 +664,22 @@ def _open_credential_vault(writable: bool = False) -> AbstractContextManager[Cre
         raise VaultError("Credential vault dependencies are unavailable") from None
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise VaultError("An interactive private terminal is required")
-    path = default_vault_path()
-    absent = not path.exists() and not path.is_symlink()
+    try:
+        path = default_vault_path()
+    except CredentialHomeError as exc:
+        raise VaultError(str(exc)) from None
+    absent = validate_vault_location(path)
     if absent:
         if not writable:
             raise VaultError("Vault absent; initialize through creds_check")
-        display("[yellow]A local encrypted vault will be created. Losing its passphrase "
+        display("[yellow]No valid vault was found in this user's credential location. "
+                "An older vault may exist under /root/.netlab; this is only a possibility "
+                "and has not been inspected. SentinelX will not inspect, migrate, copy, or "
+                "delete it. A local encrypted vault will be created. Losing its passphrase "
                 "makes its contents unrecoverable. Back up only the encrypted vault.[/yellow]")
-        if not typer.confirm("Create the encrypted credential vault?"):
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise VaultError("Interactive confirmation is required to initialize the credential vault")
+        if not typer.confirm("Create the encrypted credential vault?", default=False):
             raise typer.Abort()
     phrase = typer.prompt("Vault passphrase", hide_input=True, confirmation_prompt=absent)
     return open_vault(path, phrase, create=absent, writable=writable)
@@ -695,6 +717,7 @@ def creds_check_cmd(
     profile: Optional[str] = typer.Option(None, "--profile", help="Applicable built-in product profile; incompatible with --dict."),
 ) -> None:
     """Check FTP and SNMP (default), SSH (--service ssh, password only) or SMB (--service smb with --dict). Accepted secrets go only to the encrypted vault."""
+    _require_unprivileged_credentials()
     from pathlib import Path
     from core.credential_vault import VaultError
     from detect.credential_dictionary import DictionaryError, prepare_candidates
@@ -728,7 +751,9 @@ def creds_check_cmd(
                                           services=selected, recorder=vault, report=report)
             if findings:
                 _render_findings_table(findings)
-    except (DictionaryError, VaultError) as exc:
+    except typer.Abort:
+        raise
+    except (CredentialPrivilegeError, DictionaryError, VaultError) as exc:
         _credential_error(str(exc))
     except Exception:
         _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
@@ -750,12 +775,13 @@ app.add_typer(creds_app, name="creds")
 @creds_app.command("list")
 def creds_list() -> None:
     """List safe metadata only; never identities, passwords or communities."""
+    _require_unprivileged_credentials()
     from core.credential_vault import VaultError
     try:
         with _open_credential_vault() as vault:
             for row in vault.list_metadata():
                 display(Text(json.dumps(row, ensure_ascii=True)))
-    except VaultError as exc:
+    except (CredentialPrivilegeError, VaultError) as exc:
         _credential_error(str(exc))
     except Exception:
         _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
@@ -764,6 +790,7 @@ def creds_list() -> None:
 @creds_app.command("show")
 def creds_show(record_id: str = typer.Argument(..., help="Opaque vault record ID.")) -> None:
     """Reveal exactly one record after explicit confirmation in a private terminal."""
+    _require_unprivileged_credentials()
     from core.credential_vault import VaultError
     try:
         with _open_credential_vault() as vault:
@@ -774,7 +801,7 @@ def creds_show(record_id: str = typer.Argument(..., help="Opaque vault record ID
                 return
             # JSON escapes control characters; Text disables Rich markup interpretation.
             display(Text(json.dumps(record, ensure_ascii=True)))
-    except VaultError as exc:
+    except (CredentialPrivilegeError, VaultError) as exc:
         _credential_error(str(exc))
     except Exception:
         _credential_error("Credential operation failed; no diagnostic containing authentication data is emitted")
