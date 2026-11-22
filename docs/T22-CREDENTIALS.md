@@ -307,11 +307,46 @@ d'écriture n'est inféré. La documentation d'un défaut RW ne constitue pas un
 ## Coffre local
 
 Emplacement : `~/.netlab/credentials/vault.enc`, distinct des sessions. Terminal
-interactif privé requis, sans interface graphique. Première utilisation : accord
-de création, phrase saisie deux fois sans écho (20-1024 caractères, diversité
-minimale), puis test effectif chiffrer/écrire/relire un marqueur synthétique et le
-retirer. La longueur/diversité ne garantissent pas l'entropie : choisir une longue
+interactif privé requis, sans interface graphique. Première utilisation : si aucun
+coffre utilisateur valide n'existe, avertissement qu'un ancien coffre peut exister
+sous `/root/.netlab` (possibilité non inspectée), confirmation interactive
+explicite, puis accord de création et phrase saisie deux fois sans écho
+(20-1024 caractères, diversité minimale), puis test effectif
+chiffrer/écrire/relire un marqueur synthétique et le retirer. La
+longueur/diversité ne garantissent pas l'entropie : choisir une longue
 phrase aléatoire. Aucun secret maître en argument, environnement ou configuration.
+
+### CRED-01 — exécution non privilégiée
+
+`creds_check`, `creds list` et `creds show` sont refusés lorsque
+`os.geteuid() == 0` (via sudo ou exécution directe en root), avant tout accès,
+lecture, déchiffrement, création ou initialisation du coffre, toute session de
+credential testing, toute transmission de credential, tout accès réseau et toute
+écriture persistante. Le message est :
+« Les commandes creds ne peuvent pas être exécutées avec les privilèges root.
+Relancez SentinelX sans sudo. » Le code de sortie est `1`.
+
+Le home credentials est déterminé par l'UID effectif :
+`pwd.getpwuid(os.geteuid()).pw_dir`. `SUDO_USER`, `SUDO_UID` et `HOME` ne
+sélectionnent pas ce home. Sur POSIX, un UID ou un home irrésolvable est refusé
+explicitement, sans repli silencieux vers `HOME` ou `Path.home()`. Windows
+conserve `Path.home()` ; aucune politique Administrator n'est ajoutée.
+
+Un coffre existant mais invalide ou dont les permissions ne sont pas privées est
+refusé, jamais traité comme absent. `creds list` et `creds show` n'initialisent
+jamais un coffre absent. Aucune migration, copie, fusion, suppression ou
+réparation automatique d'un ancien coffre n'est effectuée. Les permissions
+attendues restent `0700` pour le répertoire privé et `0600` pour le fichier.
+
+### Limites connues (audit CRED-01, 2026-11-22)
+
+Les réserves suivantes sont **acceptées mais non corrigées** :
+- tests symlink dédiés à `validate_vault_location()` (coffre et parent) non ajoutés ;
+- interruption/création partielle du coffre non couverte par un test dédié ;
+- `open_vault()` bas niveau non gardé contre l'EUID 0 lorsqu'un chemin explicite est fourni (les entrées métier sont gardées) ;
+- coexistence de deux résolveurs (`core.database._real_user_home` et `core.user_paths.real_user_home`) ;
+- `_private` utilise `os.getuid()` alors que la politique est basée sur l'EUID (cas `uid ≠ euid` non couverts) ;
+- suite complète du dépôt non exécutée (533 tests ciblés réussis).
 
 AES-256-GCM, clé de données aléatoire, clé enveloppée par une clé dérivée avec
 scrypt N=131072, r=8, p=1 (environ 128 MiB). Format versionné, nonces aléatoires,

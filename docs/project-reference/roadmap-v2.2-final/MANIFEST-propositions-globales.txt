@@ -1,0 +1,48 @@
+# MANIFESTE — paquet de revue Kiro, propositions documentaires globales (version 2.2)
+# Date de rédaction : 2026-11-12 ; date de référence de la mission : 12 novembre 2026.
+# Commit de référence : 9034f0131ebeaf63dc51bf217cea3ec3f6ab068e (origin/a4-arena ; date git 2026-11-11).
+# Statut : PROPOSITION. Aucune décision n'est approuvée ici, aucun ticket n'est validé ni autorisé.
+# Aucun fichier du dépôt n'est modifié. Aucun commit, push, nettoyage, scan réel.
+# Non transmis : aucun canal de transmission disponible dans cet environnement.
+# Exclus du paquet : clones, copies de base (docs-proposees/base-9034f01/), archive-v1/,
+#   venvs, fichiers temporaires, doublons (1)/(2) (introuvables), ~/.netlab (non lu dans ce cycle).
+#   Proposition de Skill Kiro : retirée du paquet actif en V2.2 (fichiers conservés dans le dossier d'audit, non inclus).
+# Ce manifeste n'apparaît pas dans sa propre somme.
+#
+# chemin | taille (octets) | catégorie | statut
+docs-proposees/PLAN-tickets-global.md | 41560 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/MASTER-REFERENCE.md | 18049 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/IMPLEMENTATION-TRACKING.md | 14833 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/IMPLEMENTATION-TRACKING-section-audit.md | 2972 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/SENTINEL-TCP-STATES.md | 20073 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/TABLEAU-tickets-dependances.md | 4999 | proposition / document | PROPOSITION (non approuvée)
+docs-proposees/TRANSMISSION-revue-Kiro-et-Nova.md | 10999 | proposition / document | PROPOSITION (non approuvée)
+SPEC-A1-consolidee.md | 31450 | proposition / document | PROPOSITION (non approuvée)
+PROPOSITION-A1-formalisation-TCP.md | 28767 | proposition / document | PROPOSITION (non approuvée)
+skills-proposees/sentinelX.mdc | 2445 | proposition / document | PROPOSITION (non approuvée)
+diffs/master-reference.diff | 5729 | diff | applicable à 9034f01 (vérifié par patch)
+diffs/impl-tracking.diff | 5101 | diff | applicable à 9034f01 (vérifié par patch)
+diffs/sentinelX.mdc.diff | 559 | diff | applicable à 9034f01 (vérifié par patch)
+diffs/SENTINEL-TCP-STATES.diff | 20401 | diff | création proposée (emplacement à vérifier par Kiro)
+diffs/PLAN-tickets-global.diff | 72512 | diff | informatif : base v1 non incluse dans le paquet
+diffs/SPEC-A1-consolidee.diff | 6900 | diff | informatif : base v1 non incluse dans le paquet
+diffs/PROPOSITION-A1-formalisation-v2.diff | 5096 | diff | informatif : base v1 non incluse dans le paquet
+diffs/TABLEAU-tickets-dependances.diff | 5129 | diff | création ; artefact d'audit
+diffs/IMPLEMENTATION-TRACKING-section-audit.diff | 3094 | diff | création ; artefact d'audit
+diffs/TRANSMISSION.diff | 17506 | diff | informatif : base v1 non incluse dans le paquet
+diffs/GLOBAL-documentaire.diff | 142027 | diff global | concaténation des diffs individuels (ordre du manifeste)
+COMMIT-REFERENCE.txt | 886 | référence Git | état relevé à la génération
+#
+# Contrôle d'application (patch -p1 sur les bases disponibles, comparaison SHA-256 au fichier proposé) :
+# master-reference.diff : OK
+# impl-tracking.diff : OK
+# sentinelX.mdc.diff : OK
+# SENTINEL-TCP-STATES.diff : OK
+# PLAN-tickets-global.diff : OK
+# SPEC-A1-consolidee.diff : OK
+# PROPOSITION-A1-formalisation-v2.diff : OK
+# TABLEAU-tickets-dependances.diff : OK
+# IMPLEMENTATION-TRACKING-section-audit.diff : OK
+# TRANSMISSION.diff : OK
+#
+# Somme de vérification : SHA256SUMS-propositions-globales.txt (chemins relatifs à la racine du paquet).

@@ -1,0 +1,32 @@
+--- a/PROPOSITION-A1-formalisation-TCP.md
++++ b/PROPOSITION-A1-formalisation-TCP.md
+@@ -1,9 +1,9 @@
+ # Proposition A1 — formalisation de la politique TCP (états `open` / `closed` / `filtered` / incertains)
+ 
+-**Statut** : proposition de spécification, lecture seule. **Réconciliée le 2026-09-24** avec les décisions du propriétaire (§0). Remplacée comme spécification de référence par `SPEC-A1-consolidee.md` (réconciliée) et `docs-proposees/SENTINEL-TCP-STATES.md`. **Aucune implémentation.** Aucun code, test, Skill, document maître, base ni `~/.netlab` modifié. Aucun scan réseau réel.
++**Statut** : proposition de spécification, lecture seule. **Réconciliée le 2026-11-12** avec les décisions du propriétaire (§0). Remplacée comme spécification de référence par `SPEC-A1-consolidee.md` (réconciliée) et `docs-proposees/SENTINEL-TCP-STATES.md`. **Aucune implémentation.** Aucun code, test, Skill, document maître, base ni `~/.netlab` modifié. Aucun scan réseau réel.
+ **Référence de code** : `origin/a4-arena` = `9034f01` (clone de lecture `/tmp/audit-global-ref`, HEAD `9034f01`, status vide ; `/tmp/audit-spec-ref` absent).
+ **Rapport d'audit associé** : `RAPPORT-complement-A1-transitions-ports.md` (constats A1-1 à A1-8). Le présent document ne le remplace pas.
+-**Mise à jour de vérification finale** : voir `RAPPORT-verification-A1-chaine-production.md` (harnais de chaîne, parties B et C) et `SPEC-A1-consolidee.md`. Corrections appliquées : D6 (§11, modèle ≠ production), remise à zéro `ScanFailedError` (l.626-636), comptage §5, DTD lu (§1.2, §13).
++**Mise à jour de vérification finale** : voir `RAPPORT-verification-A1-chaine-production.md` (harnais de chaîne, parties B et C) et `SPEC-A1-consolidee.md`. Corrections appliquées : D6 (§11, modèle ≠ production), remise à zéro `ScanFailedError` (l.629-636), comptage §5, DTD lu (§1.2, §13).
+ **Preuves** : `preuves/a1/a1_model_spec.py` (modèle de spécification), `.json`, `.log` (rc 0). Empreintes dans `SHA256SUMS-A1-formalisation.txt`.
+ 
+ Légende : **[APPROUVÉ]** = règle acquise par décision du propriétaire. **[PROPOSITION]** = recommandation non tranchée. **[OUVERT]** = décision non prise, bloquante ou non. **[ÉCARTÉ]** / **[REPORTÉ]** = options fermées par décision (voir §0).
+@@ -245,7 +245,7 @@
+ | `detect/tcp_scan.py` | `_check_tcp_xml` l.354 (complétude : **pas de changement attendu**), `_parse_tcp_xml_with_states` l.444 (états, l.493), `parse_sentinel_open_ports` l.558 | modifié |
+ | `sentinel/monitor.py` | l.276-282 (appel), | appelant, adaptation |
+ | `sentinel/baseline.py` | l.454-481 | appelant, **non modifié** tant que D6 ouvert |
+-| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291, `_rebuild_transition_state` l.300-362, `_compute_port_transitions` l.460-505, remise à zéro `ScanFailedError` l.626-636 (vidage l.633 ; chemin `ScanDegradedError` partiel mesuré, voir RAPPORT-verification §1) | modifié (cœur) |
++| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291, `_rebuild_transition_state` l.300-362, `_compute_port_transitions` l.460-505, remise à zéro `ScanFailedError` l.629-636 (vidage l.633 ; chemin `ScanDegradedError` partiel mesuré, voir RAPPORT-verification §1) | modifié (cœur) |
+ | `sentinel/monitor_view.py` | `presentation_detail` l.52-61 | effet indirect |
+ | `sentinel/alerting.py` | `NO_FINDING_TYPES` l.67 ; `evidence` non persistée l.173 | inchangé (D5 le concerne) |
+ | `reports/sentinel_report.py` | l.27-35 | inchangé (D1) |
+@@ -271,7 +271,7 @@
+ | Option | Description | Avantages | Risques |
+ |---|---|---|---|
+ | **D5-A** | Nouvelle table additive `sentinel_tcp_observations(network_id, ip, port, cycle_ts, state, scan_status, session_id)`, créée par `CREATE TABLE IF NOT EXISTS` | Historique complet, requêtable, prépare D6 et une alerte « filtré » future | Volume : 1030 ports × hôtes × cycles ; nécessite une politique de rétention (non tranchée) ; migration additive uniquement |
+-| **D5-B** | Ajouter la preuve dans `events.details` (JSON libre, clé additionnelle : `observed`, `consecutive_closed`, `cycle_ts`, `scan_status`) | Aucune migration de schéma ; contenu déjà persisté ; faible risque | Rien n'est persisté pour les états `filtered` (pas d'événement) ; `details` alimente le budget d'événements |
++| **D5-B** | Ajouter la preuve dans `events.details` (JSON libre, clé additionnelle `proof = {observed, consecutive, scan, run}`, alignée sur `SPEC-A1-consolidee.md` §10) | Aucune migration de schéma ; contenu déjà persisté ; faible risque | Rien n'est persisté pour les états `filtered` (pas d'événement) ; `details` alimente le budget d'événements |
+ | **D5-C** | Ne rien persister de plus | Aucun changement | Pas de preuve auditable ; A1-8 (`evidence` non persistée) reste |
+ 
+ **Précédent de migration** : `core/database.py` l.1859-1863 ajoute des colonnes à `sentinel_control` avec `ALTER TABLE … ADD COLUMN … DEFAULT 0`, de façon additive. D5-A suit le même principe.

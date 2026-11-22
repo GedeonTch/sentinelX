@@ -1,0 +1,249 @@
+# Sentinel — états TCP, transitions de ports et preuves de fermeture
+
+**Statut : PROPOSITION de spécification canonique (A1), non appliquée.** Destinée à `docs/SENTINEL-TCP-STATES.md` après revue Kiro et approbation (DEC-01).
+**Base de code** : `origin/a4-arena` = `9034f01` (lu dans `/tmp/audit-global-ref`, arbre propre).
+**Source des décisions** : décisions du propriétaire rapportées dans la mission de formalisation A1 (voir §2). Les décisions listées comme approuvées ne sont pas re-proposées ici.
+**Documents liés** : `docs-proposees/PLAN-tickets-global.md` (tickets TCP-01 à TCP-06, décisions DEC-xx) ; `docs/MASTER-REFERENCE.md` §5 ; `ARENA.md` rév. 13 §9.6 (texte à amender par le propriétaire : `[]` incrémente aujourd'hui, incompatible avec R2 ; proposition au plan §6).
+
+Légende : **[APPROUVÉ]** décision du propriétaire, appliquée ici. **[DÉCISION]** point non décidé, identifié dans `IMPLEMENTATION-TRACKING.md`. **[PROPOSITION]** choix d'implémentation, à valider par revue.
+
+---
+
+## 1. Termes
+
+| Terme | Définition |
+|---|---|
+| Observation TCP complète | Scan Nmap réussi, périmètre complet (`SENTINEL_TCP_PORTS`), hôte décrit sans ambiguïté. |
+| Scan incomplet (`None`) | Aucune observation exploitable pour l'hôte : timeout, table partielle, XML invalide, doublon, attribution contradictoire, hôte non observé. |
+| État par port | `OPEN`, `CLOSED`, `FILTERED`, `UNCERTAIN` (voir §4). |
+| `closed_streak[P]` | Nombre d'observations complètes consécutives où le port `P` est explicitement `CLOSED`. Implémenté par `NetworkState.port_absent_count` (nom conservé, sémantique ci-dessous). |
+| Cycle sans observation | Cycle où l'hôte n'a aucune observation TCP complète (absent, ping KO sans ARP utile, scan dégradé). |
+
+## 2. Règles et décisions
+
+### 2.1 Règles d'état
+
+| Réf. | Règle | Statut |
+|---|---|---|
+| R1 | `open` = port ouvert. | [APPROUVÉ] |
+| R2 | `closed` est confirmé seulement après **2 observations TCP complètes et consécutives** indiquant explicitement `closed`. | [APPROUVÉ] |
+| R3 | `filtered` est incertain : aucune fermeture déclarée, aucune progression du compteur, **interrompt** une succession de `closed`. Aucune fermeture confirmée sur un passage `closed → filtered`. | [APPROUVÉ] |
+| R4 | `open\|filtered` : aucune conclusion de fermeture. | [APPROUVÉ] |
+| R5 | États inconnus ou invalides (`unfiltered`, sans `<state>`, `bogus`) : aucune conclusion de fermeture. | [APPROUVÉ] |
+| R6 | Hôte entièrement filtré (aucun port `CLOSED` ni `OPEN` sur scan complet) : aucune fermeture de masse. | [APPROUVÉ] |
+| R7 | Compteurs intermédiaires d'absence non restaurés après redémarrage. | [APPROUVÉ] |
+
+### 2.2 Décisions de formalisation
+
+| Réf. | Décision | Statut |
+|---|---|---|
+| D-A1 | **Remise à zéro** du compteur de chaque port d'un hôte lorsque l'hôte n'a aucune observation TCP complète dans le cycle. Ce n'est plus une conservation. | [APPROUVÉ] |
+| D-A2 | **Fermetures individuelles autorisées** lorsque tous les ports connus d'un hôte sont explicitement `CLOSED` deux fois de suite : une fermeture par port, sans limite. | [APPROUVÉ] |
+| D-A3 | **Aucun seuil global arbitraire** de fermetures (ni par cycle, ni par hôte). | [APPROUVÉ] |
+| D-A4 | Agrégation visuelle d'un hôte entièrement `closed` (ancienne option G-c) : **reportée**. Hors périmètre A1. | [APPROUVÉ] (report) |
+| D-A5 | Validation XML **commune** à Monitor et à l'apprentissage de baseline (même fonction de validation, même refus). | [APPROUVÉ] |
+| D-A6 | Preuve de fermeture persistée selon **D5-B** (§7). | [APPROUVÉ] |
+| D-A7 | Libellé **D1** : distinction entre nouveaux événements avec preuve et événements historiques sans preuve (§7.3). | [APPROUVÉ] (forme) ; libellé exact [DÉCISION] DEC-03 |
+| D-A8 | **D6** (politique des ports filtrés à l'apprentissage) : ticket indépendant, hors A1. Cette spécification ne le traite pas. | [APPROUVÉ] (périmètre) |
+| D-A9 | Ordre : A1 avant D5 ; D1 après D5 ; D6 indépendant. | [APPROUVÉ] |
+
+Point de mise en œuvre : la règle « consécutives » (R2) et D-A1 impliquent qu'un cycle sans observation complète **interrompt** la succession. Le comportement actuel (compteur conservé) est donc remplacé.
+
+## 3. Observation et attribution XML
+
+### 3.1 Objet d'observation
+
+L'analyse produit, pour chaque hôte, un objet `HostTcpObservation` :
+- `status ∈ {COMPLETE, INCOMPLETE}` ;
+- si `COMPLETE` : `states: Dict[int, PortState]` couvrant chaque port du périmètre ;
+- `open_ports()` dérivé : ports `OPEN` ; `[]` signifie seulement « aucun `OPEN` sur scan complet », jamais une preuve de fermeture.
+
+`parse_sentinel_open_ports` reste la fonction de compatibilité : elle renvoie les seuls `OPEN` (ou `None`). Aucun appelant existant ne change de signature (CA-10).
+
+### 3.2 Attribution
+
+| Source (scan complet) | État |
+|---|---|
+| `<port>` avec `state` ∈ {`open`, `closed`, `filtered`} | cet état |
+| `<port>` avec autre valeur ou sans `<state>` | `UNCERTAIN` |
+| Port non listé couvert par un groupe `<extraports>` dont `<extrareasons ports="…">` l'attribue | l'état du groupe si `closed` ou `filtered` ; `UNCERTAIN` sinon |
+| Groupe `state="open"` | **jamais** `OPEN` déduit : `UNCERTAIN` |
+| Groupe sans `ports=`, seul groupe non attribué | état du groupe si `count` = nombre exact de ports non explicites [PROPOSITION] |
+| Plusieurs groupes sans `ports=` | `UNCERTAIN` pour les ports concernés [PROPOSITION] |
+| Port listé deux fois, ou dans deux attributions | scan `INCOMPLETE` |
+| `ports=` incohérent (count ≠ liste, chevauchement, hors périmètre, union ≠ complément) | scan `INCOMPLETE` [PROPOSITION] |
+
+Les structures réelles de `extrareasons` hors fixtures ne sont pas vérifiées. Le DTD officiel (`nmap-dtd`) valide le schéma seulement. Le repli conservateur (`UNCERTAIN`, pas de fermeture) s'applique aux cas non vérifiés.
+
+### 3.3 Validation commune
+
+La même fonction valide le XML pour le monitor et pour l'apprentissage de baseline. Conséquence attendue [PROPOSITION, à tester] : un XML ambigu fait refuser l'apprentissage de l'hôte (scan `INCOMPLETE`), donc la baseline reste inchangée. Cette conséquence est à signaler dans le ticket TCP-01 avant merge.
+
+## 4. Représentation des états
+
+| Représentation | Sens | Peut conclure « fermé » ? |
+|---|---|---|
+| `None` (INCOMPLETE) | complétude non prouvée, pour l'hôte entier | non |
+| `[]` (COMPLETE sans `OPEN`) | valeur dérivée, pas une preuve | non |
+| `PortState.UNCERTAIN` | état explicite non concluant, pour le port seul | non |
+| `PortState.FILTERED` | état explicite `filtered` | non (interrompt la succession) |
+| `PortState.CLOSED` | état explicite `closed` | oui, après 2 observations consécutives |
+| `PortState.OPEN` | état explicite `open` | non (remise à zéro, ou `new_port`) |
+
+Règle de distinction : un `UNCERTAIN` ou un `FILTERED` n'invalide que le port ; un `None` invalide tout l'hôte.
+
+## 5. Compteurs : comportement cible
+
+Un compteur par port connu ouvert : `closed_streak[P]`.
+
+| Observation pour `P` | Effet sur le compteur | Événement |
+|---|---|---|
+| `CLOSED` (scan complet) | +1 ; à 2 : remise à 0, retrait de `known_open` | `port_not_open(P)` une fois par épisode |
+| `OPEN` | remise à 0 | si `P` n'est pas dans `known_open` : `new_port(P)` |
+| `FILTERED` | remise à 0 | aucun |
+| `UNCERTAIN` | remise à 0 | aucun |
+| Scan `INCOMPLETE` (`None`) | remise à 0 pour tous les ports de l'hôte | aucun |
+| Hôte sans observation complète dans le cycle (D-A1) | remise à 0 pour tous les ports de l'hôte | aucun |
+| `ScanFailedError` (aucune observation exploitable) | remise à 0 pour tous les hôtes | aucun (`scan_degraded` selon ARENA §9.14) |
+| Redémarrage | compteur non restauré (R7) | aucun |
+
+Séquences (cycles 1…n ; port 80 suivi ; 22 `OPEN` au départ). Les résultats « harnais » sont ceux de `preuves/a1/a1_chain_verify.log` sur `9034f01` ; les lignes marquées « cible » sont à vérifier après implémentation.
+
+| Séquence | Attendu (cible) | Production `9034f01` (harnais) |
+|---|---|---|
+| closed, closed | `port_not_open` c2 | c2 (S1, conforme) |
+| closed ×2, open, closed ×2, closed | c2 `port_not_open` ; c3 `new_port` ; c5 `port_not_open` ; c6 aucun | conforme (S1) |
+| closed, filtered, closed, closed | `port_not_open` c4 | non mesuré (cible) |
+| closed, None (ScanFailed), closed, closed | `port_not_open` c4 | c4 (S6, conforme) |
+| closed c1, RESTART, closed c2, closed c3 | `port_not_open` c3 (compteur de c1 perdu, R7) | c3 (S2, conforme) |
+| closed ×4, RESTART avant chaque cycle | aucun événement (R7 ; risque §8) | aucun (S3, conforme) |
+| filtered ×2 | aucun | **c2 `port_not_open`** (S7, non conforme) |
+| open\|filtered ×2 | aucun | **c2 `port_not_open`** (S8, non conforme) |
+| A absent au c2 (closed c1, c3, c4) | `port_not_open` c4 (D-A1) | c3 (S5, non conforme) |
+| Hôte entier filtré ×10, baseline 22 et 80 | aucun (R6) | **c2 `port_not_open` 22 et 80** (S11, non conforme) |
+| Hôte entier closed ×2, baseline 22 et 80 | `port_not_open` 22 et 80 c2 (D-A2) | identique (cible conforme) |
+| closed c1, filtered c2, closed c3, closed c4 (80) | `port_not_open` c4 : `filtered` remet à zéro (R3) | non mesuré. Même mécanisme que S7 (`filtered` vu comme absence) : c2 à craindre |
+
+Pas de réémission : après `port_not_open`, le port quitte `known_open` ; une réouverture produit `new_port` ; un nouveau `closed` produit un nouvel épisode.
+
+## 6. Prévention des fermetures
+
+- **R6** : hôte entièrement filtré → aucun compteur positif, aucun événement. La protection est le filtrage par état (R3, R5), pas le quota.
+- **D-A2 / D-A3** : hôte entièrement `closed` deux fois → une fermeture par port, sans seuil. Ce comportement est voulu.
+- **Quota** (`sentinel/notifications.py`, `WINDOW` l.7, `LIMIT` l.8) : limite l'affichage, pas la fermeture. Un événement masqué est persisté avant le quota (`sentinel/alerting.py` `process_changes` l.149-212). Le quota ne modifie pas l'état. Il ne protège pas contre une fausse fermeture.
+- **Agrégation visuelle (D-A4)** : reportée, hors A1.
+
+## 7. Événements, preuve et libellés (D5-B, D1)
+
+### 7.1 Preuve minimale (D5-B) [APPROUVÉ] — clés [PROPOSITION]
+
+Clé ajoutée à `events.details` pour les **nouveaux** `port_not_open` uniquement :
+
+```json
+"proof": {"observed": "closed", "consecutive": 2, "scan": "complete", "run": "<run_session_id>"}
+```
+
+- Pas de nouvelle table, pas de migration de schéma (`events` inchangé), aucune réécriture de ligne existante.
+- Les lecteurs de `details` (reprise au démarrage, quota, rapport) ignorent les clés inconnues. À vérifier par test (TCP-05).
+- Les anciens événements sont identifiés par l'**absence** de `proof`. Ils ne prouvent pas l'état observé à l'époque.
+
+### 7.2 Persistance
+
+- `details.detail` (`port N not open`) reste inchangé pour compatibilité. Seule la présentation change.
+- `evidence` n'est pas persistée (constat A1-8) ; `proof` la remplace pour les fermetures.
+- `filtered` n'a pas d'événement ; il n'est donc pas persisté (acceptable : état incertain, sans preuve de fermeture).
+
+### 7.3 Présentation (D1) [APPROUVÉ] — libellé exact [DÉCISION] DEC-03
+
+| Événement | Libellé proposé (terminal, vue live, rapport) |
+|---|---|
+| Nouveau `port_not_open` avec `proof` | « Port N closed » (2 observations complètes consécutives) |
+| Historique `port_not_open` sans `proof` | « Port N not open (historique, preuve absente) » |
+
+Conséquences : `presentation_detail` (`sentinel/monitor_view.py` l.52-61) doit lire la preuve, pas seulement le type. `tests/test_sentinel_event_display.py` l.76-82 doit être révisé. Le rapport HTML (`reports/sentinel_report.py` l.27-35) affiche aujourd'hui `details['detail']` brut (« port N not open ») et n'utilise pas `presentation_detail` : il doit être traité séparément (TCP-06).
+
+Dépendance : D1 dépend de D5-B (la distinction exige la preuve persistée).
+
+## 8. Redémarrage et réserves
+
+- R7 : compteurs non restaurés. `known_open` et `notified_port_not_open` restaurés comme aujourd'hui.
+- **Réserve à consigner (DEC-15)** : si les redémarrages sont plus fréquents que deux cycles, aucune fermeture n'est jamais confirmée (S3). C'est une conséquence directe de R7 et du retard d'un cycle.
+
+## 9. Critères d'acceptation
+
+| Réf. | Critère |
+|---|---|
+| CA-1 | `filtered` ×2 sur port `open` : aucun événement ; compteur non progressé. |
+| CA-2 | `closed`, `filtered`, `closed` : aucun événement au cycle 3 ; 4e `closed` : `port_not_open`. |
+| CA-3 | `open\|filtered`, `unfiltered`, absent, invalide, `bogus` : aucun événement de fermeture, ×2 et plus. |
+| CA-4 | `None` interrompt la succession (None, closed, closed → événement au cycle 3). |
+| CA-5 | Hôte entièrement `filtered` sur dix cycles : aucun événement, aucun compteur positif. |
+| CA-6 | Redémarrage après `closed` : aucun compteur restauré ; événement après deux nouveaux `closed`. |
+| CA-7 | Second épisode : `new_port` une fois ; pas de réémission pour le même épisode. |
+| CA-8 | `open` listé dans `<port>` reconnu ; groupe `<extraports state="open">` ne crée jamais `OPEN`. |
+| CA-9 | `[]` d'un scan complet sans `OPEN` n'est jamais une fermeture. |
+| CA-10 | `parse_sentinel_open_ports` : signature et retour inchangés pour les appelants existants. |
+| CA-11 | Anciens événements : `details` inchangé ; aucune ligne réécrite. |
+| CA-12 | P1 à P12 du harnais (attributions ambiguës, chevauchements, hors périmètre) : `UNCERTAIN` ou `INCOMPLETE`, jamais une fermeture. |
+| CA-13 | S7 et S8 : aucun événement sur la chaîne de production après implémentation. |
+| CA-14 | Absence d'un hôte au cycle intermédiaire : compteur remis à zéro (S5 : fermeture au cycle 4). |
+| CA-15 | Hôte entièrement `closed` deux fois : une fermeture par port, sans seuil (D-A2). |
+| CA-16 | Événement neuf avec `proof` : libellé « closed » ; historique : libellé neutre (terminal et rapport). |
+| CA-17 | Apprentissage de baseline : même validation XML ; XML ambigu → baseline inchangée. |
+| CA-18 | Aucune nouvelle table SQL (diff de `CREATE TABLE` vide). |
+
+## 10. Tests de non-régression
+
+| Test | Fichier (9034f01) | Action |
+|---|---|---|
+| Parsing `filtered`, `open\|filtered`, `unfiltered`, sans état, `bogus` | `tests/test_tcp_scan.py` | ajout (TCP-01) |
+| Attribution `<extraports>` (présent, absent, contradictoire, multi-groupes) | `tests/test_tcp_scan.py` | ajout (TCP-01) |
+| `filtered` → `[]` au retour de `_parse` (l.442-455) | `tests/test_tcp_scan.py` | inchangé (CA-9) |
+| Sortie réelle nmap 7.95 (fixture l.291 ; tests l.897-909) | `tests/test_tcp_scan.py` | inchangé (CA-10) |
+| Séquences §5 | `tests/test_sentinel_manager.py` | ajout (TCP-03) |
+| `test_port_not_open_after_two_complete_scans_then_never_repeated` l.429-440 ; `test_scan_failed_resets_counters_and_records_one_episode_only` l.589-597 | `tests/test_sentinel_manager.py` | révision (sémantique change) |
+| `test_unknown_tcp_observation_restarts_the_absence_count` l.450-455 ; `test_error_status_resets_the_absence_count` l.487-497 | `tests/test_sentinel_manager.py` | conserver (cohérents avec R5, D-A1) |
+| Absence d'un hôte pendant un cycle (D-A1) : aucun test existant | `tests/test_sentinel_manager.py` | ajout (TCP-02) |
+| Arrêt pendant scan : `test_interrupted_check_persists_nothing` l.182, `test_interrupted_cycle_is_released_and_the_loop_returns` l.200 | `tests/test_sentinel_stop_during_scan.py` | vérifier |
+| Libellé « Port N closed » (l.76-82) | `tests/test_sentinel_event_display.py` | révision (TCP-06, D1) |
+| Apprentissage avec XML ambigu | `tests/test_sentinel_baseline*.py` | ajout (TCP-01) |
+| Reprise au démarrage avec `proof` | `tests/test_sentinel_lifecycle.py` | ajout (TCP-05) |
+
+Exécution : HOME et base temporaires, fixtures XML, sans scan réel.
+
+## 11. Fichiers et fonctions
+
+| Fichier | Fonctions / lignes (`9034f01`) | Ticket |
+|---|---|---|
+| `detect/tcp_scan.py` | `_recorded_port_states` l.337 ; `_parse_tcp_xml_with_states` l.444 ; `parse_sentinel_open_ports` l.558 ; `_check_tcp_xml` l.354 | TCP-01 |
+| `sentinel/monitor.py` | `_get_open_ports` l.264 (appel l.276-282) | TCP-01 |
+| `sentinel/baseline.py` | `learn_baseline` l.431 ; appel l.481-489 | TCP-01 |
+| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291 ; `_rebuild_transition_state` l.300-362 ; `_compute_port_transitions` l.460-505 ; `ScanFailedError` l.626-636 ; boucle `current_hosts` l.463 | TCP-02 |
+| `sentinel/alerting.py` | `_detail_extras` l.138 ; `process_changes` l.149 ; `details` l.168 ; `NO_FINDING_TYPES` l.67 (contient `port_not_open`) | TCP-05 |
+| `sentinel/monitor_view.py` | `presentation_detail` l.52-61 ; `_PORT_NOT_OPEN_DETAIL` l.49 | TCP-06 |
+| `reports/sentinel_report.py` | l.27-35 | TCP-06 |
+| `core/database.py` | `events` l.263 ; `sentinel_save_event` l.1572-1586 | inchangé (CA-18) |
+
+## 12. Risques
+
+1. **Perte de détection `closed → filtered`** : un service passé derrière un pare-feu ne produit plus d'événement. Conséquence directe de R3 (aucune fermeture sur `closed → filtered`) ; à consigner comme réserve.
+2. **Apprentissage plus strict** : la validation commune peut refuser des apprentissages qui réussissent aujourd'hui (D-A5). Mesure requise avant merge.
+3. **Redémarrages répétés** : voir §8.
+4. **Parsing `<extraports>`** : hypothèses non vérifiées sur sortie réelle. Repli `UNCERTAIN`, donc moins d'alertes, pas de fausse alerte.
+5. **Quota** : un `new_port` réel peut être masqué sur le même hôte dans la même fenêtre. Ce comportement existe ; il n'est pas modifié par A1.
+
+## 13. Points à trancher
+
+| Réf. | Point | Statut |
+|---|---|---|
+| DEC-01 | Emplacement canonique : `docs/SENTINEL-TCP-STATES.md` (proposé) et texte correspondant dans ARENA §9.6 (propriétaire). | [DÉCISION] |
+| DEC-03 | Libellés exacts D1 (§7.3). | [DÉCISION] |
+| DEC-15 | Accepter explicitement la réserve §8. | [DÉCISION] |
+| — | Clés exactes de `proof` (§7.1). | [PROPOSITION], validée en TCP-05 |
+
+## 14. Limites
+
+- Aucune mesure sur scan réel. Les séquences proviennent de fixtures XML et de sondes remplacées.
+- Le harnais `a1_chain_verify.py` ne lance pas le monitor en continu : un cycle = un appel de `_do_check`.
+- Non vérifié : structure réelle Nmap des `extrareasons` hors fixtures ; sémantique réelle de `extraports state` ; comportement de `ScanDegradedError` en production au-delà des cas mesurés.
+- Le modèle `preuves/a1/a1_model_spec.py` est une spécification exécutable, pas une preuve de conformité.

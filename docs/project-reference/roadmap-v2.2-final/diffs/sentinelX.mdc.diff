@@ -1,0 +1,13 @@
+--- a/.cursor/rules/sentinelX.mdc
++++ b/.cursor/rules/sentinelX.mdc
+@@ -6,7 +6,9 @@
+ 
+ # SentinelX — Cursor Guardrails
+ 
+-Full context: `.kiro/steering/sentinelx.md` (source of truth). This file is a
++<!-- PROPOSITION (DOC-02) — en attente de décision du propriétaire. Non appliquée aux copies en place. -->
++
++Full context: `.kiro/steering/sentinelX.md` (source of truth). This file is a
+ condensed operational checklist — if anything here seems to conflict with the
+ steering doc, the steering doc wins. When in doubt, STOP and ask, don't guess.
+ 

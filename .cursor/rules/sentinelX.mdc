@@ -6,7 +6,10 @@ alwaysApply: true
 
 # SentinelX — Cursor Guardrails
 
-Full context: `.kiro/steering/sentinelx.md` (source of truth). This file is a
+> **Documentation entry point**: read `docs/project-reference/README.md`, then
+> `docs/MASTER-REFERENCE.md` and `docs/IMPLEMENTATION-TRACKING.md`, before any work.
+
+Full context: `.kiro/steering/sentinelX.md` (source of truth). This file is a
 condensed operational checklist — if anything here seems to conflict with the
 steering doc, the steering doc wins. When in doubt, STOP and ask, don't guess.
 

@@ -54,10 +54,16 @@ Ces règles s'appliquent à tout agent lisant ou modifiant ce fichier.
 ## État général du projet (branche `a4-arena`)
 
 ```
-HEAD    : 9034f01  (origin/a4-arena, ticket 4 — audit 2026-11-12 ; T23-B = 3657498)
-Tests   : 2024–2026 passed (2 flaky lifecycle sous forte charge, passent en isolation)
-Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
-SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers non commités) ; NON intégré
+HEAD    : 6af1f72  (origin/a4-arena ; réconciliation documentaire 2026-11-21)
+Tests   : dernières mesures par suite : manager 73, présentation 47, notifications 16,
+          persistance 9, monitor 35, tcp_scan 133, baseline_reliability 77 passed
+          (suite complète du dépôt non réexécutée depuis 2026-11-15)
+Workspace : propre et synchronisé avant cette mission ; les changements documentaires
+          de la centralisation sont laissés non commités pour revue propriétaire
+SMB-01 : intégré et poussé (`6274446`) ; SMB-02 clôturé ; SMB-03 (`1641eec`),
+         SMB-04 (`ed646fc`) et SMB-05 (`ac2d6bd`) commités et poussés
+Nettoyage : `.vscode/settings.json` (préférence personnelle) supprimé du dépôt
+         dans `6af1f72` (poussé)
 ```
 
 ---
@@ -234,7 +240,7 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 **Statut :** `[ ]` Non commencé
 **Spec :** approuvée — voir `docs/MASTER-REFERENCE.md` §7
 **Dépendances :** aucune
-**Prochaine dans la feuille de route** après Confidence CLI (commité, `85870ac`) : T20
+**Position dans la feuille de route :** T20 n'est pas inscrit dans la séquence technique V2.2 approuvée (DEC-02) ; statut inchangé (non commencé, aucune autorisation d'implémentation).
 
 ---
 
@@ -278,18 +284,18 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 
 ## Tickets d'audit et compléments SMB — séquence V2.2 (DEC-02)
 
-> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **L'ordre V2.2 est approuvé (DEC-02). La présence d'un ticket dans ce tableau ne vaut pas autorisation implicite d'implémentation. Les statuts individuels font foi. SMB-01 est implémenté en worktree, non intégré ; SMB-02 est clôturé selon les preuves du propriétaire. Les autres tickets restent soumis à leur autorisation respective.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
+> Source : `docs/project-reference/roadmap-v2.2-final/docs-proposees/PLAN-tickets-global.md` (version 2.2 ; copie centralisée du paquet V2.2-final). **L'ordre V2.2 est approuvé (DEC-02, 2026-11-13). Le plan porte encore la mention documentaire PROPOSITION, mais son ordre est approuvé dans `docs/MASTER-REFERENCE.md`. La présence d'un ticket dans ce tableau ne vaut pas autorisation implicite d'implémentation. Les statuts individuels font foi. SMB-01 est intégré et poussé (`6274446`), acceptation propriétaire à confirmer ; SMB-02 est clôturé selon les preuves du propriétaire ; SMB-03/04/05 sont commités et poussés ; A1 est commité (`187f3f5`) et accepté avec deux réserves. Les autres tickets restent soumis à leur autorisation respective.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5. Les documents historiques sont conservés dans `docs/project-reference/historical-references/` sans autorité actuelle.
 
-> **Décisions non résolues (ne pas trancher dans ce suivi)** : DEC-03, DEC-04, DEC-05, DEC-11, DEC-12, DEC-14, DEC-16, DEC-17.
+> **Décisions non résolues (ne pas trancher dans ce suivi)** : DEC-03, DEC-04, DEC-11, DEC-12, DEC-14, DEC-16, DEC-17 ; **DEC-05 : décisions propriétaires partiellement enregistrées** (refus des commandes creds sous root, absence de migration automatique, `NETLAB_HOME` hors V1, aucun changement de schéma/format/KDF/verrou) ; **questions opérationnelles encore ouvertes** (voir bloc DEC-05 ci-dessous).
 
 | Ticket | Anomalie | Priorité | Statut | Dépend de |
 |---|---|---|---|---|
-| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | **Implémenté en worktree**, **non intégré** (branche `smb-01`, base `9034f01`, 4 fichiers non commités, diff `aa1d9d58…c4a4bf`) ; tests ciblés 189 passed ; suite complète 2112 passed / 1 failed (base 2082 passed / 1 failed ; échec commun `test_installed_standalone_command_exact_session`, environnement) ; revue Kiro CONFORME (rapportée, non reproduite par Arena) ; Revue Nova : avis favorable sur la base du diff et des rapports transmis ; implémentation et tests non reproduits indépendamment ; **acceptation propriétaire requise** | Étape 0 |
+| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | **Intégré et poussé : `6274446`** (V2 ; `cli.py`, `detect/smb_enum.py`, `tests/test_cli.py`, `tests/test_smb_enum.py` ; +542/−75) ; tests ciblés 189 passed (rapport d'origine) ; suite complète 2112 passed / 1 failed (échec commun d'environnement `test_installed_standalone_command_exact_session`) ; revue Kiro CONFORME (rapportée, non reproduite par Arena) ; avis Nova favorable sur la base des rapports transmis ; **acceptation propriétaire à confirmer** (aucune acceptation explicite retrouvée) | Étape 0 |
 | SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | **Clôturé** selon les preuves disponibles (voir bloc de clôture sous le tableau) | SMB-01 |
-| SMB-03 | Reconnaissance SMBv1 dans le JSON `enum4linux-ng` : `smb_dialects: true` (marqueur d'imposition SMBv1) et dict de dialectes booléens (clés `SMB 1.0`, …) | P2 | **Implémenté (V3), non commité** ; revue indépendante Antigravity CONFORME ; **accepté par le propriétaire le 2026-11-14** ; diff isolé `aa2cb91a…afffe7f2f` ; tests SMB 145 passed ; tests CLI 7 passed (SMB-related) ; modifications présentes dans le dépôt local, aucun commit ni push | SMB-01 (en worktree), SMB-02 |
-| SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Accepté par le propriétaire ; commité dans SMB-05** ; revue indépendante Antigravity CONFORME (2026-11-15) ; diff isolé `4e833b58…6872856` ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale : 2 196 passed, 2 failed (échecs environnement préexistants) ; intégré au commit SMB-05 | SMB-01, SMB-02, SMB-03 |
-| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Implémenté, non commité** ; TCP-01 (`PortState`, `HostTcpObservation`, `_parse_host_tcp_states`) + TCP-02 (transitions state-aware, D-A1) + TCP-03 (25 nouveaux tests) + TCP-04 (non-régression 357 tests) ; corrections post-revue Antigravity appliquées (IP check, single scan, no silent fallback, P7 intra-group, P11 count) ; **audit Arena R1–R4 corrigé et couvert** (visibilité des hôtes différés, quota réseau, récupération atomique sans duplication, régression XML invalide intégrée) ; suites ciblées R1–R4 vertes ; `git diff --check` rc 0 ; **revue indépendante et acceptation propriétaire requises** | — |
-| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
+| SMB-03 | Reconnaissance SMBv1 dans le JSON `enum4linux-ng` : `smb_dialects: true` (marqueur d'imposition SMBv1) et dict de dialectes booléens (clés `SMB 1.0`, …) | P2 | **Accepté le 2026-11-14 ; commité `1641eec` et poussé** ; revue indépendante Antigravity CONFORME ; tests SMB 145 passed ; tests CLI 7 passed (SMB-related) | SMB-01 (intégré), SMB-02 |
+| SMB-04 | Politique de mot de passe : `"None"` / `"none"` (zéro) et `"not set"` (non configuré) font perdre toute la politique (`_extract_password_policy`, `int("None")`) | P2 | **Accepté le 2026-11-15 ; commit distinct `ed646fc`, poussé** ; revue indépendante Antigravity CONFORME (2026-11-15) ; tests ciblés : 175 passed (SMB), 7 passed (CLI SMB) ; suite générale : 2 196 passed, 2 failed (échecs d'environnement préexistants) | SMB-01, SMB-02, SMB-03 |
+| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Implémenté, commité `187f3f5` et poussé ; acceptation propriétaire avec deux réserves documentées** ; TCP-01 (`PortState`, `HostTcpObservation`, `_parse_host_tcp_states`) + TCP-02 (transitions state-aware, D-A1) + TCP-03 (25 nouveaux tests) + TCP-04 (non-régression 357 tests) ; corrections post-revue Antigravity appliquées (IP check, single scan, no silent fallback, P7 intra-group, P11 count) ; **audit Arena R1–R4 réalisé et couvert** (visibilité des hôtes différés, quota réseau, récupération atomique sans duplication, régression XML invalide intégrée) ; suites ciblées R1–R4 vertes ; `git diff --check` rc 0 ; réserves : test TTY intermittent (non bloquant) et identités de même CIDR (non corrigée) | — |
+| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | **Implémenté et accepté par le propriétaire avec réserves explicites** ; audit Arena : **533 tests ciblés réussis** (`umask 022`) ; refus des trois commandes `creds` sous `euid 0`, résolution par `pwd.getpwuid(os.geteuid())`, validation du vault sans remplacement ; **aucune migration automatique ; aucun changement de schéma/KDF/format** ; **réserves non corrigées** : tests symlink dédiés à `validate_vault_location()`, interruption/création partielle, garde de `open_vault()` bas niveau, coexistence de deux résolveurs, `uid`/`euid` dans `_private`, suite complète du dépôt non exécutée | DEC-05 (partielle) |
 | D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
 | D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
 | D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
@@ -299,18 +305,18 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 | SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
 | SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
 | A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
-| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch à appliquer par le propriétaire | DEC-02 (approuvée) |
+| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; **volet suivi réconcilié le 2026-11-21** ; volet `docs/MASTER-REFERENCE.md` non modifié par cette mission | DEC-02 (approuvée) |
 | CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
 | SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
 | VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
 | DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
 | A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
-| CLI-01 | Annulation confondue avec « aucun résultat » : après « SMB enumeration cancelled », la CLI affiche « No SMB findings » (`run_smb_enum` retourne `[]` dans les deux cas) | P3 | Proposition **non bloquante**, hors séquence §5.1 ; non autorisée ; contrat à décider (option A : troisième état ; option B : confirmation déplacée hors `run_smb_enum`) | SMB-01 (en worktree) ; décision de contrat |
+| CLI-01 | Annulation confondue avec « aucun résultat » : après « SMB enumeration cancelled », la CLI affiche « No SMB findings » (`run_smb_enum` retourne `[]` dans les deux cas) | P3 | Proposition **non bloquante**, hors séquence §5.1 ; **non autorisée** ; contrat à décider (option A : troisième état ; option B : confirmation déplacée hors `run_smb_enum`) | SMB-01 (intégré `6274446`) ; décision de contrat |
 | CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
 | NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
-| SMB-05 | Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone (C1-C5, D-SMB-01, D-SMB-02, scoring, tests) | P2 | **Accepté par le propriétaire le 2026-11-15 ; commité `ac2d6bd` sur `a4-arena` ; aucun push** : tests SMB 203 passed, CLI 108 passed, scoring 9 passed, `git diff --check` conforme ; test terrain propriétaire sur Metasploitable2 (35 utilisateurs, 10 résultats, 3 Security Findings scorés 45/70/70, session SQLite persistante) | SMB-01, SMB-02, SMB-03, SMB-04 |
+| SMB-05 | Alignement JSON enum4linux-ng 1.3.10, persistance et restitution SMB standalone (C1-C5, D-SMB-01, D-SMB-02, scoring, tests) | P2 | **Accepté le 2026-11-15 ; commité `ac2d6bd` et poussé** : tests SMB 203 passed, CLI 108 passed, scoring 9 passed, `git diff --check` conforme ; test terrain propriétaire sur Metasploitable2 (35 utilisateurs, 10 résultats, 3 Security Findings scorés 45/70/70, session SQLite persistante) | SMB-01, SMB-02, SMB-03, SMB-04 |
 
-**Précisions SMB-03 / SMB-04 / SMB-05 / D6** : SMB-03 accepté le 2026-11-14 et commité dans SMB-05. SMB-04 accepté le 2026-11-15 et commité dans SMB-05. SMB-05 (alignement JSON + persistance + restitution) commité le 2026-11-15 — voir section SMB-05 ci-dessous. D6 reste indépendant et hors de cette séquence.
+**Précisions SMB-03 / SMB-04 / SMB-05 / D6** : SMB-03 accepté le 2026-11-14, commité `1641eec` et poussé. SMB-04 accepté le 2026-11-15, commité `ed646fc` et poussé. SMB-05 (alignement JSON + persistance + restitution) accepté le 2026-11-15, commité `ac2d6bd` et poussé — voir section SMB-05 ci-dessous. D6 reste indépendant et hors de cette séquence.
 
 **Résultats suite générale SMB-04 V2 (2026-11-15)** :
 - Commande : `HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=.../venv/bin/sentinel bash -c "umask 022 && venv/bin/python -m pytest --tb=short -q"`
@@ -324,9 +330,20 @@ SMB-01 : implémenté en worktree (branche `smb-01`, base 9034f01, 4 fichiers no
 - Proof: ✓ rapport du propriétaire (2026-11-13) ; **non reproduit par Arena** ; sortie JSON complète non archivée dans le workspace.
 - Constats de la même sortie, transférés à SMB-03 (`"smb_dialects": true`) et SMB-04 (`"None"`, `"none"`, `"not set"`).
 
-**Worktree SMB-01** : ne pas marquer SMB-01 « intégré » avant l'acceptation du propriétaire et l'intégration. `cli.py` et `tests/test_cli.py` sont aussi touchés par CONFIDENCE-CLI : conflit à arbitrer à l'intégration.
+**SMB-01 — intégration** : intégré et poussé (`6274446`), acceptation propriétaire non retrouvée ; statut « acceptation à confirmer ». Le conflit potentiel avec CONFIDENCE-CLI (`cli.py`, `tests/test_cli.py`) est résolu : `85870ac` est antérieur à l'intégration.
 
-**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
+**Spécification A1** : `docs/SENTINEL-TCP-STATES.md` (canonique, commité `187f3f5`) ; copie de travail du paquet V2.2 dans `docs/project-reference/roadmap-v2.2-final/docs-proposees/`.
+
+**État de SMB Enumeration** : **non déclarée terminée**. SMB-01 (acceptation à confirmer), SMB-02 clôturé, SMB-03/04/05 acceptés et poussés ; CLI-01 et TOOL-01 restent ouverts et non autorisés.
+
+### DEC-05 — Exécution privilégiée des commandes credentials (décision propriétaire 2026-11-21)
+
+- **Refus des trois commandes `creds` sous root** : `creds check`, `creds list` et `creds show` sont refusés lorsque `os.geteuid() == 0` (sudo ou root direct), avant tout accès/création du vault, toute session de credential testing, toute transmission de credential, tout accès réseau et toute écriture persistante.
+- **Migration automatique** : interdite. Aucun déplacement, fusion, écrasement, suppression ou création silencieuse de coffre.
+- **`NETLAB_HOME`** : hors périmètre V1.
+- **Schéma / format du vault / KDF / verrou** : aucun changement autorisé.
+- **Questions encore ouvertes** : validation `SUDO_USER`/`SUDO_UID` ; détection d'un ancien `/root/.netlab` sans second vault ; comportement des autres commandes sous sudo ; propriété/permissions des fichiers créés par des commandes privilégiées ; périmètre exact de `core/user_paths.py` ; procédure manuelle de récupération ; compatibilité Windows/Administrator.
+- **Statut** : DEC-05 **partiellement tranchée**, non entièrement clôturée. **CRED-01 est implémenté et accepté par le propriétaire avec réserves explicites** (audit Arena : 533 tests ciblés réussis, `umask 022` ; réserves non corrigées listées dans la ligne CRED-01). Aucune migration automatique ; aucun changement de schéma, KDF ou format du vault.
 
 ---
 
@@ -471,7 +488,7 @@ Comportement attendu :
 ### SENTINEL-LIST-01 — Accès aux Findings Sentinel masqués par le quota
 
 **Objectif :** permettre à l'utilisateur de retrouver et de consulter les Findings Sentinel dont la notification a été masquée par le quota de 3 notifications/60 min, sans connaître préalablement leur UUID.
-**Branche :** `a4-arena` | **Base :** HEAD courant | **Statut :** `[x]` **Implémenté, non commité ; corrections R1–R4 appliquées ; acceptation propriétaire avec réserves de sécurité documentées**
+**Branche :** `a4-arena` | **Base :** HEAD courant | **Statut :** `[x]` **Commité `187f3f5` et poussé ; corrections R1–R4 appliquées ; acceptation propriétaire avec réserves de sécurité documentées**
 **Fichiers :** `cli.py`, `core/database.py`, `sentinel/alerting.py`, `tests/test_sentinel_findings_list.py`
 
 **Contexte :** `save_finding()` persiste le Finding dans la session SQLite ; `sentinel_save_event()` enregistre l'événement dans la DB Sentinel avec `notification.state = "masked"`. Aucune commande CLI ne permettait de lister ces Findings sans leur UUID complet.
@@ -512,7 +529,7 @@ Ces limitations de durcissement des chemins sont consciemment différées ; aucu
 ### SENTINEL-MONITOR — Corrections R1–R4 (audit Arena)
 
 **Objectif :** corriger les quatre défauts identifiés par l'audit indépendant sur la baseline partielle, la visibilité des hôtes différés, le quota réseau et la régression XML invalide.
-**Branche :** `a4-arena` | **Base :** `519d618a1bffc8a3f65a4de3601ba17894f6d232` | **Statut :** `[x]` **Corrigé, non commité ; acceptation propriétaire requise**
+**Branche :** `a4-arena` | **Base :** `519d618a1bffc8a3f65a4de3601ba17894f6d232` | **Statut :** `[x]` **Corrigé, commité `187f3f5` et poussé ; acceptation propriétaire avec deux réserves documentées**
 **Fichiers :** `core/database.py`, `sentinel/alerting.py`, `sentinel/baseline.py`, `sentinel/monitor.py`, `sentinel/monitor_view.py`, `sentinel/notifications.py`, `sentinel/sentinel_manager.py`, `tests/test_sentinel_manager.py`, `tests/test_sentinel_presentation.py`, `docs/SENTINEL-TCP-STATES.md`, `docs/IMPLEMENTATION-TRACKING.md`.
 
 **R1 — visibilité des hôtes différés.**
@@ -552,10 +569,11 @@ Ces limitations de durcissement des chemins sont consciemment différées ; aucu
 - `python3 -m pytest -q tests/test_sentinel_lifecycle.py tests/test_sentinel_stop_during_scan.py tests/test_sentinel_arp_probe.py tests/test_sentinel_findings_list.py` : **156 passed**, 535.60 s.
 - `git diff --check` : rc 0.
 
-**Limites connues :**
-- Les événements `baseline_initialization` et `host_ports_initialized` ne contiennent pas `gateway_ip`/`gateway_mac`. Dans une base partagée par plusieurs identités, la reconstruction filtre le CIDR mais ne peut pas distinguer deux identités de même CIDR.
+**Limites connues et réserves (acceptées, non corrigées) :**
+- **Réserve 1 — test TTY intermittent** : `test_tty_refresh_without_notification_redraws_frame_in_place` peut échouer de façon intermittente (signature 44 vs 22 : double rendu léger). Cause identifiée : course entre le rafraîchissement automatique de Rich `Live` (`refresh_per_second=1`) et la fenêtre mesurée. **Non bloquant ; correction reportée (niveau test, pas produit).**
+- **Réserve 2 — identités partageant un CIDR** : les événements `baseline_initialization` et `host_ports_initialized` ne contiennent pas `gateway_ip`/`gateway_mac`. Dans une base partagée par plusieurs identités, la reconstruction filtre le CIDR mais ne peut pas distinguer deux identités de même CIDR. **Limitation théorique acceptée pour V1 ; non corrigée.**
 - Les hôtes absents sont déduits des assets conservés par des événements ; ils ne constituent pas une preuve de présence actuelle et ne sont jamais comptés comme machines actives.
-- Aucun changement de schéma SQLite, aucune migration, aucun commit ni push. La suite complète du dépôt n'a pas été exécutée dans ce passage ; seules les suites listées ci-dessus l'ont été.
+- Aucun changement de schéma SQLite, aucune migration. Commit `187f3f5` poussé. La suite complète du dépôt n'a pas été exécutée ; seules les suites listées ci-dessus l'ont été.
 
 ---
 

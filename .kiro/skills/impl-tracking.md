@@ -25,24 +25,20 @@ Ces règles s'appliquent à tout agent lisant ou modifiant le suivi opérationne
 
 | Document | Rôle |
 |---|---|
+| `docs/project-reference/README.md` | Point d'entrée centralisé : références, hiérarchie d'autorité, procédure agents |
 | `docs/MASTER-REFERENCE.md` | Vision, architecture, règles, décisions, périmètre V1, specs |
 | `docs/IMPLEMENTATION-TRACKING.md` | Suivi opérationnel : tâches, preuves, statuts, en-cours |
 | `ARENA.md` (téléchargements propriétaire, révision 13) | Spécifications détaillées T23-B et T21 |
 
 ---
 
-## Résumé de l'état courant
+## État courant
 
-**HEAD :** `3657498` (T23-B, branche `a4-arena`)
+Ce skill ne conserve **aucun état Git local**. Les commits, statuts et livraisons évoluent sans mise à jour de ce fichier.
 
-| Tâche | Statut |
-|---|---|
-| T23-B — Extension détections Sentinel | `[x]` Terminé (commit `3657498`) |
-| T21 — findings list groupé par machine | `[x]` Terminé (commit `5e2be6b`) |
-| T22 — Credentials FTP/SNMP/SSH/SMB | `[x]` Implémenté (validation critère par critère non effectuée par tiers) |
-| T24 — dns_enum + passive_recon | `[-]` Code livré (`cf5d821`), validation nécessaire |
-| T25 — Multi-host confirmations | `[-]` Code livré (`f87b140`), validation nécessaire |
-| **CONFIDENCE-CLI** | `[-]` En cours — modifs locales, 14/14 tests ✓, commit en attente |
-| **T20** — Rapport HTML refonte | `[ ]` Non commencé |
+Références canoniques :
+- `docs/MASTER-REFERENCE.md` — décisions et ordre approuvés ;
+- `docs/IMPLEMENTATION-TRACKING.md` — état réel des tickets, commits et preuves ;
+- `docs/project-reference/README.md` — point d'entrée documentaire.
 
-Détail complet → `docs/IMPLEMENTATION-TRACKING.md`
+Vérifier `git log`, `git status` et les documents ci-dessus avant toute action.

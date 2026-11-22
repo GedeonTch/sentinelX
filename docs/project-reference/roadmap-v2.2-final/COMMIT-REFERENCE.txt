@@ -1,0 +1,12 @@
+COMMIT DE RÉFÉRENCE — propositions documentaires globales (version 2.2)
+Date de rédaction : 2026-11-12 (date de la mission de référence : 12 novembre 2026)
+Commit de référence : 9034f0131ebeaf63dc51bf217cea3ec3f6ab068e
+  date git : 2026-11-11 ; sujet : feat(sentinel): number hosts in monitor table (ticket 4)
+  branches distantes qui le contiennent : origin/a4-arena
+Clone de lecture : /tmp/audit-global-ref (git status --porcelain : 0 ligne(s))
+ls-remote (lecture seule) :
+  9034f0131ebeaf63dc51bf217cea3ec3f6ab068e	refs/heads/a4-arena
+  8366722f742fcab0c76881b3b74629025b84eb44	refs/heads/main
+Autre branche citée : main (hors périmètre, non examinée).
+Dépôt de travail /home/user/sentinelX (2eb1b20, non aligné, 27 modifications) : NON touché, NON utilisé comme référence.
+Aucun commit, aucun push, aucun nettoyage, aucune modification du dépôt dans ce cycle.

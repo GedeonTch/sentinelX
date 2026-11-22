@@ -1,0 +1,32 @@
+--- /dev/null
++++ b/docs-proposees/IMPLEMENTATION-TRACKING-section-audit.md
+@@ -0,0 +1,29 @@
++## Tickets d'audit (revue du 2026-11-12) — PROPOSITION, non approuvée
++
++> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **Aucun ticket ci-dessous n'est approuvé, ni autorisé, ni implémenté.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
++
++| Ticket | Anomalie | Priorité | Statut | Dépend de |
++|---|---|---|---|---|
++| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | Proposition ; premier ticket après l'Étape 0 | Étape 0 |
++| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
++| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
++| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
++| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
++| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
++| SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | Vérification | SMB-01 |
++| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 |
++| REP-01 | « 0 » du rapport = quota de notification 60 min | P2 | Proposition | DEC-16 |
++| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure requise | DEC-12 |
++| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
++| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
++| A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
++| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch prêt, non appliqué | DEC-02 |
++| CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
++| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
++| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
++| DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
++| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
++| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
++| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
++
++**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).

@@ -1,0 +1,84 @@
+--- a/docs/IMPLEMENTATION-TRACKING.md
++++ b/docs/IMPLEMENTATION-TRACKING.md
+@@ -54,7 +54,7 @@
+ ## État général du projet (branche `a4-arena`)
+ 
+ ```
+-HEAD    : 3657498  (T23-B — 2026-11-10)
++HEAD    : 9034f01  (origin/a4-arena, ticket 4 — audit 2026-11-12 ; T23-B = 3657498)
+ Tests   : 2024–2026 passed (2 flaky lifecycle sous forte charge, passent en isolation)
+ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
+ ```
+@@ -195,7 +195,7 @@
+ **Objectif :** Afficher `Finding.confidence` (CONFIRMED / PROBABLE / POSSIBLE) dans les deux tables de findings de `cli.py`.
+ **Branche :** `a4-arena` | **Base commit :** `3657498` | **Auteur :** Kiro
+ **Fichiers :** `cli.py`, `tests/test_cli.py`
+-**Statut :** `[-]` En cours — modifications faites, tests passent, commit en attente d'autorisation
++**Statut :** `[-]` Commit `85870ac` et push prouvés (présent dans `origin/a4-arena`) ; clôture soumise à revue Kiro (non tracée)
+ 
+ #### Phase 1 — Implémentation `cli.py`
+ 
+@@ -217,11 +217,10 @@
+ 
+ #### En attente
+ 
+-- [ ] Commit (`cli.py`, `tests/test_cli.py`, `docs/MASTER-REFERENCE.md`, `docs/IMPLEMENTATION-TRACKING.md`)
+-  - Proof: en attente d'autorisation du propriétaire
+-  - Message suggéré : `feat(cli): add confidence column to findings tables`
+-- [ ] Push vers `origin/a4-arena`
+-  - Proof: en attente d'autorisation du propriétaire
++- [x] Commit (`85870ac`, `feat(cli): add confidence column to findings tables`)
++  - Proof: `85870ac` présent dans `origin/a4-arena` (`git branch -r --contains 85870ac`, vérifié 2026-11-12)
++- [x] Push vers `origin/a4-arena`
++  - Proof: `git branch -r --contains 85870ac` renvoie `origin/a4-arena`
+ 
+ ---
+ 
+@@ -234,7 +233,7 @@
+ **Statut :** `[ ]` Non commencé
+ **Spec :** approuvée — voir `docs/MASTER-REFERENCE.md` §7
+ **Dépendances :** aucune
+-**Prochaine dans la feuille de route** après Confidence CLI (commit)
++**Prochaine dans la feuille de route** après Confidence CLI (commité, `85870ac`) : T20
+ 
+ ---
+ 
+@@ -276,6 +275,38 @@
+ 
+ ---
+ 
++## Tickets d'audit (revue du 2026-11-12) — PROPOSITION, non approuvée
++
++> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **Aucun ticket ci-dessous n'est approuvé, ni autorisé, ni implémenté.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
++
++| Ticket | Anomalie | Priorité | Statut | Dépend de |
++|---|---|---|---|---|
++| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | Proposition ; premier ticket après l'Étape 0 | Étape 0 |
++| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
++| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
++| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
++| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
++| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
++| SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | Vérification | SMB-01 |
++| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 |
++| REP-01 | « 0 » du rapport = quota de notification 60 min | P2 | Proposition | DEC-16 |
++| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure requise | DEC-12 |
++| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
++| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
++| A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
++| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch prêt, non appliqué | DEC-02 |
++| CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
++| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
++| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
++| DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
++| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
++| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
++| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
++
++**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
++
++---
++
+ ## Différé / hors périmètre
+ 
+ | Item | Raison |

@@ -104,6 +104,22 @@ Ces décisions sont closes et ne peuvent être remises en question sans autorisa
 | NET-01 : réseau `192.168.57.0/24` | Non reproduit ; `--target` obligatoire ; sans ticket de code |
 | ARENA §9.6 | Supersédée par la politique A1 approuvée ; `docs/MASTER-REFERENCE.md` est le document maître officiel |
 
+**Décision DEC-05 — exécution privilégiée des commandes credentials** (décision propriétaire du 2026-11-21) :
+
+| Élément | Décision |
+|---|---|
+| Décision initiale (Option B) | Refus de `creds check` lorsque l'effective UID est 0 (via `sudo` ou exécution directe en root). Le credential testing s'exécute depuis la session normale de l'utilisateur, sans élévation de privilèges. |
+| Décision complémentaire | Le refus est étendu à `creds list` et `creds show`, y compris en lecture seule. |
+| Condition de référence | `os.geteuid() == 0` (POSIX). La détection ne repose pas uniquement sur `SUDO_USER`/`SUDO_UID`. |
+| Effet du refus | Aucun accès, lecture, déchiffrement, création ou initialisation du vault ; aucune session de credential testing ; aucune transmission de credential ; aucun accès réseau ; aucune écriture persistante ; aucune modification de baseline ou d'état. |
+| Message | « Les commandes creds ne peuvent pas être exécutées avec les privilèges root. Relancez SentinelX sans sudo. » (code de sortie à préciser dans les critères d'acceptation de CRED-01). |
+| Portée | Uniquement les trois commandes `creds`. `scan`, `monitor`, rapports, cleanup et autres commandes réseau restent à examiner séparément. |
+| Windows | Règle POSIX uniquement ; aucune politique Administrator n'est définie par cette décision. |
+| Exception root interactive | Aucune exception implicite ; toute exception nécessiterait une décision distincte. |
+| Migration / stockage | Aucune migration automatique ; `NETLAB_HOME` hors V1 ; aucun changement de schéma SQLite, de format du vault, de KDF ni de verrou. |
+
+**DEC-05 — état et questions encore ouvertes.** DEC-05 n'est **pas entièrement clôturée**. **CRED-01 est implémenté et accepté par le propriétaire avec réserves explicites** ; l'audit Arena a exécuté **533 tests ciblés réussis** (`umask 022`). **Réserves non corrigées** : tests symlink dédiés à `validate_vault_location()`, interruption/création partielle du vault, garde de `open_vault()` bas niveau, coexistence de deux résolveurs, différence `uid`/`euid` dans `_private`, suite complète du dépôt non exécutée. Aucune migration automatique ; aucun changement de schéma, KDF ou format. Points non tranchés : validation de `SUDO_USER`/`SUDO_UID` ; détection d'un ancien `/root/.netlab` sans création silencieuse d'un second vault ; comportement des autres commandes SentinelX sous `sudo` ; propriété et permissions des fichiers créés dans le home utilisateur par des commandes privilégiées ; périmètre exact du résolveur `core/user_paths.py` ; procédure manuelle de récupération d'un ancien coffre ; compatibilité Windows et éventuelle politique Administrator.
+
 ---
 
 ## 6. Feuille de route — statuts

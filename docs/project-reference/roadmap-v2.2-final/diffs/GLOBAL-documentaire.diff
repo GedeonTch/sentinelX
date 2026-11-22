@@ -1,0 +1,1621 @@
+--- a/docs/MASTER-REFERENCE.md
++++ b/docs/MASTER-REFERENCE.md
+@@ -23,15 +23,15 @@
+ ## 2. État réel du dépôt
+ 
+ ```
+-Dépôt    : /home/anonymous/sentinelX
++Dépôt    : $SENTINELX_REPO
+ Branche  : a4-arena
+-HEAD     : 365749878aa3e886da9cd33c2322fb75277c16ce  (T23-B, commit Arena)
+-Tests    : 2024–2026 passed à HEAD 3657498 (2 tests lifecycle flaky sous forte charge CPU — passent en isolation)
++HEAD     : 9034f0131ebeaf63dc51bf217cea3ec3f6ab068e  (origin/a4-arena, ticket 4 ; T23-B = 365749878aa3e886da9cd33c2322fb75277c16ce)
++Tests    : 2024–2026 passed à HEAD 3657498 (2 tests lifecycle flaky sous forte charge CPU — passent en isolation) ; 2083 passed à HEAD 9034f01 (ticket 4, mesure de l'agent, non revue par tiers)
+ Deps     : paramiko 5.1.0, smbprotocol 1.17.0 (installés dans venv principal)
+ ```
+ 
+-**Modifications locales non commitées :**
+-- `cli.py` — colonne Confidence dans les tables Security Findings (Confidence CLI, 14/14 tests ✓)
++**Modifications locales (non vérifiées) :**
++- `cli.py` — colonne Confidence (Confidence CLI) : commit `85870ac` présent dans `origin/a4-arena` ; l'état du poste du propriétaire n'est pas vérifié
+ - `tests/test_cli.py` — tests correspondants
+ 
+ **Fichiers non suivis (préservés) :** `.vscode/`, `cli.py.rej`
+@@ -88,6 +88,22 @@
+ | T22 scope V1 : FTP, SNMP, SSH-password, SMB | Verrouillée |
+ | T21 critère 7 : colonne `Target` → `Port`, IP portée par l'en-tête de groupe | Déviation acceptée (2026-11-08) |
+ 
++**Décisions A1 approuvées par le propriétaire** (proposition d'inscription ; à valider par le propriétaire, non appliquée à `docs/` par un agent) :
++
++| Décision | Statut |
++|---|---|
++| A1 : hôte absent du cycle → remise à zéro des compteurs de ses ports (V4) | Approuvée |
++| A1 : fermeture individuelle après deux observations `closed` explicites consécutives, pour chaque port connu ; aucun seuil global (G-b écartée ; G-c reportée) | Approuvée |
++| A1 : aucune fermeture confirmée sur passage `closed` → `filtered` | Approuvée (réserve à consigner) |
++| A1 : validation XML commune au monitor et à l'apprentissage de baseline | Approuvée |
++| A1 : compteurs intermédiaires non restaurés après redémarrage (R7) ; redémarrages répétés = conséquence documentée | Approuvée |
++| D5-B : preuve de fermeture dans `events.details` | Conception approuvée ; implémentation non autorisée |
++| D1 : distinction preuve / historique | Approuvée (forme) ; libellé ouvert (DEC-03) |
++| D6 : ticket indépendant hors A1 | Approuvé ; DEC-04 examinée au moment du ticket |
++| CRED-02 : absence de candidats SSH génériques | Conforme à `docs/T22-CREDENTIALS.md` ; sans ticket |
++| NET-01 : réseau `192.168.57.0/24` | Non reproduit ; `--target` obligatoire ; sans ticket de code |
++| ARENA §9.6 | Supersédée par la politique A1 approuvée ; `docs/MASTER-REFERENCE.md` est le document maître officiel |
++
+ ---
+ 
+ ## 6. Feuille de route — statuts
+@@ -156,18 +172,34 @@
+ |---|---|---|---|
+ | **T20** | Rapport HTML — refonte présentation | — | Approuvée (voir §7) |
+ 
+-### 6.4 Tâches locales en attente de commit
++### 6.4 Confidence CLI (commit présent, revue non tracée)
+ 
+ | Tâche | Fichiers | État |
+ |---|---|---|
+-| Confidence CLI | `cli.py`, `tests/test_cli.py` | Modifié local, 14/14 tests ✓, commit en attente d'autorisation |
++| Confidence CLI | `cli.py`, `tests/test_cli.py` | Commit `85870ac` présent dans `origin/a4-arena` (vérifié 2026-11-12) ; revue Kiro non tracée |
++
++### 6.4bis Commits de `origin/a4-arena` non consignés (audit 2026-11-12)
++
++| Commit | Date (git) | Sujet (git) | État consigné |
++|---|---|---|---|
++| `85870ac` | 2026-11-10 | feat(cli): add confidence column to findings tables | Consigné en 6.4 (CONFIDENCE-CLI) |
++| `7ff3d89` | 2026-11-10 | docs: add master reference, implementation tracking and agent skill | Ajoute le document maître (version antérieure) |
++| `13e7849` | 2026-11-10 | fix Commit 3657498 (`requirements.txt`, 1 ligne) | Non consigné |
++| `63e1a7b` | 2026-11-10 | feat(sentinel): interrupt nmap on stop request (point 1) | Non consigné |
++| `b1ab727` | 2026-11-11 | fix(sentinel): detect gateway on connected routes (point 2) | Non consigné |
++| `e4f3f9e` | 2026-11-11 | feat(sentinel): colour event types and label closed ports (ticket 3) | Non consigné |
++| `9034f01` | 2026-11-11 | feat(sentinel): number hosts in monitor table (ticket 4) | Non consigné (HEAD réel) |
++
++Dates git (2026-11-10 et 2026-11-11) antérieures à la date de référence de la mission (2026-11-12). Date de rédaction de cette proposition : 2026-11-12.
+ 
+ ### 6.5 Proposition d'ordre de la feuille de route
+ 
+ ```
+-Confidence CLI (commit) → T20
++Confidence CLI (commité, `85870ac`) → T20
+ ```
+ 
++Proposition d'audit (plan v2.2, `docs-proposees/PLAN-tickets-global.md` §5, **non approuvée**) : Étape 0 (documentation préalable, §5.0) → SMB-01 → A1 (ticket parent unique) → CRED-01 → D5 (après A1) → D1 (après D5) ; autres tickets selon dépendances et priorité ; D6 indépendant.
++
+ 🔒 Proposition uniquement. T24 et T25 partiellement livrés — leur validation finale peut s'insérer à tout moment selon la décision du propriétaire. Aucune réorganisation sans autorisation explicite.
+ 
+ ---
+@@ -307,8 +339,8 @@
+ 
+ ```bash
+ TESTHOME=$(mktemp -d /tmp/sentinelx-test-XXXXXX)
+-cd /home/anonymous/sentinelX
+-HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=/home/anonymous/sentinelX/venv/bin/sentinel \
++cd $SENTINELX_REPO
++HOME=$TESTHOME SENTINEL_TEST_EXECUTABLE=$SENTINELX_REPO/venv/bin/sentinel \
+   bash -c "umask 022 && venv/bin/python -m pytest --tb=short -q"
+ git diff --check
+ git rev-parse HEAD
+--- a/docs/IMPLEMENTATION-TRACKING.md
++++ b/docs/IMPLEMENTATION-TRACKING.md
+@@ -54,7 +54,7 @@
+ ## État général du projet (branche `a4-arena`)
+ 
+ ```
+-HEAD    : 3657498  (T23-B — 2026-11-10)
++HEAD    : 9034f01  (origin/a4-arena, ticket 4 — audit 2026-11-12 ; T23-B = 3657498)
+ Tests   : 2024–2026 passed (2 flaky lifecycle sous forte charge, passent en isolation)
+ Modifs locales non commitées : cli.py, tests/test_cli.py (Confidence CLI)
+ ```
+@@ -195,7 +195,7 @@
+ **Objectif :** Afficher `Finding.confidence` (CONFIRMED / PROBABLE / POSSIBLE) dans les deux tables de findings de `cli.py`.
+ **Branche :** `a4-arena` | **Base commit :** `3657498` | **Auteur :** Kiro
+ **Fichiers :** `cli.py`, `tests/test_cli.py`
+-**Statut :** `[-]` En cours — modifications faites, tests passent, commit en attente d'autorisation
++**Statut :** `[-]` Commit `85870ac` et push prouvés (présent dans `origin/a4-arena`) ; clôture soumise à revue Kiro (non tracée)
+ 
+ #### Phase 1 — Implémentation `cli.py`
+ 
+@@ -217,11 +217,10 @@
+ 
+ #### En attente
+ 
+-- [ ] Commit (`cli.py`, `tests/test_cli.py`, `docs/MASTER-REFERENCE.md`, `docs/IMPLEMENTATION-TRACKING.md`)
+-  - Proof: en attente d'autorisation du propriétaire
+-  - Message suggéré : `feat(cli): add confidence column to findings tables`
+-- [ ] Push vers `origin/a4-arena`
+-  - Proof: en attente d'autorisation du propriétaire
++- [x] Commit (`85870ac`, `feat(cli): add confidence column to findings tables`)
++  - Proof: `85870ac` présent dans `origin/a4-arena` (`git branch -r --contains 85870ac`, vérifié 2026-11-12)
++- [x] Push vers `origin/a4-arena`
++  - Proof: `git branch -r --contains 85870ac` renvoie `origin/a4-arena`
+ 
+ ---
+ 
+@@ -234,7 +233,7 @@
+ **Statut :** `[ ]` Non commencé
+ **Spec :** approuvée — voir `docs/MASTER-REFERENCE.md` §7
+ **Dépendances :** aucune
+-**Prochaine dans la feuille de route** après Confidence CLI (commit)
++**Prochaine dans la feuille de route** après Confidence CLI (commité, `85870ac`) : T20
+ 
+ ---
+ 
+@@ -276,6 +275,38 @@
+ 
+ ---
+ 
++## Tickets d'audit (revue du 2026-11-12) — PROPOSITION, non approuvée
++
++> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **Aucun ticket ci-dessous n'est approuvé, ni autorisé, ni implémenté.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
++
++| Ticket | Anomalie | Priorité | Statut | Dépend de |
++|---|---|---|---|---|
++| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | Proposition ; premier ticket après l'Étape 0 | Étape 0 |
++| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
++| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
++| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
++| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
++| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
++| SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | Vérification | SMB-01 |
++| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 |
++| REP-01 | « 0 » du rapport = quota de notification 60 min | P2 | Proposition | DEC-16 |
++| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure requise | DEC-12 |
++| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
++| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
++| A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
++| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch prêt, non appliqué | DEC-02 |
++| CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
++| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
++| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
++| DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
++| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
++| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
++| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
++
++**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
++
++---
++
+ ## Différé / hors périmètre
+ 
+ | Item | Raison |
+--- a/.cursor/rules/sentinelX.mdc
++++ b/.cursor/rules/sentinelX.mdc
+@@ -6,7 +6,9 @@
+ 
+ # SentinelX — Cursor Guardrails
+ 
+-Full context: `.kiro/steering/sentinelx.md` (source of truth). This file is a
++<!-- PROPOSITION (DOC-02) — en attente de décision du propriétaire. Non appliquée aux copies en place. -->
++
++Full context: `.kiro/steering/sentinelX.md` (source of truth). This file is a
+ condensed operational checklist — if anything here seems to conflict with the
+ steering doc, the steering doc wins. When in doubt, STOP and ask, don't guess.
+ 
+--- /dev/null
++++ b/docs/SENTINEL-TCP-STATES.md
+@@ -0,0 +1,262 @@
++# Sentinel — états TCP, transitions de ports et preuves de fermeture
++
++**Statut : PROPOSITION de spécification canonique (A1), non appliquée.** Emplacement canonique **proposé** : `docs/SENTINEL-TCP-STATES.md` (même convention de nommage que `docs/SENTINEL-LIFECYCLE.md`, `docs/SENTINEL-NOTIFICATIONS.md`, `docs/SENTINEL-FINDINGS.md`) ; vérification par Kiro requise.
++**Base de code** : `origin/a4-arena` = `9034f01` (lu dans `/tmp/audit-global-ref`, arbre propre).
++**Source des décisions** : décisions du propriétaire rapportées dans la mission de formalisation A1 (voir §2). Les décisions listées comme approuvées ne sont pas re-proposées ici.
++**Documents liés** : `docs-proposees/PLAN-tickets-global.md` (version 2 : ticket parent A1 avec sous-tâches TCP-01 à TCP-03 et non-régression TCP-04 ; tickets D5 et D1 ; D6 indépendant) ; `docs/MASTER-REFERENCE.md` §5 ; ARENA §9.6 : supersédée par la politique A1 approuvée (`[]` incrémentait les compteurs, incompatible avec R2) ; mise à jour proposée au plan §6, `docs/` non modifié.
++
++Légende : **[APPROUVÉ]** décision du propriétaire, appliquée ici. **[DÉCISION]** point non décidé, identifié dans `IMPLEMENTATION-TRACKING.md`. **[PROPOSITION]** choix d'implémentation, à valider par revue.
++
++---
++
++## 1. Termes
++
++| Terme | Définition |
++|---|---|
++| Observation TCP complète | Scan Nmap réussi, périmètre complet (`SENTINEL_TCP_PORTS`), hôte décrit sans ambiguïté. |
++| Scan incomplet (`None`) | Aucune observation exploitable pour l'hôte : timeout, table partielle, XML invalide, doublon, attribution contradictoire, hôte non observé. |
++| État par port | `OPEN`, `CLOSED`, `FILTERED`, `UNCERTAIN` (voir §4). |
++| `closed_streak[P]` | Nombre d'observations complètes consécutives où le port `P` est explicitement `CLOSED`. Implémenté par `NetworkState.port_absent_count` (nom conservé, sémantique ci-dessous). |
++| Cycle sans observation | Cycle où l'hôte n'a aucune observation TCP complète (absent, ping KO sans ARP utile, scan dégradé). |
++
++## 2. Règles et décisions
++
++### 2.1 Règles d'état
++
++| Réf. | Règle | Statut |
++|---|---|---|
++| R1 | `open` = port ouvert. | [APPROUVÉ] |
++| R2 | `closed` est confirmé seulement après **2 observations TCP complètes et consécutives** indiquant explicitement `closed`. | [APPROUVÉ] |
++| R3 | `filtered` est incertain : aucune fermeture déclarée, aucune progression du compteur, **interrompt** une succession de `closed`. Aucune fermeture confirmée sur un passage `closed → filtered`. | [APPROUVÉ] |
++| R4 | `open\|filtered` : aucune conclusion de fermeture. | [APPROUVÉ] |
++| R5 | États inconnus ou invalides (`unfiltered`, sans `<state>`, `bogus`) : aucune conclusion de fermeture. | [APPROUVÉ] |
++| R6 | Hôte entièrement filtré (aucun port `CLOSED` ni `OPEN` sur scan complet) : aucune fermeture de masse. | [APPROUVÉ] |
++| R7 | Compteurs intermédiaires d'absence non restaurés après redémarrage. | [APPROUVÉ] |
++
++### 2.2 Décisions de formalisation
++
++| Réf. | Décision | Statut |
++|---|---|---|
++| D-A1 | **Remise à zéro** du compteur de chaque port d'un hôte lorsque l'hôte n'a aucune observation TCP complète dans le cycle. Ce n'est plus une conservation. | [APPROUVÉ] |
++| D-A2 | **Fermetures individuelles autorisées** lorsque tous les ports connus d'un hôte sont explicitement `CLOSED` deux fois de suite : une fermeture par port, sans limite. | [APPROUVÉ] |
++| D-A3 | **Aucun seuil global arbitraire** de fermetures (ni par cycle, ni par hôte). | [APPROUVÉ] |
++| D-A4 | Agrégation visuelle d'un hôte entièrement `closed` (ancienne option G-c) : **reportée**. Hors périmètre A1. | [APPROUVÉ] (report) |
++| D-A5 | Validation XML **commune** à Monitor et à l'apprentissage de baseline (même fonction de validation, même refus). | [APPROUVÉ] |
++| D-A6 | Preuve de fermeture persistée selon **D5-B** (§7). | [APPROUVÉ] |
++| D-A7 | Libellé **D1** : distinction entre nouveaux événements avec preuve et événements historiques sans preuve (§7.3). | [APPROUVÉ] (forme) ; libellé exact [DÉCISION] DEC-03 |
++| D-A8 | **D6** (politique des ports filtrés à l'apprentissage) : ticket indépendant, hors A1. Cette spécification ne le traite pas. | [APPROUVÉ] (périmètre) |
++| D-A9 | Ordre : A1 avant D5 ; D1 après D5 ; D6 indépendant. | [APPROUVÉ] |
++
++Point de mise en œuvre : la règle « consécutives » (R2) et D-A1 impliquent qu'un cycle sans observation complète **interrompt** la succession. Le comportement actuel (compteur conservé) est donc remplacé.
++
++## 3. Observation et attribution XML
++
++### 3.1 Objet d'observation
++
++L'analyse produit, pour chaque hôte, un objet `HostTcpObservation` :
++- `status ∈ {COMPLETE, INCOMPLETE}` ;
++- si `COMPLETE` : `states: Dict[int, PortState]` couvrant chaque port du périmètre ;
++- `open_ports()` dérivé : ports `OPEN` ; `[]` signifie seulement « aucun `OPEN` sur scan complet », jamais une preuve de fermeture.
++
++`parse_sentinel_open_ports` reste la fonction de compatibilité : elle renvoie les seuls `OPEN` (ou `None`). Aucun appelant existant ne change de signature (CA-10).
++
++### 3.2 Attribution
++
++| Source (scan complet) | État |
++|---|---|
++| `<port>` avec `state` ∈ {`open`, `closed`, `filtered`} | cet état |
++| `<port>` avec autre valeur ou sans `<state>` | `UNCERTAIN` |
++| Port non listé couvert par un groupe `<extraports>` dont `<extrareasons ports="…">` l'attribue | l'état du groupe si `closed` ou `filtered` ; `UNCERTAIN` sinon |
++| Groupe `state="open"` | **jamais** `OPEN` déduit : `UNCERTAIN` |
++| Groupe sans `ports=`, seul groupe non attribué | état du groupe si `count` = nombre exact de ports non explicites [PROPOSITION] |
++| Plusieurs groupes sans `ports=` | `UNCERTAIN` pour les ports concernés [PROPOSITION] |
++| Port listé deux fois, ou dans deux attributions | scan `INCOMPLETE` |
++| `ports=` incohérent (count ≠ liste, chevauchement, hors périmètre, union ≠ complément) | scan `INCOMPLETE` [PROPOSITION] |
++
++Les structures réelles de `extrareasons` hors fixtures ne sont pas vérifiées. Le DTD officiel (`nmap-dtd`) valide le schéma seulement. Le repli conservateur (`UNCERTAIN`, pas de fermeture) s'applique aux cas non vérifiés.
++
++### 3.3 Validation commune
++
++La même fonction valide le XML pour le monitor et pour l'apprentissage de baseline. Conséquence attendue [PROPOSITION, à tester] : un XML ambigu fait refuser l'apprentissage de l'hôte (scan `INCOMPLETE`), donc la baseline reste inchangée. Cette conséquence est à signaler dans le ticket TCP-01 avant merge.
++
++## 4. Représentation des états
++
++| Représentation | Sens | Peut conclure « fermé » ? |
++|---|---|---|
++| `None` (INCOMPLETE) | complétude non prouvée, pour l'hôte entier | non |
++| `[]` (COMPLETE sans `OPEN`) | valeur dérivée, pas une preuve | non |
++| `PortState.UNCERTAIN` | état explicite non concluant, pour le port seul | non |
++| `PortState.FILTERED` | état explicite `filtered` | non (interrompt la succession) |
++| `PortState.CLOSED` | état explicite `closed` | oui, après 2 observations consécutives |
++| `PortState.OPEN` | état explicite `open` | non (remise à zéro, ou `new_port`) |
++
++Règle de distinction : un `UNCERTAIN` ou un `FILTERED` n'invalide que le port ; un `None` invalide tout l'hôte.
++
++## 5. Compteurs : comportement cible
++
++Un compteur par port connu ouvert : `closed_streak[P]`.
++
++| Observation pour `P` | Effet sur le compteur | Événement |
++|---|---|---|
++| `CLOSED` (scan complet) | +1 ; à 2 : remise à 0, retrait de `known_open` | `port_not_open(P)` une fois par épisode |
++| `OPEN` | remise à 0 | si `P` n'est pas dans `known_open` : `new_port(P)` |
++| `FILTERED` | remise à 0 | aucun |
++| `UNCERTAIN` | remise à 0 | aucun |
++| Scan `INCOMPLETE` (`None`) | remise à 0 pour tous les ports de l'hôte | aucun |
++| Hôte sans observation complète dans le cycle (D-A1) | remise à 0 pour tous les ports de l'hôte | aucun |
++| `ScanFailedError` (aucune observation exploitable) | remise à 0 pour tous les hôtes | aucun (`scan_degraded` selon ARENA §9.14) |
++| Redémarrage | compteur non restauré (R7) | aucun |
++
++Séquences (cycles 1…n ; port 80 suivi ; 22 `OPEN` au départ). Les résultats « harnais » sont ceux de `preuves/a1/a1_chain_verify.log` sur `9034f01` ; les lignes marquées « cible » sont à vérifier après implémentation.
++
++| Séquence | Attendu (cible) | Production `9034f01` (harnais) |
++|---|---|---|
++| closed, closed | `port_not_open` c2 | c2 (S1, conforme) |
++| closed ×2, open, closed ×2, closed | c2 `port_not_open` ; c3 `new_port` ; c5 `port_not_open` ; c6 aucun | conforme (S1) |
++| closed, filtered, closed, closed | `port_not_open` c4 | non mesuré (cible) |
++| closed, None (ScanFailed), closed, closed | `port_not_open` c4 | c4 (S6, conforme) |
++| closed c1, RESTART, closed c2, closed c3 | `port_not_open` c3 (compteur de c1 perdu, R7) | c3 (S2, conforme) |
++| closed ×4, RESTART avant chaque cycle | aucun événement (R7 ; risque §8) | aucun (S3, conforme) |
++| filtered ×2 | aucun | **c2 `port_not_open`** (S7, non conforme) |
++| open\|filtered ×2 | aucun | **c2 `port_not_open`** (S8, non conforme) |
++| A absent au c2 (closed c1, c3, c4) | `port_not_open` c4 (D-A1) | c3 (S5, non conforme) |
++| Hôte entier filtré ×10, baseline 22 et 80 | aucun (R6) | **c2 `port_not_open` 22 et 80** (S11, non conforme) |
++| Hôte entier closed ×2, baseline 22 et 80 | `port_not_open` 22 et 80 c2 (D-A2) | identique (cible conforme) |
++| closed c1, filtered c2, closed c3, closed c4 (80) | `port_not_open` c4 : `filtered` remet à zéro (R3) | non mesuré. Même mécanisme que S7 (`filtered` vu comme absence) : c2 à craindre |
++
++Pas de réémission : après `port_not_open`, le port quitte `known_open` ; une réouverture produit `new_port` ; un nouveau `closed` produit un nouvel épisode.
++
++## 6. Prévention des fermetures
++
++- **R6** : hôte entièrement filtré → aucun compteur positif, aucun événement. La protection est le filtrage par état (R3, R5), pas le quota.
++- **D-A2 / D-A3** : hôte entièrement `closed` deux fois → une fermeture par port, sans seuil. Ce comportement est voulu.
++- **Quota** (`sentinel/notifications.py`, `WINDOW` l.7, `LIMIT` l.8) : limite l'affichage, pas la fermeture. Un événement masqué est persisté avant le quota (`sentinel/alerting.py` `process_changes` l.149-212). Le quota ne modifie pas l'état. Il ne protège pas contre une fausse fermeture.
++- **Agrégation visuelle (D-A4)** : reportée, hors A1.
++
++## 7. Événements, preuve et libellés (D5-B, D1)
++
++### 7.1 Preuve minimale (D5-B) [APPROUVÉ] — clés [PROPOSITION]
++
++Clé ajoutée à `events.details` pour les **nouveaux** `port_not_open` uniquement :
++
++```json
++"proof": {"observed": "closed", "consecutive": 2, "scan": "complete", "run": "<run_session_id>"}
++```
++
++- Pas de nouvelle table, pas de migration de schéma (`events` inchangé), aucune réécriture de ligne existante.
++- Les lecteurs de `details` (reprise au démarrage, quota, rapport) ignorent les clés inconnues. À vérifier par test (D5).
++- Les anciens événements sont identifiés par l'**absence** de `proof`. Ils ne prouvent pas l'état observé à l'époque.
++
++### 7.2 Persistance
++
++- `details.detail` (`port N not open`) reste inchangé pour compatibilité. Seule la présentation change.
++- `evidence` n'est pas persistée (constat A1-8) ; `proof` la remplace pour les fermetures.
++- `filtered` n'a pas d'événement ; il n'est donc pas persisté (acceptable : état incertain, sans preuve de fermeture).
++
++### 7.3 Présentation (D1) [APPROUVÉ] — libellé exact [DÉCISION] DEC-03
++
++| Événement | Libellé proposé (terminal, vue live, rapport) |
++|---|---|
++| Nouveau `port_not_open` avec `proof` | « Port N closed » (2 observations complètes consécutives) |
++| Historique `port_not_open` sans `proof` | « Port N not open (historique, preuve absente) » |
++
++Conséquences : `presentation_detail` (`sentinel/monitor_view.py` l.52-61) doit lire la preuve, pas seulement le type. `tests/test_sentinel_event_display.py` l.76-82 doit être révisé. Le rapport HTML (`reports/sentinel_report.py` l.27-35) affiche aujourd'hui `details['detail']` brut (« port N not open ») et n'utilise pas `presentation_detail` : il doit être traité séparément (D1).
++
++Dépendance : D1 dépend de D5-B (la distinction exige la preuve persistée). Critère rattaché : CA-16 (§9.2). D5 produit la preuve ; D1 la lit.
++
++## 8. Redémarrage et réserves
++
++- R7 : compteurs non restaurés. `known_open` et `notified_port_not_open` restaurés comme aujourd'hui.
++- **Conséquence documentée de R7 (non soumise à arbitrage)** : si les redémarrages sont plus fréquents que deux cycles, aucune fermeture n'est jamais confirmée (S3). C'est une conséquence directe de R7 et du retard d'un cycle.
++
++## 9. Critères d'acceptation
++
++### 9.1 Critères A1 (ticket parent A1)
++
++CA-16 n'est pas un critère A1 : il est rattaché à D1 (§9.2). CA-11 et CA-18 restent en A1 comme non-régressions : A1 n'ajoute aucune clé à `details` et ne crée aucune table.
++
++| Réf. | Critère |
++|---|---|
++| CA-1 | `filtered` ×2 sur port `open` : aucun événement ; compteur non progressé. |
++| CA-2 | `closed`, `filtered`, `closed` : aucun événement au cycle 3 ; 4e `closed` : `port_not_open`. |
++| CA-3 | `open\|filtered`, `unfiltered`, absent, invalide, `bogus` : aucun événement de fermeture, ×2 et plus. |
++| CA-4 | `None` interrompt la succession (None, closed, closed → événement au cycle 3). |
++| CA-5 | Hôte entièrement `filtered` sur dix cycles : aucun événement, aucun compteur positif. |
++| CA-6 | Redémarrage après `closed` : aucun compteur restauré ; événement après deux nouveaux `closed`. |
++| CA-7 | Second épisode : `new_port` une fois ; pas de réémission pour le même épisode. |
++| CA-8 | `open` listé dans `<port>` reconnu ; groupe `<extraports state="open">` ne crée jamais `OPEN`. |
++| CA-9 | `[]` d'un scan complet sans `OPEN` n'est jamais une fermeture. |
++| CA-10 | `parse_sentinel_open_ports` : signature et retour inchangés pour les appelants existants. |
++| CA-11 | Anciens événements : `details` inchangé ; aucune ligne réécrite. |
++| CA-12 | P1 à P12 du harnais (attributions ambiguës, chevauchements, hors périmètre) : `UNCERTAIN` ou `INCOMPLETE`, jamais une fermeture. |
++| CA-13 | S7 et S8 : aucun événement sur la chaîne de production après implémentation. |
++| CA-14 | Absence d'un hôte au cycle intermédiaire : compteur remis à zéro (S5 : fermeture au cycle 4). |
++| CA-15 | Hôte entièrement `closed` deux fois : une fermeture par port, sans seuil (D-A2). |
++| CA-17 | Apprentissage de baseline : même validation XML ; XML ambigu → baseline inchangée. |
++| CA-18 | Aucune nouvelle table SQL (diff de `CREATE TABLE` vide). |
++
++**Réalisabilité sans D5 ni D1** : les critères CA-1 à CA-15, CA-17 et CA-18 sont vérifiables sans implémenter D5 ni D1. Aucun ne lit la clé `proof`, aucun ne modifie `presentation_detail`, aucun n'ajoute de clé à `details` ni de colonne.
++
++### 9.2 Critère rattaché à D1 (hors A1)
++
++| Réf. | Critère |
++|---|---|
++| CA-16 | Événement neuf avec `proof` : libellé « closed » ; historique sans `proof` : libellé neutre (terminal et rapport). |
++
++**Chaîne de dépendances : A1 → D5 → D1.** D5 écrit la preuve dans `events.details` (§7.1, clé `proof`, nouveaux `port_not_open` uniquement). D1 utilise cette preuve pour distinguer les événements nouveaux (libellé « closed ») des événements historiques (libellé neutre, §7.3). **A1 n'exige ni la clé `proof` ni un changement de libellé.**
++
++## 10. Tests de non-régression
++
++| Test | Fichier (9034f01) | Action |
++|---|---|---|
++| Parsing `filtered`, `open\|filtered`, `unfiltered`, sans état, `bogus` | `tests/test_tcp_scan.py` | ajout (TCP-01) |
++| Attribution `<extraports>` (présent, absent, contradictoire, multi-groupes) | `tests/test_tcp_scan.py` | ajout (TCP-01) |
++| `filtered` → `[]` au retour de `_parse` (l.442-455) | `tests/test_tcp_scan.py` | inchangé (CA-9) |
++| Sortie réelle nmap 7.95 (fixture l.291 ; tests l.897-909) | `tests/test_tcp_scan.py` | inchangé (CA-10) |
++| Séquences §5 | `tests/test_sentinel_manager.py` | ajout (TCP-03) |
++| `test_port_not_open_after_two_complete_scans_then_never_repeated` l.429-440 ; `test_scan_failed_resets_counters_and_records_one_episode_only` l.589-597 | `tests/test_sentinel_manager.py` | révision (sémantique change) |
++| `test_unknown_tcp_observation_restarts_the_absence_count` l.450-455 ; `test_error_status_resets_the_absence_count` l.487-497 | `tests/test_sentinel_manager.py` | conserver (cohérents avec R5, D-A1) |
++| Absence d'un hôte pendant un cycle (D-A1) : aucun test existant | `tests/test_sentinel_manager.py` | ajout (TCP-02) |
++| Arrêt pendant scan : `test_interrupted_check_persists_nothing` l.182, `test_interrupted_cycle_is_released_and_the_loop_returns` l.200 | `tests/test_sentinel_stop_during_scan.py` | vérifier |
++| Libellé « Port N closed » (l.76-82) | `tests/test_sentinel_event_display.py` | révision (D1, D1) |
++| Apprentissage avec XML ambigu | `tests/test_sentinel_baseline*.py` | ajout (TCP-01) |
++| Reprise au démarrage avec `proof` | `tests/test_sentinel_lifecycle.py` | ajout (D5) |
++
++Exécution : HOME et base temporaires, fixtures XML, sans scan réel.
++
++## 11. Fichiers et fonctions
++
++| Fichier | Fonctions / lignes (`9034f01`) | Ticket |
++|---|---|---|
++| `detect/tcp_scan.py` | `_recorded_port_states` l.337 ; `_parse_tcp_xml_with_states` l.444 ; `parse_sentinel_open_ports` l.558 ; `_check_tcp_xml` l.354 | TCP-01 |
++| `sentinel/monitor.py` | `_get_open_ports` l.264 (appel l.276-282) | TCP-01 |
++| `sentinel/baseline.py` | `learn_baseline` l.431 ; appel l.481-489 | TCP-01 |
++| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291 ; `_rebuild_transition_state` l.300-362 ; `_compute_port_transitions` l.460-505 ; `ScanFailedError` l.629-636 ; boucle `current_hosts` l.463 | TCP-02 |
++| `sentinel/alerting.py` | `_detail_extras` l.138 ; `process_changes` l.149 ; `details` l.168 ; `NO_FINDING_TYPES` l.67 (contient `port_not_open`) | D5 |
++| `sentinel/monitor_view.py` | `presentation_detail` l.52-61 ; `_PORT_NOT_OPEN_DETAIL` l.49 | D1 |
++| `reports/sentinel_report.py` | l.27-35 | D1 |
++| `core/database.py` | `events` l.263 ; `sentinel_save_event` l.1572-1586 | inchangé (CA-18) |
++
++## 12. Risques
++
++1. **Perte de détection `closed → filtered`** : un service passé derrière un pare-feu ne produit plus d'événement. Conséquence directe de R3 (aucune fermeture sur `closed → filtered`) ; à consigner comme réserve.
++2. **Apprentissage plus strict** : la validation commune peut refuser des apprentissages qui réussissent aujourd'hui (D-A5). Mesure requise avant merge.
++3. **Redémarrages répétés** : voir §8.
++4. **Parsing `<extraports>`** : hypothèses non vérifiées sur sortie réelle. Repli `UNCERTAIN`, donc moins d'alertes, pas de fausse alerte.
++5. **Quota** : un `new_port` réel peut être masqué sur le même hôte dans la même fenêtre. Ce comportement existe ; il n'est pas modifié par A1.
++
++## 13. Points à trancher
++
++| Réf. | Point | Statut |
++|---|---|---|
++| EMP-01 | Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro). | [PROPOSITION] |
++| DEC-03 | Libellés exacts D1 (§7.3). | [DÉCISION] |
++| R7-risque | Redémarrages répétés sans fermeture confirmée : conséquence documentée de R7 (§8). | [APPROUVÉ] R7 ; conséquence documentée |
++| — | Clés exactes de `proof` (§7.1). | [PROPOSITION], validée en D5 |
++
++## 14. Limites
++
++- Aucune mesure sur scan réel. Les séquences proviennent de fixtures XML et de sondes remplacées.
++- Le harnais `a1_chain_verify.py` ne lance pas le monitor en continu : un cycle = un appel de `_do_check`.
++- Non vérifié : structure réelle Nmap des `extrareasons` hors fixtures ; sémantique réelle de `extraports state` ; comportement de `ScanDegradedError` en production au-delà des cas mesurés.
++- Le modèle `preuves/a1/a1_model_spec.py` est une spécification exécutable, pas une preuve de conformité.
+--- a/docs-proposees/PLAN-tickets-global.md
++++ b/docs-proposees/PLAN-tickets-global.md
+@@ -1,418 +1,480 @@
+-# Plan global de tickets — audit SentinelX (réconciliation A1 et anomalies confirmées)
++# Plan global de tickets — audit SentinelX (version 2.2, après seconde revue Kiro)
+ 
+-**Statut : PROPOSITION. Aucun ticket n'est approuvé ni implémenté.** Aucun fichier du dépôt n'est modifié. Aucun commit, push, nettoyage ni scan réel.
+-**Date de rédaction** : 2026-09-24 (date du jour fournie). Voir réserve R-1 sur l'horloge de la sandbox.
+-**Référence de code** : `origin/a4-arena` = `9034f01` (clone de lecture `/tmp/audit-global-ref`, arbre propre).
+-**Sources** : `RAPPORT-audit-global.md`, `PLAN-correction.md` (ancien plan), `RAPPORT-complement-A1-transitions-ports.md`, `RAPPORT-complement-B2-credentials-coffre.md`, `RAPPORT-verification-A1-chaine-production.md`, `SPEC-A1-consolidee.md`, `PROPOSITION-A1-formalisation-TCP.md`, `docs-proposees/SENTINEL-TCP-STATES.md`.
++**Statut : PROPOSITION (version 2.2).** Ce document n'approuve, n'implémente et ne valide aucun ticket. Aucun fichier du dépôt n'est modifié. Aucun code, test, Skill, commit, push, nettoyage ni scan réel n'est effectué dans ce cycle.
+ 
+-Légende des statuts : **Confirmé** = reproduit (fixture, faux binaire, simulation) ou établi par lecture de code ; **Partiel** = une partie seulement est établie ; **Hypothèse** = non reproduite, à vérifier ; **Décision** = pas un bug, choix du propriétaire requis.
+-
+-Légende des priorités : **P1** = fausse fermeture, faux négatif sur outil de sécurité, ou risque d'emplacement de données sensibles, confirmé ; **P2** = défaut confirmé sans conséquence de sécurité immédiate, ou mesure requise avant correction ; **P3** = documentation ou cosmétique.
++| Élément | Valeur |
++|---|---|
++| Date de rédaction | **2026-11-12** |
++| Date de référence de la mission | **12 novembre 2026** |
++| Commit de référence | **`9034f01`** = `origin/a4-arena` (HEAD réel), commit daté 2026-11-11 (date git). Clone de lecture `/tmp/audit-global-ref`, arbre propre. |
++| Autre branche citée | `main` = `8366722` : hors périmètre, non examinée |
++| Dates des rapports antérieurs | Non réconciliées : les fichiers `RAPPORT-*` portent la date de leur dernière écriture (2026-11-12) ; leur date de rédaction d'origine n'est pas tracée. |
++| Date 2026-09-24 | **N'est pas la date de rédaction** et n'est utilisée comme date de mission dans aucune version de ce plan. |
++| Remplace | Version 1, archivée dans `docs-proposees/archive-v1/PLAN-tickets-global.md` |
++| Revue | Kiro (revue indépendante, puis seconde revue : verdict « recevable après corrections », corrections V2.2 en §8) ; analyse de Nova (§12) |
+ 
+ ---
+ 
+-## 1. Réconciliation des statuts A1
++## 0. Vocabulaire des statuts
+ 
+-| Élément | Avant (documents de la mission) | Après (décisions du propriétaire) | Où |
+-|---|---|---|---|
+-| `open`, `closed` (2 observations), `filtered`, `open\|filtered`, inconnus, hôte entièrement filtré, compteurs non restaurés | [APPROUVÉ] | [APPROUVÉ] | SPEC §1, PROPOSITION §0 |
+-| Libellé D1 (« Port N closed » ou conditionnel) | [OUVERT] | **Libellé : [OUVERT] (DEC-03)** ; distinction preuve / historique : **[APPROUVÉ]** | SPEC R8, §12 ; PROPOSITION §0 |
+-| D5 | [NON APPROUVÉ] / [OUVERT] | **[APPROUVÉ] D5-B** ; D5-A et D5-C non retenues | SPEC §10 ; PROPOSITION §10 |
+-| D6 | [NON APPROUVÉ] | **Périmètre [APPROUVÉ] : ticket indépendant hors A1** ; politique C2/C3 **[OUVERT] (DEC-04)** ; A1 garde C1 = D6-A | SPEC §11 ; PROPOSITION §11 |
+-| V4 (hôte absent du cycle) | [OUVERT] | **[APPROUVÉ]** : remise à zéro | SPEC §5.4 ; PROPOSITION §0 |
+-| Garde de masse : G-a / G-b / G-c | [OUVERT] | **G-a [APPROUVÉ]** (fermetures individuelles après deux `closed` explicites pour tous les ports connus) ; **G-b [ÉCARTÉ]** (aucun seuil global) ; **G-c [REPORTÉ]** hors A1 | SPEC §5.3 |
+-| Perte de détection `closed` → `filtered` | [OUVERT] | **[APPROUVÉ]** : aucune fermeture confirmée sur `closed` → `filtered` ; réserve à consigner | SPEC §12, §13 |
+-| Validation d'attribution partagée monitor / apprentissage | [OUVERT] | **[APPROUVÉ]** : validation XML commune | SPEC §9.3 |
+-| Redémarrages répétés sans fermeture confirmée (S3) | [OUVERT] | **[APPROUVÉ]** R7 (non restauré) ; réserve à consigner (DEC-15) | SPEC §12 |
+-| Hôte absent : statut de « lecture stricte » | « recommandé » | Remplacé par [APPROUVÉ] V4 | — |
++Ces catégories ne doivent jamais être confondues.
++
++| Statut | Signification |
++|---|---|
++| **Décision approuvée** | Arbitrée par le propriétaire. Ne pas la redemander. |
++| **Proposition** | Texte, ticket ou spécification proposé, non approuvé. |
++| **Ticket planifié** | Inscrit dans l'ordre de réalisation. Ne donne aucune autorisation d'implémentation. |
++| **Conception approuvée** | La conception est approuvée, mais l'implémentation n'est pas autorisée (cas de D5-B). |
++| **Autorisation d'implémentation** | Donnée explicitement par le propriétaire. **Aucune n'est donnée dans ce plan.** |
++| **Ticket validé** | Implémenté, testé et accepté selon ses critères. **Aucun ticket n'est validé à ce jour.** |
++| **Conforme** | Comportement vérifié comme conforme à une décision approuvée. **Pas de ticket.** |
++
++---
+ 
+-Spécification canonique proposée : `docs-proposees/SENTINEL-TCP-STATES.md` (remplace la spec de travail `SPEC-A1-consolidee.md` ; emplacement final **DEC-01**).
++## 1. Synthèse
+ 
+-Incohérence de fond : **ARENA §9.6 est déclaré « règle définitive » et contredit les règles approuvées** (`[]` incrémente les compteurs ; `[ports]` remet à zéro les présents). Le code `9034f01` suit ARENA §9.6. Modifier ARENA est un acte du propriétaire (DEC-13). Le texte proposé est au §6.
++- **A1 n'est pas terminé.** Il est présenté comme un ticket parent unique, « Fiabilisation des états TCP de Sentinel Monitor », proposé et non implémenté. Ses sous-tâches TCP-01 à TCP-03 seront implémentées, testées et acceptées ensemble ; elles ne sont pas des tickets autonomes. TCP-04 relève des non-régressions de A1. Aucune autorisation d'implémentation n'est donnée.
++- **Ordre** : Étape 0 (mise à jour documentaire, §5.0) avant toute implémentation, puis **SMB-01** (`smb_enum` lit un échec d'outil comme une absence de résultat).
++- **Anomalies retirées ou reclassées** après revue Kiro : CRED-02 (conforme, sans ticket), NET-01 (non reproduite, sans ticket de code, P1 provisoire retiré).
++- **Décisions déjà approuvées** et intégrées au plan (§2) : elles ne sont plus posées comme questions.
++- **Décisions ouvertes** : 12 points restent à arbitrer par le propriétaire (§3).
+ 
+ ---
+ 
+-## 2. Correspondance des identifiants
++## 2. Décisions approuvées (intégrées, non redemandées)
+ 
+-Les anciens identifiants se chevauchent (`A1-1` et `A1-2` désignent deux choses différentes selon le document). Les nouveaux identifiants remplacent les anciens dans les documents proposés.
++| Réf. | Décision | Effet dans le plan |
++|---|---|---|
++| A-V4 | Hôte absent du cycle : remise à zéro des compteurs de ses ports | A1, CA-15 |
++| A-G-a | Fermeture individuelle après deux observations `closed` explicites consécutives, pour chaque port connu | A1 |
++| A-G-b | Aucun seuil global (écartée) | A1 |
++| A-G-c | Reportée, hors A1 | Non planifiée |
++| A-closed-filtered | Aucune fermeture confirmée sur passage `closed` → `filtered` (réserve à consigner) | A1 |
++| A-XML | Validation XML commune au monitor et à l'apprentissage de baseline | A1 (TCP-01) |
++| A-R7 | Compteurs intermédiaires non restaurés après redémarrage | A1 (TCP-04) |
++| A-R7-risque | Redémarrages répétés sans fermeture confirmée : **conséquence documentée de R7**, non soumise à arbitrage | A1, documentation |
++| D5-B | Preuve de fermeture dans `events.details` : **conception approuvée, implémentation non autorisée** | D5 |
++| D1-forme | Distinction à deux catégories : événements avec preuve / historiques sans preuve | D1 (le libellé reste ouvert, DEC-03) |
++| D6-indép | D6 est un ticket indépendant hors A1 ; DEC-04 n'est pas un bloqueur de A1 | D6 |
++| CRED-02 | Comportement conforme à `docs/T22-CREDENTIALS.md` : SSH uniquement via `--service ssh`, sans candidat SSH générique. Sans ticket et sans ajout de candidat. | Conforme |
++| NET-01 | Anomalie non reproduite. `--target` est obligatoire et le code ne choisit pas le réseau. Pas de ticket de code. | Non reproduite |
++| ARENA-9.6 | ARENA §9.6 est supersédée par la politique A1 approuvée. | Mise à jour proposée dans `docs-proposees/` ; le document maître officiel est `docs/MASTER-REFERENCE.md` |
+ 
+-| Ancien identifiant | Source | Anomalie | Nouveau ticket |
+-|---|---|---|---|
+-| A1-1 (PLAN, P2) | PLAN-correction | `filtered` → fermeture | TCP-02, TCP-06 (priorité relevée à **P1**, voir §3) |
+-| A1-2 (PLAN, P3) | PLAN-correction | compteurs non restaurés | **Décision R7 (approuvée) : pas de ticket de restauration** |
+-| A1-2 (complément, P1) | RAPPORT-complement-A1 | hôte entièrement filtré → `port_not_open` | TCP-03 (et TCP-02) |
+-| A1-3 | complément A1 | états non prévus fail-open | TCP-01 |
+-| A1-4 | complément A1 | trois libellés | TCP-06 |
+-| A1-5 | complément A1 | `states` jetés | TCP-01 |
+-| A1-6 | complément A1 | compteurs non reconstruits | Décision R7 (même traitement que PLAN A1-2) |
+-| A1-7 | complément A1 | baseline sous filtrage → `new_port` | D6-01 (hors A1) |
+-| A1-8 | complément A1 | `evidence` non persistée | TCP-05 |
+-| A1 (rapport global §0 n°5) | RAPPORT-audit-global | = PLAN A1-1 | TCP-02, TCP-06 |
+-| B2-1 … B2-3 | PLAN, rapport B2 | coffre, SSH, message | CRED-01, CRED-02, CRED-03 |
+-| B3-1 … B3-4 | PLAN, rapport global | `smb_enum`, `--json`, regex, doctor | SMB-01, SMB-02, TOOL-01 |
+-| A2-1, A2-2 | PLAN | identifiants ; `rescan` | A2-01, A2-02 |
+-| A3-1 | PLAN | « 0 » du rapport | REP-01 |
+-| B1-1 | PLAN | VERIFY `sentinel.*` | VERIFY-01 |
+-| B4-1, B4-2 | PLAN | timeouts OS, messages | OS-01 |
+-| B5-1 … B5-3 | PLAN | scoring, libellé, 512-514 | SCO-01, SCO-02, SCO-03 |
+-| C-1 | PLAN, rapport global | réseau `192.168.57.0/24` | NET-01 (pas de ticket de code) |
+-| DOC-1, DOC-2 | PLAN | HEAD, chemins, statuts | DOC-01, DOC-02 |
++---
++
++## 3. Décisions ouvertes (à soumettre au propriétaire)
++
++| Réf. | Point | Recommandation ou état |
++|---|---|---|
++| DEC-02 | Validation du plan et des propositions documentaires | Condition de l'Étape 0 (§5.0) : à valider avant toute implémentation |
++| DEC-03 | Libellé exact de D1 | Non tranché. Proposition : « Port N closed (2 observations complètes consécutives) » pour les événements avec preuve ; « Port N not open (historique, preuve absente) » pour l'historique. Le libellé exact reste à arbitrer. |
++| DEC-04 | Politique D6 : C2 ou C3 (statu quo D6-A = C1) | Examinée au moment du ticket D6. **Non bloquant pour A1.** |
++| DEC-05 | Emplacement et procédure de migration, **seulement si** CRED-01 retient un changement de chemin | Décision et procédure avant tout déplacement de coffre ou de base |
++| DEC-07 | Port `info` ouvert dans le score global (SCO-02) | Proposition : non, comme `device_fingerprint` (inventaire) |
++| DEC-08 | Règle 512-514 (SCO-03) | Choix produit |
++| DEC-09 | Libellé « CVSS » (SCO-01) | Renommer en « score de risque (interne) » si le libellé est confirmé |
++| DEC-11 | Résolution d'identifiants (A2-01) | Option (a), (b) ou (c) |
++| DEC-12 | Délai OS (OS-01) | Mesurer d'abord ; délai configurable ensuite |
++| DEC-14 | Chemins absolus non portables : `docs/MASTER-REFERENCE.md` (corrigé en DOC-02) et défauts de code `core/dependencies.py` l.48-49 ; message `core/database.py` l.85 (`/root/.netlab`) | Correction documentaire proposée ; les défauts et messages de code relèvent d'une décision séparée |
++| DEC-16 | Libellé « Affichées » du rapport (REP-01) | Proposition : « Notifications affichées sur 60 min » |
++| DEC-17 | Normalisation Unicode de la phrase du coffre (NFC/NFD, `core/credential_vault.py` l.97-99) | Constat distinct (§4.3). Toute normalisation change la clé des coffres existants : stratégie de compatibilité à arbitrer avant tout ticket. Aucune migration. |
++
++**Retirés de la liste** (ne sont plus des questions) :
++- **DEC-01** (emplacement de la spec A1) : remplacé par une **proposition** justifiée, `docs/SENTINEL-TCP-STATES.md`, à faire vérifier par Kiro. La convention de nommage est celle des autres fichiers de `docs/` : `SENTINEL-LIFECYCLE.md`, `SENTINEL-NOTIFICATIONS.md`, `SENTINEL-FINDINGS.md`.
++- **DEC-06** (SSH) : CRED-02 est conforme.
++- **DEC-10** (réseau `192.168.57.0/24`) : NET-01 n'est pas reproduit.
++- **DEC-13** (révision ARENA §9.6) : supersédée par la politique A1 approuvée.
++- **DEC-15** (réserve redémarrages) : conséquence documentée de R7 (§2).
++
++**Points à vérifier (ne sont pas des décisions)** :
++- Rôle de `ARENA.md` : ce fichier n'est pas dans le dépôt. Il est cité en révision 13 (`docs/MASTER-REFERENCE.md` l.5 et l.282) et en révision 12 (l.114). La copie de travail de l'environnement d'audit est `/home/user/uploads/ARENA.md`. Son statut canonique est à vérifier par le propriétaire et par Kiro.
++- Structure réelle des `<extrareasons>` et sémantique réelle de `extraports state=open` (Nmap) : non vérifiées hors fixtures.
++- Dossier réellement examiné par Kiro : `docs-processes/` et les fichiers `(1)`/`(2)` n'existent pas dans l'environnement d'audit (`find -xdev /` sans résultat). Ce dossier est à identifier.
+ 
+ ---
+ 
+-## 3. Tickets
+-
+-Format : identifiant · anomalie · preuve · priorité · périmètre · dépendances · critères · tests · statut.
+-
+-### 3.1 Sentinel — états TCP (A1)
+-
+-**TCP-01 — Parsing, attribution et représentation des états TCP ; validation commune.**
+-- **Anomalie** : `filtered`, `open|filtered` et états inconnus sont réduits à « absence de `open` » ; `states` est jeté (`detect/tcp_scan.py` l.558) ; fail-open sur attributions ambiguës (P1–P12 : `prod=[22]`, `valid=True`). Preuve : `preuves/a1/a1_chain_verify-run5.json` (identique à run 4), `RAPPORT-verification-A1` V6, V7, §12.
+-- **Priorité** : **P1** (point de départ de TCP-02 ; fausses fermetures en chaîne, S7/S8).
+-- **Périmètre** : `detect/tcp_scan.py` (`_recorded_port_states` l.337, `_check_tcp_xml` l.354, `_parse_tcp_xml_with_states` l.444, `parse_sentinel_open_ports` l.558) ; `sentinel/monitor.py` `_get_open_ports` l.264 ; `sentinel/baseline.py` `learn_baseline` l.431 (appel l.481). Signatures publiques inchangées (CA-10).
+-- **Dépendances** : aucune.
+-- **Critères** : SPEC §9 CA-8, CA-9, CA-10, CA-12, CA-17.
+-- **Tests** : `tests/test_tcp_scan.py` (ajouts : `filtered`, `open|filtered`, `unfiltered`, sans état, `bogus`, attributions `<extraports>`) ; `tests/test_sentinel_baseline*.py` (XML ambigu → baseline inchangée).
+-- **Statut** : proposé, non approuvé.
++## 4. Tickets
+ 
+-**TCP-02 — Compteurs par séquence et remise à zéro sur absence.**
+-- **Anomalie** : `filtered` ×2 produit `port_not_open` (S7, mesuré) ; `open|filtered` ×2 idem (S8) ; hôte absent du cycle conserve ses compteurs (S5 : c3 au lieu de c4, V4 approuvé).
+-- **Priorité** : **P1**.
+-- **Périmètre** : `sentinel/sentinel_manager.py` `NetworkState.port_absent_count` l.291 ; `_rebuild_transition_state` l.300-362 ; `_compute_port_transitions` l.460-505 (boucle l.463 sur `current_hosts` seulement) ; `_do_check` l.594, `ScanFailedError` l.626-636.
+-- **Dépendances** : TCP-01.
+-- **Critères** : SPEC-TCP §5 (tableau) ; CA-1 à CA-4, CA-6, CA-7, CA-14.
+-- **Tests** : révision `test_port_not_open_after_two_complete_scans_then_never_repeated` (`tests/test_sentinel_manager.py` l.429-440) ; conserver `test_unknown_tcp_observation_restarts_the_absence_count` (l.450-455) et `test_error_status_resets_the_absence_count` (l.487-497) ; ajout : absence d'hôte au cycle intermédiaire (aucun test existant).
+-- **Statut** : proposé, non approuvé.
++Format : identifiant · anomalie · preuve · priorité · périmètre · dépendances · critères · tests · statut · ticket suivant (désigné à la validation).
+ 
+-**TCP-03 — Prévention des fermetures de masse ; tests de séquences de non-régression.**
+-- **Anomalie** : hôte entièrement filtré (22 et 80, dix cycles) → `port_not_open` au cycle 2 (S11, mesuré, A1-2 complément, P1). Le quota ne protège pas (il masque l'affichage, pas la fermeture).
++### 4.1 Sentinel — états TCP
++
++#### A1 — Fiabilisation des états TCP de Sentinel Monitor (ticket parent unique)
++
++- **Anomalie** : états `filtered`, `open|filtered` et inconnus réduits à « absence de `open` » ; `states` jeté (`detect/tcp_scan.py` l.601, dans `parse_sentinel_open_ports` définie l.558) ; fermetures sur séquences `filtered` ou `open|filtered` (S7, S8, mesurés) ; fermeture de masse d'un hôte entièrement filtré (S11, mesuré) ; hôte absent qui conserve ses compteurs (S5, mesuré) ; attributions XML ambiguës acceptées (P1-P7, P11, P12 : `prod=[22]`, mesuré).
++- **Preuves** : `preuves/a1/a1_chain_verify.json` et `a1_chain_verify-run5.json` (identiques sur les sections `parse` et séquences) ; `RAPPORT-verification-A1-chaine-production.md` §12 ; spécification `docs-proposees/SENTINEL-TCP-STATES.md`.
+ - **Priorité** : **P1**.
+-- **Périmètre** : garde R6 (conséquence de TCP-01/TCP-02, à vérifier) ; harnais `preuves/a1/a1_chain_verify.py` (référence, non modifié par ce plan) ; nouveaux tests de séquence.
+-- **Dépendances** : TCP-02.
+-- **Critères** : CA-5, CA-13 (S7, S8, S11 passent), CA-15 (deux `closed` explicites pour chaque port connu : une fermeture par port, sans seuil).
+-- **Tests** : S1 à S11 et L1, L2 du harnais, portés en tests unitaires (fixtures XML, aucun scan réel) ; ajout S5 (V4) et S7/S8/S11.
+-- **Statut** : proposé, non approuvé.
+-
+-**TCP-04 — Redémarrage : non-restauration des compteurs et réserve.**
+-- **Anomalie** : aucune (comportement approuvé R7). Risque : redémarrages plus fréquents que deux cycles → aucune fermeture confirmée (S3, mesuré).
+-- **Priorité** : **P2** (tests de confirmation ; la réserve est une décision).
+-- **Périmètre** : `sentinel/sentinel_manager.py` `_rebuild_transition_state` (ne pas restaurer `port_absent_count`).
+-- **Dépendances** : TCP-02.
+-- **Critères** : CA-6 ; réserve §8 de `SENTINEL-TCP-STATES.md` acceptée explicitement (DEC-15).
+-- **Tests** : S2, S3, S10 du harnais en tests unitaires.
+-- **Statut** : proposé.
+-
+-**TCP-05 — Preuve de fermeture dans `events.details` (D5-B).**
+-- **Anomalie** : `evidence` n'est pas persistée (A1-8) ; une fermeture ne garde aucune trace de sa justification.
+-- **Priorité** : **P3** (demandé par le propriétaire ; faible risque ; peut suivre TCP-03).
+-- **Périmètre** : `sentinel/alerting.py` `_detail_extras` l.138, `process_changes` l.149, `details` l.168 ; `core/database.py` `sentinel_save_event` l.1572-1586 (aucun changement de schéma, CA-18).
+-- **Dépendances** : TCP-02 (le compteur consécutif est la source de la preuve).
+-- **Critères** : SPEC-TCP §7.1 ; CA-11, CA-18. Clés : `proof = {observed, consecutive, scan, run}` (proposition, valider au ticket).
+-- **Tests** : nouvel événement avec `proof` ; ancien événement inchangé ; lecteurs de `details` ignorent la clé (`sentinel_manager.py` l.331-355, `notifications.py` l.32-60, `reports/sentinel_report.py` l.27-35) ; reprise au démarrage (`tests/test_sentinel_lifecycle.py`).
+-- **Statut** : approuvé (D5-B), à planifier.
+-
+-**TCP-06 — Présentation D1 : distinction preuve / historique.**
+-- **Anomalie** : « Port N closed » est affiché pour tout `port_not_open`, y compris les anciens événements (A1-4, libellés trois fois) ; le rapport HTML affiche `details['detail']` brut.
+-- **Priorité** : **P2**.
+-- **Périmètre** : `sentinel/monitor_view.py` `presentation_detail` l.52-61, `_PORT_NOT_OPEN_DETAIL` l.49 ; `reports/sentinel_report.py` l.27-35 ; `tests/test_sentinel_event_display.py` l.76-82 (à réviser).
+-- **Dépendances** : TCP-05 (la distinction exige la preuve) ; **DEC-03 (libellé exact)**.
+-- **Critères** : SPEC-TCP §7.3 ; CA-16. Libellé exact non approuvé : **aucun changement de libellé avant DEC-03**.
+-- **Tests** : réviser `test_closed_port_is_labelled_closed` et `test_label_is_derived_from_stored_detail...` ; ajout : événement avec `proof` vs historique sans `proof`.
+-- **Statut** : proposé ; bloqué par DEC-03.
+-
+-### 3.2 Hors A1
+-
+-**D6-01 — Politique des ports `filtered` à l'apprentissage baseline.**
+-- **Anomalie** : `learn_baseline` accepte un hôte entièrement filtré avec baseline `{}`, puis chaque port ouvert ensuite produit `new_port` (A1-7, L1/L2 mesurés, `sentinel/baseline.py` l.480-490).
+-- **Priorité** : **P2**. Ticket indépendant, hors A1 (décision).
+-- **Périmètre** : `sentinel/baseline.py` ; `core/database.py` `baseline.services` (écrit `"{}"`, `sentinel_replace_baseline` l.1503-1543, aucun lecteur logique trouvé — grep non exhaustif).
+-- **Dépendances** : **DEC-04** (C2, C3 ou statu quo D6-A). TCP-01 déjà en place (la validation commune ne change pas cette politique).
++- **Statut** : **Non terminé ; proposé, non implémenté.** Ticket parent proposé. Spécification `docs-proposees/SENTINEL-TCP-STATES.md` proposée, non encore approuvée comme spécification de référence. **Aucune autorisation d'implémentation.**
++- **Dépendances** : **aucune**. A1 ne dépend ni de D5 ni de D6.
++- **Périmètre** : `detect/tcp_scan.py` (`_recorded_port_states` l.337, `_parse_tcp_xml_with_states` l.444, `parse_sentinel_open_ports` définie l.558, `states` jeté l.601) ; `sentinel/monitor.py` (`_get_open_ports` l.264 ; import l.276 ; appel `_run_nmap_tcp(strict=True)` l.277-281 ; `parse_sentinel_open_ports` l.282) ; `sentinel/baseline.py` (`learn_baseline` l.431 ; validation l.480-490 ; appel `_run_nmap_tcp` **sans** `strict=True` l.481-483) ; `sentinel/sentinel_manager.py` (`NetworkState.port_absent_count` l.291 ; `_rebuild_transition_state` l.300-362 ; `_compute_port_transitions` l.460-505 ; `_do_check` l.594 ; bloc `except ScanFailedError` l.629-636 avec vidage l.632-633).
++- **Inclus dans A1** : hôte absent (remise à zéro) ; hôte entièrement filtré (aucune fermeture) ; fermetures individuelles après deux `closed` explicites pour chaque port connu ; `closed → filtered` (aucune fermeture) ; prévention des attributions XML ambiguës ; validation XML commune ; compteurs non restaurés (R7).
++- **Exclu de A1** : D5, D1, D6, le libellé D1, CA-16 (rattaché à D1), CRED-*, SMB-*, et tout seuil global (G-b écartée, G-c reportée).
++
++**Sous-tâches internes** (non autonomes : elles seront implémentées, testées et acceptées **ensemble** dans le ticket parent) :
++
++| Sous-tâche | Contenu | Périmètre principal |
++|---|---|---|
++| **TCP-01** | Parsing, attribution et représentation des états TCP ; validation XML commune monitor / baseline (l'appel baseline passe au même mode `strict=True` que le monitor) ; refus des attributions ambiguës. Attendu : P1 à P7, P11 et P12 refusés (production accepte `[22]`). | `detect/tcp_scan.py`, `sentinel/monitor.py`, `sentinel/baseline.py` |
++| **TCP-02** | Un compteur par port connu. Fermeture après deux `closed` explicites consécutifs. Remise à zéro sur `filtered`, `open\|filtered`, état inconnu, `None`, hôte absent. Aucune fermeture sur `closed → filtered`. | `sentinel/sentinel_manager.py` |
++| **TCP-03** | Hôte entièrement filtré : aucune fermeture. Tests de séquence S1 à S11 (fixtures XML, sans scan réel). | Tests et garde |
++| **TCP-04** | Non-régressions R7 : compteurs non restaurés après redémarrage (S2, S3, S10). Inscrit dans les non-régressions de A1. | `_rebuild_transition_state` |
++
++- **Critères d'acceptation** : CA-1 à CA-15, CA-17 et CA-18 de `docs-proposees/SENTINEL-TCP-STATES.md` (§9.1). **CA-16 est rattaché à D1** (§9.2) et n'est pas un critère A1 : A1 n'exige ni la clé `proof` ni un changement de libellé. Cas de référence : S1 à S11, P1 à P12. (L1 et L2 relèvent de D6, hors A1.)
++- **Écart mesuré à corriger** : S5, S7, S8, S11 (non conformes) ; P1 à P7, P11, P12 (non conformes).
++- **Tests** : `tests/test_tcp_scan.py` (ajouts : `filtered`, `open|filtered`, `unfiltered`, sans état, `bogus`, attributions `<extraports>`) ; `tests/test_sentinel_manager.py` (révision de `test_port_not_open_after_two_complete_scans_then_never_repeated` l.429-440 ; conserver l.450-455 et l.487-497 ; ajout d'absence d'hôte pendant un cycle, aucun test existant) ; `tests/test_sentinel_baseline*.py` (XML ambigu : baseline inchangée).
++- **Réserves** : harnais avec sondes remplacées (un cycle = un appel de `_do_check`) ; passage `closed → filtered` en cycle réel non mesuré ; `ScanDegradedError` en production non mesuré au-delà des cas testés.
++
++#### D5 — Preuve de fermeture dans `events.details` (D5-B)
++
++- **Anomalie** : `evidence` n'est pas persistée (`sentinel/alerting.py`, `NO_FINDING_TYPES` l.67) ; une fermeture ne garde aucune trace de sa justification.
++- **Statut** : **Conception approuvée (D5-B). Implémentation non autorisée.** Ticket planifié **après A1**.
++- **Priorité** : P3 (demande du propriétaire ; faible risque).
++- **Dépendances** : **A1** (le compteur consécutif est la source de la preuve).
++- **Périmètre** : `sentinel/alerting.py` (`_detail_extras` l.138, `process_changes` l.149, `details` l.168) ; `core/database.py` (`sentinel_save_event` l.1572-1586). Aucun changement de schéma.
++- **Critères** : `SENTINEL-TCP-STATES.md` §7.1 (clé `proof`) ; CA-11 (anciens événements inchangés). D5 produit la preuve dans `events.details` ; D1 l'utilise. Clés proposées : `proof = {observed, consecutive, scan, run}` (à valider au ticket).
++- **Tests** : nouvel événement avec `proof` ; ancien événement inchangé ; lecteurs de `details` ignorent la clé (`sentinel/sentinel_manager.py` l.331-355, `sentinel/notifications.py` l.32-60, `reports/sentinel_report.py` l.27-35) ; reprise au démarrage (`tests/test_sentinel_lifecycle.py`).
++- **Ticket suivant** : D1.
++
++#### D1 — Présentation : distinction preuve / historique
++
++- **Anomalie** : « Port N closed » est affiché pour tout `port_not_open`, y compris pour les anciens événements (libellé répété trois fois) ; le rapport HTML affiche `details['detail']` brut.
++- **Statut** : **distinction approuvée** (deux catégories). **Libellé non tranché** (DEC-03). Ticket planifié **après D5**.
++- **Priorité** : P2.
++- **Dépendances** : **D5** (la distinction exige la preuve) ; **DEC-03** (libellé exact). Aucun changement de libellé avant DEC-03.
++- **Périmètre** : `sentinel/monitor_view.py` (`_PORT_NOT_OPEN_DETAIL` l.49, `presentation_detail` l.52-61) ; `reports/sentinel_report.py` l.27-35 ; `tests/test_sentinel_event_display.py` l.76-82 (à réviser).
++- **Critères** : `SENTINEL-TCP-STATES.md` §7.3 ; CA-16 (rattaché à D1, §9.2). D1 utilise la preuve produite par D5 pour distinguer événements nouveaux et historiques.
++- **Tests** : événement avec preuve vs historique sans preuve.
++- **Ticket suivant** : selon l'ordre (§5), TOOL-01.
++
++#### D6 — Politique des ports filtrés à l'apprentissage baseline (ticket indépendant hors A1)
++
++- **Anomalie** : `learn_baseline` accepte un hôte entièrement filtré avec baseline `{}` ; chaque port ouvert ensuite produit `new_port` (L1 et L2, mesurés ; `sentinel/baseline.py` l.480-490).
++- **Statut** : **Proposition**, ticket indépendant **hors A1**.
++- **Priorité** : P2.
++- **Dépendances** : aucune pour A1. **DEC-04** (C2, C3 ou statu quo) est examinée au moment du ticket D6.
++- **Périmètre** : `sentinel/baseline.py` ; `core/database.py` (`baseline.services` écrit `"{}"` l.1543 ; aucun lecteur logique trouvé, grep non exhaustif).
+ - **Critères** : à rédiger après DEC-04.
+-- **Tests** : L1, L2 ; contrat de `services` si D6-B.
+-- **Statut** : proposé ; décision requise.
++- **Tests** : L1 (80 filtré puis ouvert → `new_port`) et L2 (hôte entièrement filtré appris, puis `new_port`) ; contrat de `services` si la politique le modifie.
++
++### 4.2 Outils externes
+ 
+-### 3.3 Sentinel — reporting
++#### SMB-01 — `smb_enum` : échec d'outil présenté comme absence de résultat
+ 
+-**REP-01 — « 0 » du rapport = quota de notification (A3-1).**
+-- **Anomalie** : le « 0 » de la colonne « Affichées » est le quota 60 min par couple réseau/IP (`reports/sentinel_report.py` l.48 ; `sentinel/notifications.py` `LIMIT`/`WINDOW`) ; un `new_port` de 2 h s'affiche « 0 » (**Confirmé**, reproduit).
+-- **Priorité** : **P2**.
+-- **Périmètre** : libellé du rapport, `reports/templates/sentinel_status.html` l.28-29 (« quotas par hôte à la génération (60 dernières minutes) »).
+-- **Dépendances** : DEC-16 (formulation du libellé).
+-- **Critères** : le libellé indique « notifications affichées sur 60 min », pas « événements ».
+-- **Tests** : rendu HTML d'un réseau avec événement hors fenêtre.
+-- **Statut** : proposé.
+-
+-### 3.4 Outils externes et découverte
+-
+-**SMB-01 — `smb_enum` : échec d'outil présenté comme absence de résultat (B3-1, B3-3).**
+-- **Anomalie** : code de retour ignoré ; faux binaire rc=2 → « no shares or domain info », 0 finding (**Confirmé** en isolation) ; repli texte : regex doublement échappée, `users=()` pour « Account: alice » (**Confirmé**).
+-- **Priorité** : **P1** (faux négatif sur outil de sécurité).
+-- **Périmètre** : `detect/smb_enum.py` l.94 (`_resolve_tool_path`), l.138 (`_run_enum4linux_ng`), l.150 et l.183 (commande, `check=False`), `_normalize_text_output` (regex).
+-- **Dépendances** : aucune. Indépendant de TCP-01.
+-- **Critères** : rc≠0 → erreur explicite, aucun finding, message distinct de « no shares » ; stdout seul parsé ; repli texte lit « Account: alice ».
+-- **Tests** : `tests/test_smb_enum.py` l.122 (fige `-A --json <ip>`, à réviser après SMB-02) ; ajout : code non nul avec sortie non JSON ; faux binaire en HOME temporaire.
+-- **Statut** : proposé.
+-
+-**SMB-02 — Syntaxe d'export de `enum4linux-ng` (B3-2).**
+-- **Anomalie** : `--json` probablement inexistant (export JSON documenté `-oJ`). **Hypothèse forte, non vérifiée** avec la version installée.
+-- **Priorité** : **P2** (vérification d'abord, par lecture locale `--help`, sans scan).
+-- **Périmètre** : aucune modification avant vérification.
+-- **Dépendances** : SMB-01 pour le message d'échec.
+-- **Critères** : version installée identifiée ; option retenue confirmée par `--help` de cette version.
+-- **Tests** : mesure seule, consignée dans le ticket.
+-- **Statut** : **Hypothèse** — non ouvert comme bug.
+-
+-**TOOL-01 — `netlab doctor` ne vérifie que `--help` (B3-4).**
+-- **Anomalie** : `core/dependencies.py` l.118-135 : un `--help` réussi ne prouve pas l'existence des options utilisées (**Confirmé** par lecture).
+-- **Priorité** : **P2**.
+-- **Périmètre** : `core/dependencies.py`.
+-- **Dépendances** : SMB-02.
+-- **Critères** : doctor signale une option absente de la version installée.
++- **Anomalie** (confirmée en isolation) :
++  - le code de retour est ignoré (`check=False`, `detect/smb_enum.py` l.157) ; commande `-A --json` l.150 et commande affichée l.183 ;
++  - stdout et stderr sont fusionnés (l.169) ; le stderr est donc lu comme des données ;
++  - un faux binaire rc=2 produit « no shares or domain info » (l.133) et 0 finding ;
++  - repli texte : la regex `Account:\\s*(\\S+)` (l.509, chaîne brute) ne lit pas « Account: alice ». Reproduit par fonction pure : aucune correspondance, `users=()`.
++- **Constat rapporté** : l'export JSON de `enum4linux-ng` est `-oJ OUT_JSON_FILE` et `--json` n'existe pas dans la version 1.3.10. Constat **rapporté par le propriétaire, vérifié sur son poste** ; non reproduit dans l'environnement d'audit (`enum4linux-ng` absent).
++- **Priorité** : **P1** (faux négatif sur un outil de sécurité).
++- **Statut** : **Proposition**. Premier ticket de l'ordre. Aucune autorisation d'implémentation.
++- **Dépendances** : Étape 0 (§5.0). La vérification de compatibilité est SMB-02, exécutée dans le cadre de ce ticket.
++- **Périmètre** : `detect/smb_enum.py` (`_run_enum4linux_ng` l.138-173, commande l.150, `check=False` l.157, concaténation l.169, message l.183, `_normalize_text_output` l.486, regex l.509) ; `tests/test_smb_enum.py` l.122 (fige `-A --json <ip>`, à réviser).
++- **Critères** :
++  1. commande compatible avec la version installée (vérifiée par SMB-02) ;
++  2. lecture du fichier JSON produit par `-oJ <fichier>` ;
++  3. code retour non nul → erreur explicite, aucun finding, message distinct de « no shares » : **un code non nul n'est jamais assimilé à « aucun résultat »** ;
++  4. stdout et stderr séparés ; stderr jamais parsé comme donnée ;
++  5. repli texte : lit « Account: alice » ;
++  6. fichier JSON absent ou invalide → erreur explicite.
++- **Tests** : faux binaire rc=2 (HOME temporaire) ; code 0 sans JSON ; JSON valide ; regex sur « Account: alice ». Aucune exécution d'`enum4linux-ng` réel.
++- **Ticket suivant** : A1.
++
++#### SMB-02 — Vérification de compatibilité d'`enum4linux-ng`
++
++- **Nature** : **vérification**, non une hypothèse sur `--json`. Remplace la formulation v1 « `--json` probablement inexistant ».
++- **Contenu** : lecture de `--help` et de la version installée, sans scan. Consigner la version (1.3.10 rapportée) et les options réellement présentes (`-A`, `-oJ`).
++- **Critères** : version et options consignées dans le ticket SMB-01 ; aucune option supposée.
++- **Priorité** : P2, intégrée à SMB-01.
++
++#### TOOL-01 — `netlab doctor` ne vérifie que `--help`
++
++- **Anomalie** : un `--help` réussi ne prouve pas l'existence des options utilisées (`core/dependencies.py` `_detect_ng_version` l.141-152, appel `--help` l.152 ; confirmé par lecture).
++- **Statut** : Proposition. **P2.** Dépend de SMB-02.
++- **Critères** : `doctor` signale une option absente de la version installée.
+ - **Tests** : faux binaire sans l'option → signalé.
+-- **Statut** : proposé.
+ 
+-**OS-01 — Timeouts OS Nmap et « no usable fingerprint » (B4-1, B4-2).**
+-- **Anomalie** : `timeout=60` codé en dur (`recon/device_fingerprint.py` l.181-196) ; sortie partielle perdue à l'échéance (`core/process_control.py`) ; deux messages distincts sous le même libellé. **Causes non mesurées** : aucune cause confirmée.
+-- **Priorité** : **P2** : mesurer avant de corriger.
+-- **Périmètre** : `recon/device_fingerprint.py` l.64, l.181, l.199, l.368 ; `core/process_control.py`.
+-- **Dépendances** : DEC-12 (délai configurable ou non).
++### 4.3 Credentials et coffre
++
++#### CRED-01 — Coffre et bases sous `Path.home()` ≠ `_real_user_home()` sous sudo
++
++- **Anomalie** : sous `sudo`, le coffre peut être créé sous `/root` (reproduit par simulation de chemin ; rapport B2).
++- **Priorité** : **P1**.
++- **Statut** : Ticket planifié, **après A1**. **DEC-05** requise avant toute implémentation touchant un chemin de coffre ou de base.
++- **Périmètre** : résolveurs de chemins seulement. `Path.home()` (sans `_real_user_home()`) : `core/credential_vault.py` l.35 (coffre) ; `sentinel/whitelist.py` l.37 ; `detect/default_creds.py` l.221 ; `core/dependencies.py` l.174 ; `cli.py` l.1805 (rapports) ; `cleanup/restore.py` l.181 et l.193 ; `cleanup/artifact_detector.py` l.128 et l.146. `_real_user_home()` : `core/database.py` l.56-88. **Un chemin n'est changé que si sa divergence sous sudo est démontrée** ; la simulation (`env -i`, `HOME=/root`, `SUDO_USER=user`) montre `Path.home()` = `/root` et `_real_user_home()` = `/home/user`. Chaque site est confirmé par test avant tout changement.
++- **Critères** : chaque chemin modifié résout vers l'utilisateur réel sous sudo (test simulé) ; aucun autre chemin modifié ; test sans coffre réel.
++- **Tests** : HOME et coffre temporaires uniquement ; sudo simulé.
++- **Interdiction** : aucune migration, aucun déplacement, aucune suppression de coffre sans décision.
++- **Ticket suivant** : D5.
++
++#### Constat distinct — normalisation Unicode de la phrase du coffre (sans ticket)
++
++- **Constat** : `core/credential_vault.py` l.97-99 (`_derive`) encode la phrase en UTF-8 sans normalisation. Une même phrase saisie en NFC puis en NFD produit des octets différents, donc une clé scrypt différente (démontré sur une chaîne synthétique, paramètres réduits ; aucune phrase réelle utilisée).
++- **Statut** : constat, **sans ticket**. Toute modification changerait la clé des coffres existants : stratégie de compatibilité à arbitrer (**DEC-17**) avant tout ticket.
++- **Interdiction** : ne jamais demander, reproduire ni journaliser la phrase réelle.
++
++#### CRED-02 — SSH sans candidat : **conforme, sans ticket**
++
++- **Constat** : `docs/T22-CREDENTIALS.md` définit SSH comme explicite. SSH n'est contrôlé que par `--service ssh`. Sans candidat SSH (catalogue sans profil SSH, ou `--dict` sans ligne `ssh`), la commande échoue explicitement. Un profil SSH produit (par exemple `--profile dell-idrac-legacy-root`) reste utilisable.
++- **Décision** : comportement **conforme** à T22. **Aucun ticket. Aucun ajout de candidat SSH générique.**
++
++#### CRED-03 — Message de coffre incomplet
++
++- **Anomalie** : la règle des 8 caractères distincts n'apparaît pas dans le message (lecture).
++- **Priorité** : P3. Proposition. Aucune dépendance.
++- **Critères** : message complet, sans révéler de valeur. **Tests** : le message contient la règle ; aucun secret journalisé.
++
++### 4.4 Reporting, scoring, découverte et identifiants
++
++#### REP-01 — « 0 » du rapport = quota de notification
++
++- **Anomalie** : le « 0 » de la colonne « Affichées » est le quota 60 min par couple réseau/IP (`sentinel/notifications.py` `WINDOW` l.7, `LIMIT` l.8). Un `new_port` de deux heures s'affiche « 0 » (reproduit).
++- **Périmètre** : `reports/templates/sentinel_status.html` l.28 (« quotas par hôte à la génération (60 dernières minutes) ») ; `sentinel/monitor_view.py` l.122 (« Affichées ») et l.129 (« Affichées (60 min) ») ; `sentinel/notifications.py` `WINDOW` l.7 et `LIMIT` l.8 ; `tests/test_sentinel_presentation.py` l.55 (asserte « Affichées »).
++- **Priorité** : P2. **Dépend de DEC-16.**
++- **Critères** : le libellé indique « notifications affichées sur 60 min », pas « événements ». **Tests** : rendu HTML d'un réseau avec événement hors fenêtre.
++
++#### OS-01 — Timeouts OS Nmap et « no usable fingerprint »
++
++- **Anomalie** : `timeout=60` codé en dur (`recon/device_fingerprint.py` l.196, dans `_run_nmap_os` l.181) ; sortie partielle perdue à l'échéance (`core/process_control.py`) ; deux messages distincts sous un même libellé. **Causes non mesurées.**
++- **Statut** : **Hypothèse**. Mesurer avant de corriger. **P2.** **DEC-12** requise pour le délai.
+ - **Critères** : temps réel mesuré sur hôte de test autorisé ; messages distincts pour timeout et absence d'`osmatch`.
+-- **Tests** : fixtures XML sans `osmatch` ; `TimeoutExpired` simulé.
+-- **Statut** : **Hypothèse** (causes) ; mesure requise.
+ 
+-### 3.5 Identifiants et interface
++#### SCO-01 — Libellé « CVSS » (Partiel)
+ 
+-**A2-01 — `sentinel findings show` refuse un préfixe accepté par `findings show` (A2-1).**
+-- **Anomalie** : `core/database.py` `resolve_finding_id` l.597 vs `sentinel_read_finding` l.2034 : règles de résolution différentes (**Confirmé** par lecture).
+-- **Priorité** : **P2**.
+-- **Périmètre** : `core/database.py` l.597, l.2034 ; `cli.py` (sous-commandes `findings`/`sentinel findings`).
+-- **Dépendances** : DEC-11 (option (a), (b) ou (c)).
+-- **Critères** : même règle pour les deux commandes (option retenue).
+-- **Tests** : préfixe accepté par les deux, ou refus identique et message cohérent.
+-- **Statut** : proposé ; décision requise.
+-
+-**A2-02 — Nom de commande dans la demande (A2-2).**
+-- **Anomalie** : `findings rescan` existe ; le nom « rescan findings » n'existe pas (**Documentation**).
+-- **Priorité** : **P3**.
+-- **Périmètre** : documentation seulement.
+-- **Dépendances** : aucune.
+-- **Critères** : documentation indique `findings rescan`.
+-- **Tests** : aucun.
+-- **Statut** : proposé.
++- **Constat** : la valeur « 5.0 » est un `risk_score` (formule à `core/risk_scorer.py` l.113). Le libellé « CVSS » n'est pas trouvé dans la sortie produit ; seul un gabarit HTML conditionnel (`reports/templates/report.html` l.857-858) l'affiche, si `cvss_score` n'est pas nul. **Partiel.** P2, à confirmer. **DEC-09.**
+ 
+-### 3.6 Credentials et coffre
++#### SCO-02 — Port `info` CONFIRMED et OPEN dans le score global
+ 
+-**CRED-01 — Coffre et bases sous `Path.home()` ≠ `_real_user_home()` sous sudo (B2-1).**
+-- **Anomalie** : sous `sudo`, le coffre peut être créé sous `/root` (**Reproduit** par simulation de chemin, rapport B2 §0 P1).
+-- **Priorité** : **P1**.
+-- **Périmètre** : `core/credential_vault.py` l.34-35 ; chemins de base dans `core/database.py`.
+-- **Dépendances** : **DEC-05** (emplacement cible et procédure de migration). Aucune migration sans décision : **ne pas déplacer, migrer ni supprimer de coffre**.
+-- **Critères** : chemin unique résolu par utilisateur réel ; test sans coffre réel.
+-- **Tests** : HOME et coffre temporaires uniquement ; sudo simulé.
+-- **Statut** : proposé ; décision requise.
++- **Anomalie** : `get_global_score` (`core/risk_scorer.py` l.207) n'exclut que `device_fingerprint` (`INVENTORY_MODULES` l.101). **Décision produit** ; **DEC-07**. P2.
+ 
+-**CRED-02 — `--service ssh` sans candidat SSH par défaut (B2-2).**
+-- **Anomalie** : catalogue `legacy` = FTP + SNMP ; SSH absent (`detect/credential_dictionary.py` l.200) ; « messages précis masqués volontairement » (rapport B2, P2).
+-- **Priorité** : **Décision** (non un bug : choix produit documenté).
+-- **Périmètre** : catalogue ou `--dict`.
+-- **Dépendances** : **DEC-06**.
+-- **Critères** : comportement choisi et documenté.
+-- **Tests** : selon choix.
+-- **Statut** : décision produit.
+-
+-**CRED-03 — Message de coffre incomplet (B2-3).**
+-- **Anomalie** : la règle des 8 caractères distincts n'apparaît pas dans le message (**Confirmé** par lecture).
+-- **Priorité** : **P3**.
+-- **Périmètre** : message du coffre (`core/credential_vault.py`).
+-- **Dépendances** : aucune.
+-- **Critères** : message complet, sans révéler de valeur.
+-- **Tests** : message contient la règle ; aucun secret journalisé.
+-- **Statut** : proposé.
+-
+-### 3.7 Scoring
+-
+-**SCO-01 — Libellé « CVSS » (B5-1). Statut révisé : Partiel.**
+-- **Anomalie** : la valeur « 5.0 » est bien un `risk_score` (`core/risk_scorer.py` l.109 ; 5 × 1,00 × 1,00). **Le libellé « CVSS » n'est pas trouvé en sortie produit** : seul `reports/templates/report.html` l.857-858 l'affiche, et seulement si `cvss_score` n'est pas nul (**non vérifié** dans l'affichage terminal). Le constat « CVSS 5.0 affiché » du rapport global n'est donc pas établi par recherche statique.
+-- **Priorité** : **P2** (à confirmer avant correction).
+-- **Périmètre** : à confirmer ; `reports/templates/report.html` l.857-858 si le libellé est confirmé.
+-- **Dépendances** : aucune.
+-- **Critères** : une sortie contenant « CVSS » pour un `risk_score` est impossible.
+-- **Tests** : rendu d'un port `info` CONFIRMED sans `cvss_score`.
+-- **Statut** : **Partiel** ; à confirmer.
+-
+-**SCO-02 — Port `info` CONFIRMED et OPEN dans le score global (B5-2).**
+-- **Anomalie** : `get_global_score` (`core/risk_scorer.py` l.207) n'exclut que `device_fingerprint` (`INVENTORY_MODULES`, l.101) ; un port `info` ouvert donne 5,0 (**Confirmé** par lecture).
+-- **Priorité** : **P2**.
+-- **Périmètre** : `core/risk_scorer.py` l.101, l.207.
+-- **Dépendances** : **DEC-07**.
+-- **Critères** : décision appliquée et testée.
+-- **Tests** : score global avec seul port `info` ouvert.
+-- **Statut** : **Décision** (produit).
+-
+-**SCO-03 — Ports 512, 513, 514 sans règle (B5-3).**
+-- **Anomalie** : aucune entrée dans `cve_db.json`, `ports.json` (512-514 = `None`), `vulnerabilities.json`, ni dans le code (recherche complète).
+-- **Priorité** : **P3**.
+-- **Périmètre** : `knowledge/`, éventuellement une règle dédiée.
+-- **Dépendances** : **DEC-08** (risque voulu ou non).
+-- **Critères** : décision documentée.
+-- **Tests** : si règle ajoutée, avec source et sévérité justifiées.
+-- **Statut** : **Décision**.
+-
+-### 3.8 Divers
+-
+-**VERIFY-01 — Findings `sentinel.*` en PARTIAL « Unsupported module » (B1-1).**
+-- **Anomalie** : confirmé par lecture (rapport global §3.B1).
+-- **Priorité** : **P3**.
+-- **Périmètre** : module VERIFY.
+-- **Dépendances** : aucune.
+-- **Critères** : contrôle dédié ou décision de ne pas en avoir.
+-- **Tests** : à définir.
+-- **Statut** : **Décision** (contrôle dédié ou non).
+-
+-**NET-01 — Réseau `192.168.57.0/24` surveillé de façon inattendue (C).**
+-- **Anomalie** : cause non établie. Le CIDR est celui passé à `--target` ; le code ne choisit pas ce réseau. `~/.netlab` n'a pas été lu (interdit par la mission).
+-- **Priorité** : **P1 provisoire** (P0 si un démarrage non voulu est confirmé). Aucun P0 n'est confirmé.
+-- **Périmètre** : aucun code. Diagnostic par le propriétaire (historique de commandes, `~/.netlab` sous sa responsabilité).
+-- **Dépendances** : DEC-10.
+-- **Critères** : cause identifiée par le propriétaire.
+-- **Tests** : aucun.
+-- **Statut** : **Hypothèse** ; pas de ticket de code.
+-
+-**DOC-01 — Dérives de la documentation maître (DOC-1).**
+-- **Anomalie** : HEAD déclaré `3657498` (MASTER-REFERENCE §2 l.28 ; IMPLEMENTATION-TRACKING l.57) ; `9034f01` non consigné ; `CONFIDENCE-CLI` marqué « commit en attente » alors que `85870ac` est présent dans `origin/a4-arena` ; six commits non consignés (voir §6.4bis du MASTER-REFERENCE proposé). **Confirmé** par `git cat-file -e` et `git log`.
+-- **Priorité** : **P2**.
+-- **Périmètre** : `docs/MASTER-REFERENCE.md`, `docs/IMPLEMENTATION-TRACKING.md`. **Patches proposés** : `docs-proposees/MASTER-REFERENCE.md`, `docs-proposees/IMPLEMENTATION-TRACKING.md` (diffs dans `diffs/`).
+-- **Dépendances** : approbation du plan (DEC-02).
+-- **Critères** : HEAD et tous les commits cités existent ; statut CONFIDENCE-CLI conforme à la preuve.
+-- **Tests** : `git cat-file -e` sur chaque SHA cité.
+-- **Statut** : proposé (patch prêt, non appliqué).
+-
+-**DOC-02 — Chemins et références non portables (DOC-2).**
+-- **Anomalie** : `/home/anonymous/sentinelX` (MASTER-REFERENCE l.26, l.310-311) ; Skills vers un chemin de steering en minuscules inexistant ; `ARENA.md` cité comme téléchargement propriétaire alors que le chemin réel est `uploads/ARENA.md`.
+-- **Priorité** : **P3**.
+-- **Périmètre** : `docs/`, `.kiro/skills/` (**Skills canoniques : ne pas modifier sans demande**).
+-- **Dépendances** : DEC-14.
+-- **Critères** : chemins vérifiables sur le dépôt.
+-- **Tests** : `ls` sur chaque chemin cité.
+-- **Statut** : proposé.
++#### SCO-03 — Ports 512, 513, 514 sans règle
+ 
+----
++- **Constat** : aucune entrée dans `cve_db.json`, `ports.json` (512-514 = `None`) ni `vulnerabilities.json`. **Décision produit** ; **DEC-08**. P3.
+ 
+-## 4. Ordre recommandé
++#### A2-01 — Résolution d'identifiants incohérente
+ 
+-Règles : **A1 avant D5** ; **D1 après D5** ; **D6 indépendant** ; le reste selon urgence et dépendances.
++- **Anomalie** : `core/database.py` `resolve_finding_id` l.597 et `sentinel_read_finding` l.2034 : règles différentes. **DEC-11.** P2.
++- **Critères** : même règle pour `findings show` et `sentinel findings show`.
+ 
+-| Rang | Ticket | Motif | Bloqué par |
+-|---|---|---|---|
+-| 1 | SMB-01 | P1, indépendant, petit périmètre | — |
+-| 2 | TCP-01 | P1, base de A1 | — |
+-| 3 | TCP-02 | P1, cœur de A1 | TCP-01 |
+-| 4 | TCP-03 | P1, prévention des fermetures de masse, tests | TCP-02 |
+-| 5 | TCP-04 | P2, confirmation R7 et réserve | TCP-02 |
+-| 6 | CRED-01 | P1, emplacement du coffre | DEC-05 |
+-| 7 | TCP-05 | D5-B, après A1 | TCP-02 |
+-| 8 | TCP-06 | D1, après D5 | TCP-05, DEC-03 |
+-| 9 | SMB-02 | vérification (hypothèse) | — |
+-| 10 | TOOL-01 | P2 | SMB-02 |
+-| 11 | REP-01 | P2 | DEC-16 |
+-| 12 | A2-01 | P2 | DEC-11 |
+-| 13 | SCO-01 | P2, à confirmer | — |
+-| 14 | SCO-02 | P2, décision | DEC-07 |
+-| 15 | OS-01 | P2, mesure d'abord | DEC-12 |
+-| 16 | DOC-01 | P2, patch prêt | approbation du plan |
+-| 17 | D6-01 | P2, hors A1 | DEC-04 |
+-| 18 | CRED-02, CRED-03 | décision ; P3 | DEC-06 |
+-| 19 | SCO-03, VERIFY-01 | P3, décision | DEC-08, — |
+-| 20 | DOC-02, A2-02 | P3 | DEC-14 |
+-| — | NET-01 | diagnostic du propriétaire, hors code | DEC-10 |
++#### A2-02 — Nom de commande dans la demande
++
++- **Constat** : `findings rescan` existe ; « rescan findings » n'existe pas. Documentation seulement. P3.
++
++#### VERIFY-01 — Findings `sentinel.*` en PARTIAL « Unsupported module »
++
++- **Constat** : confirmé par lecture. **Décision** : contrôle dédié ou non. P3.
++
++#### DOC-01 — Dérives de la documentation maître
++
++- **Anomalie** : HEAD déclaré `3657498` (`docs/MASTER-REFERENCE.md` §2 l.28 ; `docs/IMPLEMENTATION-TRACKING.md` l.57) alors que le HEAD réel est `9034f01` ; `CONFIDENCE-CLI` marqué « commit en attente » (`docs/MASTER-REFERENCE.md` l.163) alors que `85870ac` est présent dans `origin/a4-arena` ; six commits non consignés. **Confirmé** par `git cat-file -e` et `git log`.
++- **Statut** : **Proposition** ; patchs prêts dans `docs-proposees/` (non appliqués à `docs/`). **P2.** **Dépend de DEC-02.** **Hors séquence des tickets : traité par l'Étape 0 (§5.0), avant SMB-01.**
++- **Critères** : HEAD et tous les SHA cités existent ; statut CONFIDENCE-CLI conforme à la preuve.
++
++#### DOC-02 — Chemins et références non portables
++
++- **Constats reproduits** :
++  - `.cursor/rules/sentinelX.mdc` l.9 : référence `.kiro/steering/sentinelx.md` en minuscules. Le fichier réel est `.kiro/steering/sentinelX.md` (majuscule X). Le chemin est cassé sous Linux. **Reproduit** (ls).
++  - Chemins absolus démontrés : `docs/MASTER-REFERENCE.md` l.26 et l.310-311 (`/home/anonymous/sentinelX`). **Constat conservé** ; correction proposée dans `docs-proposees/` (non appliquée à `docs/`).
++- **Constats retirés** :
++  - `.kiro/skills/impl-tracking.md` ne référence pas le steering : **pas de constat de casse sur ce Skill**. Le Skill canonique n'est pas modifié ; la proposition de Skill Kiro (correction de date) est **retirée du paquet actif** (V2.2) ; le fichier reste dans le dossier d'audit.
++- **Hors périmètre documentaire (décision séparée, DEC-14)** : `core/dependencies.py` l.48-49 (défauts `/home/anonymous/enum4linux-ng/...`). Non modifié.
++- **Références non portables à « téléchargements du propriétaire »** : `docs/MASTER-REFERENCE.md` l.5 et l.282 ; `docs/IMPLEMENTATION-TRACKING.md` l.5. **ARENA.md** est hors dépôt (`git ls-files` sans résultat) ; son rôle est à vérifier (§3).
++- **Priorité** : P3. Aucune dépendance.
++- **Périmètre** : `docs/` (propositions dans `docs-proposees/`) ; `.cursor/rules/sentinelX.mdc` (diff limité à la casse). **Aucun Skill canonique n'est modifié.**
++- **Tests** : `ls` sur chaque chemin cité.
++
++### 4.5 Net — hors code
++
++#### NET-01 — Réseau `192.168.57.0/24` : **non reproduit, sans ticket de code**
++
++- **Constat** : anomalie « réseau surveillé de façon inattendue » **non reproduite**. Le réseau est fourni explicitement via `--target` (**obligatoire**) ; rien dans le code ne le sélectionne.
++- **Décision** : pas de ticket de code. **Le P1 provisoire et DEC-10 sont retirés.**
++- **Limite** : `~/.netlab` n'a pas été lu (interdit par la mission).
+ 
+ ---
+ 
+-## 5. Décisions restantes (à soumettre au propriétaire)
++## 5. Ordre de réalisation
+ 
+-| Réf. | Point | Recommandation |
+-|---|---|---|
+-| DEC-01 | Emplacement canonique de la spec A1 | `docs/SENTINEL-TCP-STATES.md` |
+-| DEC-02 | Approbation du plan et des patches documentaires (`docs-proposees/`) | Approuver après revue Kiro |
+-| DEC-13 | Révision d'ARENA §9.6 (texte du §6) : acte du propriétaire, à faire dans ARENA | Décider après DEC-02 |
+-| DEC-03 | Libellé exact D1 | Non tranché ; proposition : « Port N closed (2 observations complètes consécutives) » pour les événements avec preuve ; « Port N not open (historique, preuve absente) » pour l'historique |
+-| DEC-04 | Politique des ports filtrés à l'apprentissage (D6) | C2 ou C3 ; statu quo D6-A = C1 en attendant |
+-| DEC-05 | Emplacement du coffre et migration (CRED-01) | Décision et procédure avant tout déplacement |
+-| DEC-06 | SSH : catalogue ou `--dict` seul (CRED-02) | Choix produit |
+-| DEC-07 | Port `info` ouvert dans le score global (SCO-02) | Non : inventaire, comme `device_fingerprint` |
+-| DEC-08 | Règle 512-514 (SCO-03) | Choix produit |
+-| DEC-09 | Libellé « CVSS » (SCO-01) | Renommer en « score de risque (interne) » si confirmé |
+-| DEC-10 | Réseau `192.168.57.0/24` (NET-01) | Diagnostic du propriétaire |
+-| DEC-11 | Résolution d'identifiants (A2-01) | Option (a), (b) ou (c) au choix |
+-| DEC-12 | Délai OS (OS-01) | Mesure d'abord ; délai configurable ensuite |
+-| DEC-14 | Chemins non portables (DOC-02) | Corriger en P3 |
+-| DEC-15 | Réserve redémarrages répétés (TCP-04, S3) | Accepter explicitement ou rejeter |
+-| DEC-16 | Libellé « Affichées » du rapport (REP-01) | « Notifications affichées sur 60 min » |
++### 5.0 Étape 0 — Mise à jour documentaire préalable
++
++- **Nature** : étape documentaire, **hors séquence des tickets techniques**. Elle sort DOC-01 (§4.4) de la séquence.
++- **Contenu** :
++  - Master Reference : `docs/MASTER-REFERENCE.md` (patch de référence : `diffs/master-reference.diff`) ;
++  - Implementation Tracking : `docs/IMPLEMENTATION-TRACKING.md` (patch : `diffs/impl-tracking.diff`) ;
++  - spécification canonique A1 : `docs/SENTINEL-TCP-STATES.md`, emplacement proposé (patch : `diffs/SENTINEL-TCP-STATES.diff`) ;
++  - réconciliation DOC-01 des commits et références (HEAD déclaré, CONFIDENCE-CLI, six commits non consignés).
++- **Entrée** : validation du plan par le propriétaire (DEC-02).
++- **Condition de sortie** (toutes requises) :
++  1. patch documentaire **appliqué par le propriétaire** (aucun agent n'écrit dans `docs/`) ;
++  2. dépôt vérifié : HEAD, SHA cités et statut CONFIDENCE-CLI conformes à `git log` et `git cat-file -e` ;
++  3. décisions et spécifications présentes dans les fichiers canoniques (bloc « Décisions A1 approuvées », spécification A1, critères CA).
++- **Suivant** : **SMB-01**. Aucune étape technique n'est avancée ni modifiée par l'Étape 0.
++
++### 5.1 Séquence technique
++
++Règles : SMB-01, puis A1 (unité complète), puis CRED-01, puis D5 **après A1**, puis D1 **après D5**. Les autres tickets suivent leurs dépendances et leur priorité. **D6 est indépendant** et n'entre dans aucune séquence. Le « suivant » est désigné au moment de la validation du ticket. **SMB-01 ne commence qu'après l'Étape 0.**
++
++| Rang | Ticket | Priorité | Statut | Bloqué par | Suivant (si validé) |
++| 0 | Étape 0 (§5.0) : DOC-01, Master, Tracking, spec A1, réconciliation | — | Préalable ; après validation du plan | DEC-02 | SMB-01 |
++|---|---|---|---|---|---|
++| 1 | SMB-01 (+ SMB-02) | P1 | Proposition | Étape 0 | A1 |
++| 2 | A1 (TCP-01 à TCP-04) | P1 | Proposé, non implémenté ; autorisation requise | — | CRED-01 |
++| 3 | CRED-01 | P1 | Planifié, après A1 | A1 ; DEC-05 | D5 |
++| 4 | D5 | P3 | Conception approuvée ; implémentation non autorisée | A1 | D1 |
++| 5 | D1 | P2 | Distinction approuvée ; libellé ouvert | D5, DEC-03 | TOOL-01 |
++| 6 | TOOL-01 | P2 | Proposition | SMB-02 (dans SMB-01) | REP-01 |
++| 7 | REP-01 | P2 | Proposition | DEC-16 | OS-01 |
++| 8 | OS-01 | P2 | Hypothèse ; mesure d'abord | DEC-12 | SCO-01 |
++| 9 | SCO-01 | P2 | Partiel ; à confirmer | DEC-09 | SCO-02 |
++| 10 | SCO-02 | P2 | Décision produit | DEC-07 | A2-01 |
++| 11 | A2-01 | P2 | Proposition ; décision | DEC-11 | CRED-03 |
++| 12 | CRED-03 | P3 | Proposition | — | SCO-03 |
++| 13 | SCO-03 | P3 | Décision produit | DEC-08 | VERIFY-01 |
++| 14 | VERIFY-01 | P3 | Décision | — | DOC-02 |
++| 15 | DOC-02 | P3 | Proposition | — | A2-02 |
++| 16 | A2-02 | P3 | Proposition | — | — |
++| — | D6 | P2 | Proposition ; **indépendant** | DEC-04 (au moment du ticket) | — |
++| — | CRED-02 | — | **Conforme, sans ticket** | — | — |
++| — | NET-01 | — | **Non reproduite, sans ticket** | — | — |
+ 
+-**Décisions déjà approuvées** (intégrées, non ouvertes) : remise à zéro sur hôte absent (V4) ; fermetures individuelles après deux `closed` explicites pour tous les ports connus ; aucun seuil global ; G-c reportée ; aucune fermeture sur `closed` → `filtered` ; validation XML commune ; D5-B ; D1 à deux catégories ; D6 hors A1 ; compteurs intermédiaires non restaurés.
++Tableau détaillé des tickets et dépendances : `docs-proposees/TABLEAU-tickets-dependances.md`.
+ 
+ ---
+ 
+-## 6. Texte proposé pour ARENA §9.6 (non appliqué ; décision propriétaire)
++## 6. Texte proposé pour ARENA §9.6 (non appliqué)
+ 
+-ARENA §9.6 est déclaré « règle définitive ». Le texte actuel est incompatible avec les décisions approuvées sur un point : `[]` (scan complet, zéro `open`) incrémente aujourd'hui les compteurs, alors que seul un `closed` explicite doit compter. Proposition de remplacement de la section « Traitement TCP » :
++ARENA §9.6 est supersédée par la politique A1 approuvée. La mise à jour proposée se trouve dans `docs-proposees/` ; **`docs/` n'est pas modifié**. Le texte de §9.6 (révision 13) est incompatible sur ce point : `[]` (scan complet sans `open`) incrémente les compteurs, alors que la politique A1 approuvée ne retient qu'un `closed` explicite.
+ 
+ > **Traitement TCP (révision proposée).**
+ > - Un compteur par port connu. Il n'est incrémenté que par une observation TCP complète où le port est explicitement `closed`.
+ > - Deux observations `closed` complètes et consécutives : `port_not_open`, compteur remis à zéro, port retiré de `known_open`. Pas de réémission tant que le port reste absent.
+ > - `filtered`, `open|filtered`, état inconnu ou invalide : remise à zéro du compteur du port, aucune conclusion.
+ > - `None` (scan incomplet) ou hôte sans observation TCP complète dans le cycle : remise à zéro du compteur de tous les ports de l'hôte.
+-> - `[]` (scan complet sans port `open`) : n'est pas une preuve de fermeture ; les compteurs des ports sont traités selon leur état explicite.
++> - `[]` (scan complet sans port `open`) : n'est pas une preuve de fermeture ; les compteurs sont traités selon l'état explicite de chaque port.
+ > - Un hôte entièrement `filtered` ne produit aucune fermeture.
+ > - Aucune fermeture confirmée sur passage `closed` → `filtered`.
+ > - Les compteurs intermédiaires ne sont pas restaurés après redémarrage.
+ 
+ ---
+ 
+-## 7. Corrections apportées à l'audit (par rapport aux documents précédents)
++## 7. Correspondance des anciens identifiants
++
++| Ancien identifiant (v1 et sources) | Nouveau traitement |
++|---|---|
++| A1-1 (`filtered` → fermeture) | A1 (TCP-01, TCP-02) |
++| A1-2 (compteurs non restaurés) | A1 (TCP-04, R7) |
++| A1-2 complément (hôte entièrement filtré) | A1 (TCP-03) |
++| A1-3 (états non prévus fail-open) | A1 (TCP-01) |
++| A1-4 (trois libellés) | D1 |
++| A1-5 (`states` jetés) | A1 (TCP-01) |
++| A1-6 (compteurs non reconstruits) | A1 (TCP-04, R7) |
++| A1-7 (baseline sous filtrage → `new_port`) | D6 (hors A1) |
++| A1-8 (`evidence` non persistée) | D5 |
++| TCP-05 (v1) | **D5** |
++| TCP-06 (v1) | **D1** |
++| TCP-04 (v1, autonome) | **Sous-tâche de non-régression de A1** (plus de ticket autonome) |
++| B2-1 | CRED-01 |
++| B2-2 (SSH) | **CRED-02, conforme** (plus de ticket) |
++| B2-3 | CRED-03 |
++| B3-1, B3-3 | SMB-01 |
++| B3-2 (`--json`) | SMB-02, **vérification** (plus d'hypothèse sur `--json`) |
++| B3-4 | TOOL-01 |
++| A2-1 | A2-01 |
++| A2-2 | A2-02 |
++| A3-1 | REP-01 |
++| B1-1 | VERIFY-01 |
++| B4-1, B4-2 | OS-01 |
++| B5-1, B5-2, B5-3 | SCO-01, SCO-02, SCO-03 |
++| C-1 (réseau `192.168.57.0/24`) | NET-01, **non reproduit, sans ticket** |
++| DOC-1 | DOC-01 (Étape 0) |
++| DOC-2 | DOC-02 |
++
++---
+ 
+-| Élément | Avant | Après | Motif |
++## 8. Corrections apportées par rapport à la version 1
++
++| Élément | Version 1 | Version 2 | Motif (revue Kiro, sauf mention) |
+ |---|---|---|---|
+-| B5-1 « CVSS » | Confirmé (P2) | **Partiel** | La valeur est un `risk_score` ; le libellé « CVSS » n'est pas trouvé en sortie (seul un gabarit HTML conditionnel) |
+-| B2-2 SSH | Reproduit, P2 | **Décision produit** | Choix documenté (rapport B2, P2 décision) ; pas une anomalie de code |
+-| B3-2 `--json` | Cause probable | **Hypothèse forte** | Non vérifiée avec le binaire installé |
+-| A1-1 (filtered) | P2 | **P1** | Fausse fermeture reproduite en chaîne (S7, S8) et règle approuvée |
+-| A1-2 (compteurs non restaurés) | P3, à corriger | **Décision approuvée (R7)** | Pas de ticket de restauration |
+-| Hôte absent (V4) | « conservé » | **Remise à zéro (approuvé)** | Décision propriétaire |
+-| P11, P12 | Non mesurés | **Mesurés** : `prod=[22]`, `valid=True` ; identiques run 4 et run 5 | `RAPPORT-verification-A1` §12 |
+-| Verdicts `conforme` de la section `parse` | Lus comme conformité spec | **Comportement de production attendu uniquement** | `RAPPORT-verification-A1` §12 |
+-| Spécification « référence » `/tmp/audit-spec-ref` | Cité | **Absent** ; clone `/tmp/audit-global-ref` | — |
++| Date de rédaction | 2026-09-24 | **2026-11-12** | Date de mission de référence |
++| A1 | Trois tickets autonomes TCP-01 à TCP-03, TCP-04 autonome | **Ticket parent unique**, sous-tâches internes, TCP-04 en non-régression | Revue Kiro |
++| A1 | Non traité comme unité | **Unité complète** : hôte absent, hôte entièrement filtré, fermetures individuelles, `closed → filtered`, attributions XML | Revue Kiro |
++| D5 | « Approuvé, à planifier » | **Conception approuvée, implémentation non autorisée**, après A1, priorité P3 | Revue Kiro |
++| D1 | Bloqué par DEC-03 et TCP-05 | **Distinction approuvée**, libellé ouvert, après D5 | Revue Kiro |
++| D6 | Dépendance DEC-04 | **Indépendant hors A1** ; DEC-04 examinée au moment du ticket | Revue Kiro |
++| CRED-02 | Décision produit (DEC-06) | **Conforme, sans ticket** | Revue Kiro ; conforme à T22 |
++| SMB-01 | `--json`, code de retour ignoré | Complété : export `-oJ`, lecture du JSON, code retour, stdout/stderr séparés, repli texte | Revue Kiro (rapporté, vérifié sur le poste du propriétaire) |
++| SMB-02 | Hypothèse « `--json` probablement inexistant » | **Vérification de compatibilité** intégrée à SMB-01 | Revue Kiro |
++| NET-01 | P1 provisoire, DEC-10 | **Non reproduit, sans ticket, DEC-10 retiré** | Revue Kiro |
++| ARENA §9.6 / DEC-13 | Décision à soumettre | **Supersédée** par la politique A1 approuvée | Revue Kiro |
++| DEC-15 | Réserve à accepter | **Retiré** : conséquence documentée de R7 | Revue Kiro |
++| DEC-01 | Décision d'emplacement | **Proposition** justifiée par la convention de `docs/` | Revue Kiro |
++| DOC-02 | Skills vers steering en minuscules ; `uploads/ARENA.md` | **Constat recentré sur `.cursor/rules/sentinelX.mdc`** ; Skill `impl-tracking.md` retiré du constat ; chemins absolus conservés | Revue Kiro |
++| Ordre | Voir v1 §4 | Étape 0 (DOC-01, Master, Tracking, spec A1, réconciliation) ; SMB-01 ; A1 ; CRED-01 ; D5 après A1 ; D1 après D5 ; D6 indépendant | Revue Kiro |
++| Seconde revue Kiro (V2.2) — séquence | DOC-01 dans la séquence technique | **Étape 0** préalable à SMB-01 ; DOC-01 hors séquence | Seconde revue Kiro |
++| Seconde revue Kiro (V2.2) — CA-16 | CA-16 dans les critères A1 | **Rattaché à D1** (§9.2 de la spécification) ; A1 n'exige ni `proof` ni libellé | Seconde revue Kiro |
++| Seconde revue Kiro (V2.2) — Skill | Proposition de Skill Kiro dans le paquet | **Retirée du paquet actif** ; fichier conservé dans le dossier d'audit ; Skill canonique non modifié | Seconde revue Kiro |
++| Statuts | « Décision » et « Proposé » mélangés | Vocabulaire §0 distinct | Revue Kiro |
++| Date de la spec A1 | « Réconciliée le 2026-09-24 » | **Réconciliée le 2026-11-12** | Date de mission |
++| SPEC §2.3 l.49 | `ScanFailedError` l.626-636 | **l.629-636**, vidage l.632-633 | Vérification de code (`9034f01`) |
++| SPEC l.195 | « Fixture filtered (sortie réelle nmap 7.95) » | **« annotée »**, non prouvée (V6) | Contradiction interne relevée |
+ 
+ ---
+ 
+-## 8. Références de commits (`origin/a4-arena`, vérifiées par `git cat-file -e` et `git log`)
++## 9. Références de commits (`origin/a4-arena`, vérifiées par `git cat-file -e` et `git log`)
+ 
+-| Commit | Sujet (git) | Consigné dans docs ? |
+-|---|---|---|
+-| `365749878aa3e886da9cd33c2322fb75277c16ce` = `3657498` | feat(sentinel): implement T23-B network change detection | oui (HEAD déclaré, à corriger) |
+-| `13e7849` | fix Commit 3657498 (`requirements.txt`, 1 ligne) | non |
+-| `85870ac` | feat(cli): add confidence column to findings tables | non (marqué « en attente ») |
+-| `7ff3d89` | docs: add master reference, implementation tracking and agent skill | non |
+-| `63e1a7b` | feat(sentinel): interrupt nmap on stop request (point 1) | non |
+-| `b1ab727` | fix(sentinel): detect gateway on connected routes (point 2) | non |
+-| `e4f3f9e` | feat(sentinel): colour event types and label closed ports (ticket 3) | non |
+-| `9034f0131ebeaf63dc51bf217cea3ec3f6ab068e` = `9034f01` | feat(sentinel): number hosts in monitor table (ticket 4) | non (HEAD réel) |
++| Commit | Date git | Sujet (git) | Consigné dans `docs/` ? |
++|---|---|---|---|
++| `3657498` (`365749878aa3e886da9cd33c2322fb75277c16ce`) | 2026-11-10 | feat(sentinel): implement T23-B network change detection | Oui, comme HEAD déclaré (à corriger) |
++| `85870ac` | 2026-11-10 | feat(cli): add confidence column to findings tables | Non (marqué « en attente ») |
++| `7ff3d89` | 2026-11-10 | docs: add master reference, implementation tracking and agent skill | Non |
++| `13e7849` | 2026-11-10 | fix Commit 3657498 (`requirements.txt`, 1 ligne) | Non |
++| `63e1a7b` | 2026-11-10 | feat(sentinel): interrupt nmap on stop request (point 1) | Non |
++| `b1ab727` | 2026-11-11 | fix(sentinel): detect gateway on connected routes (point 2) | Non |
++| `e4f3f9e` | 2026-11-11 | feat(sentinel): colour event types and label closed ports (ticket 3) | Non |
++| `9034f01` (`9034f0131ebeaf63dc51bf217cea3ec3f6ab068e`) | 2026-11-11 | feat(sentinel): number hosts in monitor table (ticket 4) | Non (HEAD réel) |
+ 
+ Ordre git (`git log --reverse 3657498..9034f01`) : `85870ac`, `7ff3d89`, `13e7849`, `63e1a7b`, `b1ab727`, `e4f3f9e`, `9034f01`.
+ 
+ ---
+ 
+-## 9. Réserves
++## 10. Réserves
+ 
+-- **R-1 Horloge.** La date du jour fournie est 2026-09-24. L'horloge de la sandbox indique 2026-11-12, et les dates de commit (2026-11-10 et 2026-11-11) sont postérieures à 2026-09-24. Aucune conclusion chronologique n'est tirée de ces dates. À vérifier par le propriétaire.
++- **R-1 Dates.** La date de mission est le 12 novembre 2026. Les dates git (2026-11-10 et 2026-11-11) sont antérieures à cette date. Les dates des rapports antérieurs ne sont pas réconciliées (§ en-tête).
+ - **R-2** Structure réelle des `<extrareasons>` Nmap : non vérifiée hors fixtures. Le DTD valide le schéma seulement.
+ - **R-3** Sémantique réelle de `extraports state=open` : non vérifiée.
+ - **R-4** Comportement de `ScanDegradedError` en production au-delà des cas mesurés : non mesuré.
+ - **R-5** Lecteurs de `baseline.services` : grep non exhaustif ; aucun lecteur logique trouvé.
+-- **R-6** Le harnais `a1_chain_verify.py` remplace les sondes réseau ; un cycle = un appel de `_do_check`. Aucun scan réel.
++- **R-6** Le harnais `preuves/a1/a1_chain_verify.py` remplace les sondes réseau ; un cycle = un appel de `_do_check`. Aucun scan réel.
+ - **R-7** `preuves/a1/a1_model_spec.py` est une spécification exécutable, pas une preuve de conformité.
+-- **R-8** Les constats B3, B4, A2, A3, B1 et B5 sont des lectures ou des reproductions en isolation ; aucun n'a été vérifié sur le poste du propriétaire.
+-- **R-9** `~/.netlab` : non lu ni modifié pendant ce plan (4744 entrées mesurées antérieurement). Aucun secret demandé.
+-- **R-10** Aucun ticket n'est présenté comme bug confirmé s'il ne l'est pas : SCO-01, SMB-02, OS-01, NET-01 restent en hypothèse, partiel ou décision.
+-- **R-11** Les clones locaux non alignés (`/home/user/sentinelX` `2eb1b20`, 27 modifs ; `sentinelX-impl` `13e7849`, 12 ; `sentinelX-reference` `2283166`, 6) n'ont pas été touchés.
+-- **R-12** Une revue indépendante (Kiro) est requise avant toute décision (DEC-02).
++- **R-8** Les constats B3, B4, A2, A3, B1 et B5 sont des lectures ou des reproductions en isolation. Aucun n'est vérifié sur le poste du propriétaire, sauf le constat SMB-02 rapporté par le propriétaire.
++- **R-9** `~/.netlab` : non lu ni modifié (4744 entrées mesurées antérieurement). Aucun secret demandé.
++- **R-10** Aucun ticket n'est présenté comme bug confirmé s'il ne l'est pas : SCO-01, OS-01 restent en partiel ou en hypothèse ; CRED-02 et NET-01 sont clos sans ticket.
++- **R-11** Les clones locaux non alignés (`/home/user/sentinelX` `2eb1b20`, 27 modifications ; `sentinelX-impl` `13e7849`, 12 ; `sentinelX-reference` `2283166`, 6) n'ont pas été touchés.
++- **R-12** Revue Kiro effectuée ; seconde revue : « recevable après corrections » (V2.2). Décision propriétaire requise (DEC-02) avant l'Étape 0.
++- **R-13** Dossier de Kiro : `docs-processes/` et les doublons `(1)`/`(2)` sont introuvables dans l'environnement d'audit. Ils ne sont pas intégrés au paquet. Le dossier examiné reste à identifier.
++
++---
++
++## 11. Corrections de la spécification A1 (`SPEC-A1-consolidee.md`)
++
++- §2.3 l.49 : `ScanFailedError` est au bloc **l.629-636** (et non l.626-636) ; le vidage des compteurs est aux **l.632-633**.
++- l.195 : la fixture `filtered` unique est **« annotée »** comme sortie réelle nmap 7.95 ; cette annotation n'est pas prouvée (V6).
++- l.3 : date de réconciliation **2026-11-12**.
++
++---
++
++## 12. Contrôle avant livraison
++
++| Contrôle | Résultat |
++|---|---|
++| Cohérence des décisions : aucune décision approuvée redemandée | Voir §2 (décisions retirées de §3) |
++| Absence de statuts obsolètes | Voir §8 ; contrôle par grep dans la transmission |
++| Absence de chemins inventés | Chaque chemin cité a été vérifié dans `/tmp/audit-global-ref` (`9034f01`) ou dans l'espace d'audit |
++| Références de lignes | Vérifiées par `grep -n` / `sed -n` sur `9034f01` (2026-11-12) ; lignes corrigées : SMB-01, TOOL-01, REP-01, SCO-01, A1 (`monitor.py`) |
++| Cohérence statut / rang / dépendances | §4 et §5 concordants ; D5 = P3 partout ; CRED-01 après A1 |
++| Aucune anomalie auditée oubliée | Voir §7 : chaque identifiant A1, B1 à B5, A2, A3, C, DOC, CRED, NET a un traitement |
++| Critères d'acceptation complets | A1 : CA-1 à CA-15, CA-17, CA-18 + S1 à S11 + P1 à P12 (CA-16 : D1 ; L1, L2 : D6, hors A1) |
++| Séparation des tickets | Étape 0 (documentation) avant SMB-01 ; DOC-01 hors séquence technique |
++| Livraison à Nova pour seconde vérification indépendante par Kiro | **Dossier déposé, non transmis** : aucun canal disponible dans cet environnement |
++
++**Seconde vérification demandée à Kiro** : points de contrôle listés dans `docs-proposees/TRANSMISSION-revue-Kiro-et-Nova.md`.
+--- a/SPEC-A1-consolidee.md
++++ b/SPEC-A1-consolidee.md
+@@ -1,6 +1,9 @@
+ # SPEC-A1 consolidée — politique TCP approuvée (formalisation)
+ 
+-**Statut** : spécification pour ticket futur. **Aucune implémentation.** **Réconciliée le 2026-09-24** avec les décisions du propriétaire (statuts ci-dessous) ; reste une proposition tant que son emplacement canonique (DEC-01) n'est pas tranché. Version de référence proposée : `docs-proposees/SENTINEL-TCP-STATES.md`. Lecture seule ; aucun code, test, Skill, document maître, base ni `~/.netlab` modifié ; aucun scan réseau réel.
++> **DOCUMENT HISTORIQUE — NON NORMATIF.**
++> La référence normative des critères d'acceptation A1 est `SENTINEL-TCP-STATES.md`, notamment son §9. Les anciennes numérotations de critères de ce document ne doivent plus être utilisées pour planifier ou valider une implémentation.
++
++**Statut** : spécification pour ticket futur. **Aucune implémentation.** **Réconciliée le 2026-11-12** avec les décisions du propriétaire (statuts ci-dessous) ; reste une proposition tant que son emplacement canonique (DEC-01) n'est pas tranché. Version de référence proposée : `docs-proposees/SENTINEL-TCP-STATES.md`. Lecture seule ; aucun code, test, Skill, document maître, base ni `~/.netlab` modifié ; aucun scan réseau réel.
+ **Référence de code** : `origin/a4-arena` = `9034f01` (clone de lecture `/tmp/audit-global-ref`, HEAD `9034f01`, statut vide ; `/tmp/audit-spec-ref` absent).
+ **Documents liés** : `PROPOSITION-A1-formalisation-TCP.md` (détail des tables, corrigé) ; `RAPPORT-verification-A1-chaine-production.md` (preuves et verdicts V1-V21) ; `RAPPORT-complement-A1-transitions-ports.md` (constats A1-1 à A1-8).
+ **Preuves** : `preuves/a1/a1_chain_verify.py` (harnais production), `.log`, `.json`, `a1_chain_details_sample.txt` ; `preuves/a1/a1_model_spec.py` (modèle de spécification, pas une preuve de conformité).
+@@ -46,7 +49,7 @@
+ ### 2.3 Transitions — `sentinel/sentinel_manager.py`
+ 
+ - `_compute_port_transitions` (l.460-505) : remplacer « absent de `known_open` ⇒ +1 » par la table §3.
+-- Remise à zéro sur `ScanFailedError` : bloc `except` l.626-636, vidage `host_absent_count` et `port_absent_count` l.633 (conserver).
++- Remise à zéro sur `ScanFailedError` : bloc `except ScanFailedError` l.629-636, vidage `host_absent_count` l.632 et `port_absent_count` l.633 (conserver).
+ - `ScanDegradedError` partiel : les hôtes à `ports=None` sont traités comme INCOMPLETE (§3, ligne « scan incomplet ») ; les hôtes complets continuent normalement (mesuré : S4).
+ - `NetworkState.port_absent_count` (l.291) : à renommer en `closed_streak` **ou** à conserver avec sémantique documentée. Recommandation : conserver le nom pour limiter le diff.
+ - `_rebuild_transition_state` (l.300-362) : `port_absent_count` n'est pas restauré (R7, déjà le cas). Ne pas le restaurer.
+@@ -160,7 +163,7 @@
+ 2. **Effet de A1** : un `filtered` ou `open|filtered` ne produit plus d'événement → plus de libellé « Port N closed » pour un état incertain. Le défaut A1-1 disparaît **par construction** après correction.
+ 3. **Limite** : le libellé persisté (`port N not open`, `events.details.detail`) et le rapport HTML (`reports/sentinel_report.py` l.27-35, `detail` brut) restent inchangés. Le libellé « Port N closed » reste imposé à tout `port_not_open`, y compris un ancien événement issu d'un `filtered` (indiscernable, voir §10).
+ 4. **D1 : distinction approuvée ; libellé [OUVERT]** : changer le libellé exige de modifier `tests/test_sentinel_event_display.py` l.76-82 (impose « Port 80 closed » pour tout `port_not_open`) et `_PORT_NOT_OPEN_DETAIL` (`monitor_view.py` l.49). Tant que D1 n'est pas tranché : **aucun changement de libellé**.
+-5. **Aucune présentation « filtered »** tant que D5 n'est pas tranché (pas de support persisté pour l'afficher).
++5. **Aucune présentation « filtered »** : D5-B ne persiste que la preuve de fermeture ; rien ne soutient un affichage « filtered » (pas de support persisté).
+ 
+ ---
+ 
+@@ -168,6 +171,8 @@
+ 
+ ### 7.1 Critères (implémentation future)
+ 
++> **DOCUMENT HISTORIQUE — NON NORMATIF.** Les numéros CA ci-dessous sont anciens : utiliser `SENTINEL-TCP-STATES.md` §9.
++
+ - **CA-1** : `filtered` ×2 sur un port `open` → aucun événement ; `closed_streak` ne progresse pas.
+ - **CA-2** : `closed`, `filtered`, `closed` → aucun événement au 3e cycle ; un 4e `closed` → `port_not_open`.
+ - **CA-3** : `open|filtered`, `unfiltered`, absent, invalide, `bogus` → aucun événement de fermeture (×2 et plus).
+@@ -190,7 +195,7 @@
+ |---|---|---|---|
+ | Parsing : `filtered`, `open\|filtered`, `unfiltered`, sans état, `bogus` | `tests/test_tcp_scan.py` (ajout) | R3-R5, CA-3, CA-8 | ajout |
+ | Attribution `<extraports>` (`ports=` présent / absent / contradictoire / multi-groupes) | `tests/test_tcp_scan.py` (ajout) | §4.1, CA-12 | ajout |
+-| Fixture `filtered` unique (sortie réelle nmap 7.95) | `tests/test_tcp_scan.py` l.291-315 | non-régression | inchangé |
++| Fixture `filtered` unique (annotée « sortie réelle nmap 7.95 » : non prouvée, V6) | `tests/test_tcp_scan.py` l.291-315 | non-régression | inchangé |
+ | `filtered` → `[]` (retour de `_parse`) | `tests/test_tcp_scan.py` l.442-455 | CA-9 | inchangé |
+ | Sortie annotée « Real nmap 7.95 » (V6 : non prouvée comme sortie réelle) | `tests/test_tcp_scan.py` l.897-909 (`test_real_nmap_*`) | CA-10 | inchangé |
+ | Séquences §3 (table complète) | `tests/test_sentinel_manager.py` (ajout) | CA-1 à CA-7 | ajout |
+@@ -261,7 +266,7 @@
+ 2. **Sémantique de `port_absent_count`** : les tests `test_sentinel_manager.py` l.427-440 et l.593-597 supposent « absent ⇒ +1 ». À réviser, non affaiblir.
+ 3. **Parsing `<extraports>`** : la règle d'attribution par `ports=` repose sur une hypothèse non vérifiée sur sortie réelle. Si nmap omet `ports=`, le cas tombe en `UNCERTAIN` (conservateur) : moins d'alertes, pas de fausse alerte.
+ 4. **Groupe `extraports state="open"`** : non vérifié sur sortie réelle. Traité en `UNCERTAIN`.
+-5. **Redémarrages répétés** : si l'intervalle entre redémarrages est inférieur à deux cycles, une fermeture n'est jamais confirmée (S3). Conséquence directe de R7 : à signaler au propriétaire.
++5. **Redémarrages répétés** : si l'intervalle entre redémarrages est inférieur à deux cycles, une fermeture n'est jamais confirmée (S3). Conséquence directe de R7, documentée (non soumise à arbitrage).
+ 6. **Quota** : une fermeture masquée n'est jamais réaffichée (`notifications.py` l.128-131). Un `new_port` réel sur le même hôte peut être masqué (S9 : B5 masqué).
+ 7. **Baseline (D6)** : tant que D6 n'est pas tranché, l'apprentissage continue d'accepter les ports `filtered` absents de la baseline (L1 : `new_port` plus tard).
+ 
+--- a/PROPOSITION-A1-formalisation-TCP.md
++++ b/PROPOSITION-A1-formalisation-TCP.md
+@@ -1,9 +1,9 @@
+ # Proposition A1 — formalisation de la politique TCP (états `open` / `closed` / `filtered` / incertains)
+ 
+-**Statut** : proposition de spécification, lecture seule. **Réconciliée le 2026-09-24** avec les décisions du propriétaire (§0). Remplacée comme spécification de référence par `SPEC-A1-consolidee.md` (réconciliée) et `docs-proposees/SENTINEL-TCP-STATES.md`. **Aucune implémentation.** Aucun code, test, Skill, document maître, base ni `~/.netlab` modifié. Aucun scan réseau réel.
++**Statut** : proposition de spécification, lecture seule. **Réconciliée le 2026-11-12** avec les décisions du propriétaire (§0). Remplacée comme spécification de référence par `SPEC-A1-consolidee.md` (réconciliée) et `docs-proposees/SENTINEL-TCP-STATES.md`. **Aucune implémentation.** Aucun code, test, Skill, document maître, base ni `~/.netlab` modifié. Aucun scan réseau réel.
+ **Référence de code** : `origin/a4-arena` = `9034f01` (clone de lecture `/tmp/audit-global-ref`, HEAD `9034f01`, status vide ; `/tmp/audit-spec-ref` absent).
+ **Rapport d'audit associé** : `RAPPORT-complement-A1-transitions-ports.md` (constats A1-1 à A1-8). Le présent document ne le remplace pas.
+-**Mise à jour de vérification finale** : voir `RAPPORT-verification-A1-chaine-production.md` (harnais de chaîne, parties B et C) et `SPEC-A1-consolidee.md`. Corrections appliquées : D6 (§11, modèle ≠ production), remise à zéro `ScanFailedError` (l.626-636), comptage §5, DTD lu (§1.2, §13).
++**Mise à jour de vérification finale** : voir `RAPPORT-verification-A1-chaine-production.md` (harnais de chaîne, parties B et C) et `SPEC-A1-consolidee.md`. Corrections appliquées : D6 (§11, modèle ≠ production), remise à zéro `ScanFailedError` (l.629-636), comptage §5, DTD lu (§1.2, §13).
+ **Preuves** : `preuves/a1/a1_model_spec.py` (modèle de spécification), `.json`, `.log` (rc 0). Empreintes dans `SHA256SUMS-A1-formalisation.txt`.
+ 
+ Légende : **[APPROUVÉ]** = règle acquise par décision du propriétaire. **[PROPOSITION]** = recommandation non tranchée. **[OUVERT]** = décision non prise, bloquante ou non. **[ÉCARTÉ]** / **[REPORTÉ]** = options fermées par décision (voir §0).
+@@ -245,7 +245,7 @@
+ | `detect/tcp_scan.py` | `_check_tcp_xml` l.354 (complétude : **pas de changement attendu**), `_parse_tcp_xml_with_states` l.444 (états, l.493), `parse_sentinel_open_ports` l.558 | modifié |
+ | `sentinel/monitor.py` | l.276-282 (appel), | appelant, adaptation |
+ | `sentinel/baseline.py` | l.454-481 | appelant, **non modifié** tant que D6 ouvert |
+-| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291, `_rebuild_transition_state` l.300-362, `_compute_port_transitions` l.460-505, remise à zéro `ScanFailedError` l.626-636 (vidage l.633 ; chemin `ScanDegradedError` partiel mesuré, voir RAPPORT-verification §1) | modifié (cœur) |
++| `sentinel/sentinel_manager.py` | `NetworkState.port_absent_count` l.291, `_rebuild_transition_state` l.300-362, `_compute_port_transitions` l.460-505, remise à zéro `ScanFailedError` l.629-636 (vidage l.633 ; chemin `ScanDegradedError` partiel mesuré, voir RAPPORT-verification §1) | modifié (cœur) |
+ | `sentinel/monitor_view.py` | `presentation_detail` l.52-61 | effet indirect |
+ | `sentinel/alerting.py` | `NO_FINDING_TYPES` l.67 ; `evidence` non persistée l.173 | inchangé (D5 le concerne) |
+ | `reports/sentinel_report.py` | l.27-35 | inchangé (D1) |
+@@ -271,7 +271,7 @@
+ | Option | Description | Avantages | Risques |
+ |---|---|---|---|
+ | **D5-A** | Nouvelle table additive `sentinel_tcp_observations(network_id, ip, port, cycle_ts, state, scan_status, session_id)`, créée par `CREATE TABLE IF NOT EXISTS` | Historique complet, requêtable, prépare D6 et une alerte « filtré » future | Volume : 1030 ports × hôtes × cycles ; nécessite une politique de rétention (non tranchée) ; migration additive uniquement |
+-| **D5-B** | Ajouter la preuve dans `events.details` (JSON libre, clé additionnelle : `observed`, `consecutive_closed`, `cycle_ts`, `scan_status`) | Aucune migration de schéma ; contenu déjà persisté ; faible risque | Rien n'est persisté pour les états `filtered` (pas d'événement) ; `details` alimente le budget d'événements |
++| **D5-B** | Ajouter la preuve dans `events.details` (JSON libre, clé additionnelle `proof = {observed, consecutive, scan, run}`, alignée sur `SPEC-A1-consolidee.md` §10) | Aucune migration de schéma ; contenu déjà persisté ; faible risque | Rien n'est persisté pour les états `filtered` (pas d'événement) ; `details` alimente le budget d'événements |
+ | **D5-C** | Ne rien persister de plus | Aucun changement | Pas de preuve auditable ; A1-8 (`evidence` non persistée) reste |
+ 
+ **Précédent de migration** : `core/database.py` l.1859-1863 ajoute des colonnes à `sentinel_control` avec `ALTER TABLE … ADD COLUMN … DEFAULT 0`, de façon additive. D5-A suit le même principe.
+--- /dev/null
++++ b/docs-proposees/TABLEAU-tickets-dependances.md
+@@ -0,0 +1,47 @@
++# Tableau des tickets et dépendances — plan global v2
++
++**Statut : PROPOSITION.** Aucun ticket n'est approuvé, autorisé ni validé. Commit de référence : `9034f01` (`origin/a4-arena`). Date de rédaction : 2026-11-12. Source détaillée : `docs-proposees/PLAN-tickets-global.md`.
++
++**Légende.** *Bloqué par* : ce qui doit être réglé avant. *Bloque* : tickets qui attendent celui-ci. *Suivant* : ticket désigné à la validation.
++
++| Ticket | Titre | Priorité | Statut | Bloqué par | Bloque | Suivant (si validé) |
++|---|---|---|---|---|---|---|
++| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (rc ignoré, stdout/stderr fusionnés, repli texte cassé) | P1 | Proposition ; premier après l'Étape 0 | Étape 0 | A1 (ordre) | A1 |
++| SMB-02 | Vérification de compatibilité `enum4linux-ng` (1.3.10 rapportée ; `-oJ` ; `--json` absent) — intégrée à SMB-01 | P2 | Vérification | SMB-01 | TOOL-01 | — (dans SMB-01) |
++| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; TCP-01 à TCP-03 sous-tâches ; TCP-04 non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — | CRED-01 (ordre), D5 | CRED-01 |
++| TCP-01 | (sous-tâche A1) Parsing, attribution, validation XML commune | — | Inclus dans A1 | — | TCP-02 | — |
++| TCP-02 | (sous-tâche A1) Compteurs par port connu ; hôte absent ; `closed → filtered` | — | Inclus dans A1 | TCP-01 | TCP-03 | — |
++| TCP-03 | (sous-tâche A1) Hôte entièrement filtré ; tests S1–S11 | — | Inclus dans A1 | TCP-02 | — | — |
++| TCP-04 | (non-régression A1) Compteurs non restaurés après redémarrage (S2, S3, S10) | — | Inclus dans A1 | TCP-02 | — | — |
++| CRED-01 | Résolveurs de chemins sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 | A1 (ordre), DEC-05 | D5 (ordre) | D5 |
++| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée | A1 | D1 | D1 |
++| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert | D5, DEC-03 | — | TOOL-01 |
++| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1) | P2 | Proposition ; **indépendant** | DEC-04 (au moment du ticket) | — | — (hors séquence) |
++| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 | — | REP-01 |
++| DOC-01 | Dérives de la documentation maître (HEAD, commits, CONFIDENCE-CLI) | P2 | **Étape 0** (hors séquence technique) ; patch prêt, non appliqué à `docs/` | DEC-02 | SMB-01 (ordre) | SMB-01 |
++| REP-01 | « 0 » du rapport = quota de notification | P2 | Proposition | DEC-16 | — | OS-01 |
++| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure d'abord | DEC-12 | — | SCO-01 |
++| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 | — | SCO-02 |
++| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 | — | A2-01 |
++| A2-01 | Résolution d'identifiants `findings show` / `sentinel findings show` | P2 | Proposition ; décision | DEC-11 | — | CRED-03 |
++| CRED-03 | Message de coffre incomplet | P3 | Proposition | — | — | SCO-03 |
++| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 | — | VERIFY-01 |
++| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — | — | DOC-02 |
++| DOC-02 | Casse `.cursor/rules/sentinelX.mdc` l.9 ; chemins absolus `docs/MASTER-REFERENCE.md` | P3 | Proposition (casse reproduite ; Skill `impl-tracking.md` retiré du constat) | — | — | A2-02 |
++| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — | — | — (fin de l'ordre) |
++| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22 ; sans ticket** | — | — | — |
++| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite ; sans ticket de code** | — | — | — |
++
++## Points de décision et de vérification (non des tickets)
++
++| Réf. | Point | Type |
++|---|---|---|
++| DEC-02 | Validation du plan et des propositions documentaires après revue Kiro | Décision ouverte |
++| DEC-03 | Libellé exact de D1 | Décision ouverte |
++| DEC-04 | Politique D6 (C2 ou C3) | Décision ouverte, examinée au ticket D6 |
++| DEC-05 | Emplacement du coffre et migration (CRED-01) | Décision ouverte |
++| DEC-07, DEC-08, DEC-09, DEC-11, DEC-12, DEC-16 | Points produit ou mesure (SCO, A2, OS, REP) | Décisions ouvertes |
++| DEC-14 | Chemins absolus : docs (DOC-02) et défauts de code `core/dependencies.py` l.48-49 | Décision ouverte pour le code |
++| EMP-01 | Emplacement canonique de la spec A1 : `docs/SENTINEL-TCP-STATES.md` | Proposition, vérification Kiro |
++| ARENA-ROLE | Statut canonique de `ARENA.md` (hors dépôt ; révisions 12 et 13 citées) | Point à vérifier |
++| KIRO-DOSSIER | Dossier réellement examiné par Kiro (`docs-processes/`, `(1)`/`(2)` introuvables) | Point à vérifier |
+--- /dev/null
++++ b/docs-proposees/IMPLEMENTATION-TRACKING-section-audit.md
+@@ -0,0 +1,29 @@
++## Tickets d'audit (revue du 2026-11-12) — PROPOSITION, non approuvée
++
++> Source : `docs-proposees/PLAN-tickets-global.md` (version 2). **Aucun ticket ci-dessous n'est approuvé, ni autorisé, ni implémenté.** Aucune case `[x]` n'est ajoutée pour un ticket de correction. Le ticket suivant est désigné à la validation de chaque ticket. Ordre : plan §5.
++
++| Ticket | Anomalie | Priorité | Statut | Dépend de |
++|---|---|---|---|---|
++| SMB-01 | `smb_enum` : échec d'outil lu comme « aucun résultat » (code retour ignoré ; repli texte) | P1 | Proposition ; premier ticket après l'Étape 0 | Étape 0 |
++| A1 | Fiabilisation des états TCP de Sentinel Monitor (ticket parent ; sous-tâches TCP-01 à TCP-03 ; TCP-04 en non-régression) | P1 | **Non terminé** ; autorisation d'implémentation requise | — |
++| CRED-01 | Coffre et bases sous `Path.home()` ≠ utilisateur réel (sudo) | P1 | Planifié, après A1 ; DEC-05 requise | DEC-05 |
++| D5 | Preuve de fermeture dans `events.details` (D5-B) | P3 | **Conception approuvée** ; implémentation non autorisée ; après A1 | A1 |
++| D1 | Présentation : distinction preuve / historique | P2 | Distinction approuvée ; libellé ouvert ; après D5 | D5, DEC-03 |
++| D6 | Politique des ports filtrés à l'apprentissage baseline (hors A1, indépendant) | P2 | Proposition ; DEC-04 examinée au moment du ticket | DEC-04 |
++| SMB-02 | Vérification de compatibilité `enum4linux-ng` (version et options), intégrée à SMB-01 | P2 | Vérification | SMB-01 |
++| TOOL-01 | `netlab doctor` ne vérifie que `--help` | P2 | Proposition | SMB-02 |
++| REP-01 | « 0 » du rapport = quota de notification 60 min | P2 | Proposition | DEC-16 |
++| OS-01 | Timeouts OS Nmap et messages (causes non mesurées) | P2 | Hypothèse ; mesure requise | DEC-12 |
++| SCO-01 | Libellé « CVSS » | P2 | Partiel ; à confirmer | DEC-09 |
++| SCO-02 | Port `info` CONFIRMED dans le score global | P2 | Décision produit | DEC-07 |
++| A2-01 | Résolution d'identifiants incohérente | P2 | Proposition ; décision requise | DEC-11 |
++| DOC-01 | HEAD déclaré obsolète, commits non consignés, CONFIDENCE-CLI | P2 | Étape 0 (hors séquence technique) ; patch prêt, non appliqué | DEC-02 |
++| CRED-03 | Message de coffre incomplet | P3 | Proposition | — |
++| SCO-03 | Ports 512–514 sans règle | P3 | Décision produit | DEC-08 |
++| VERIFY-01 | Findings `sentinel.*` en PARTIAL « Unsupported module » | P3 | Décision | — |
++| DOC-02 | Chemins et casse (`.cursor/rules/sentinelX.mdc`) | P3 | Proposition | — |
++| A2-02 | Nom de commande « rescan findings » (documentation) | P3 | Proposition | — |
++| CRED-02 | `--service ssh` sans candidat SSH | — | **Conforme à T22, sans ticket** | — |
++| NET-01 | Réseau `192.168.57.0/24` | — | **Non reproduite, sans ticket de code** | — |
++
++**Spécification A1** : `docs-proposees/SENTINEL-TCP-STATES.md`. Emplacement canonique proposé : `docs/SENTINEL-TCP-STATES.md` (vérification Kiro).
+--- a/docs-proposees/TRANSMISSION-revue-Kiro-et-Nova.md
++++ b/docs-proposees/TRANSMISSION-revue-Kiro-et-Nova.md
+@@ -1,67 +1,103 @@
+-# Transmission du dossier — revue Kiro et points A1 pour Nova
++# Transmission — propositions documentaires globales (version 2) — pour Nova, puis seconde vérification par Kiro
+ 
+-**Date** : 2026-09-24 (date du jour fournie).
+-**Référence de code** : `origin/a4-arena` = `9034f01` ; clone de lecture `/tmp/audit-global-ref` (arbre propre).
+-**Statut** : dossier **prêt pour revue**. Aucun élément n'est appliqué, ni commité, ni poussé. Aucun fichier du dépôt n'a été modifié.
++**Statut : dossier déposé, NON TRANSMIS.** Cet environnement ne dispose d'aucun canal de transmission vers Kiro ou Nova. Le dossier doit être remis par le propriétaire ou transmis par un canal disponible.
+ 
+-> Remarque de mécanisme : l'agent ne dispose d'aucun canal direct vers Kiro ni vers Nova. La transmission consiste en ce dossier (chemin ci-dessous), à remettre au propriétaire ou à l'opérateur qui gère Kiro et Nova. Les SHA-256 du dossier figurent dans `SHA256SUMS-propositions-globales.txt`.
++| Élément | Valeur |
++|---|---|
++| Date de rédaction | 2026-11-12 |
++| Commit de référence | `9034f01` (`origin/a4-arena`, HEAD réel, clone de lecture propre) |
++| Dossier | `/home/user/AUDIT-SentinelX-global/` |
++| Périmètre | Documents et diffs uniquement. Aucune modification du dépôt, aucun code, test, Skill appliqué, commit, push, nettoyage ni scan réel. |
+ 
+----
++## 1. Ce qui est demandé
+ 
+-## 1. Demande de revue à Kiro (revue indépendante)
++1. **Nova** : vérification indépendante des corrections (§3) et de leurs références.
++2. **Kiro** : seconde vérification indépendante. Les points de contrôle sont au §4.
++3. **Propriétaire** : décisions ouvertes au §5. Rien n'est approuvé par ce dossier.
+ 
+-Kiro est invité à vérifier, **sans modifier les fichiers du dépôt** :
++## 2. Livrables
+ 
+-1. **Réconciliation A1** : `SPEC-A1-consolidee.md` et `PROPOSITION-A1-formalisation-TCP.md` (statuts [APPROUVÉ] / [OUVERT] ; §0 et §12 de la proposition ; §5, §10, §11, §12 de la spec). Diff : `diffs/PROPOSITION-A1-reconciliation.diff` (la spec a été modifiée en place, sans copie préalable : pas de diff, voir réserve K-3).
+-2. **Spécification canonique** : `docs-proposees/SENTINEL-TCP-STATES.md`. Points à examiner en priorité :
+-   - tableau §5 (séquences avant/après) : vérifier chaque ligne contre le harnais `preuves/a1/a1_chain_verify.log` ;
+-   - §3.2 (attribution `<extraports>`, marqué [PROPOSITION]) ;
+-   - §7.1 (clés de `proof`, [PROPOSITION]).
+-3. **Plan de tickets** : `docs-proposees/PLAN-tickets-global.md`. Vérifier : chaque preuve citée, chaque priorité, le statut « Partiel » de SCO-01, l'hypothèse SMB-02, la liste des décisions (§5).
+-4. **Patches documentaires** : `docs-proposees/MASTER-REFERENCE.md` et `docs-proposees/IMPLEMENTATION-TRACKING.md`, diffs `diffs/master-reference.diff` et `diffs/impl-tracking-v2.diff` (bases `docs-proposees/base-9034f01/`). Vérifier : `git cat-file -e` sur chaque SHA cité ; statut CONFIDENCE-CLI.
+-5. **Harnais** : `preuves/a1/a1_chain_verify-run5.json` (HOME neuf) : sections `parse` identiques à run 4. Attention : le champ `verdict` de `parse` compare à la production, pas à la spec (voir `RAPPORT-verification-A1` §12).
+-
+-Questions précises pour Kiro :
+-- K-Q1. La règle « `[]` n'est pas une preuve de fermeture » (ARENA §9.6 est en contradiction) est-elle correctement isolée dans le plan (§6) ?
+-- K-Q2. Les tickets P1 (SMB-01, TCP-01 à TCP-03, CRED-01) sont-ils justifiés par les preuves citées ?
+-- K-Q3. Le statut « Hypothèse » de SMB-02 et OS-01, et « Partiel » de SCO-01, sont-ils corrects ?
+-- K-Q4. Y a-t-il une incohérence entre `docs-proposees/` et les statuts de `SPEC-A1-consolidee.md` ?
+-
+----
++| Livrable | Chemin | Statut |
++|---|---|---|
++| Plan global corrigé (v2) | `docs-proposees/PLAN-tickets-global.md` | Proposition |
++| Table des tickets et dépendances | `docs-proposees/TABLEAU-tickets-dependances.md` | Proposition |
++| Spécification A1 canonique proposée | `docs-proposees/SENTINEL-TCP-STATES.md` | Proposition (emplacement proposé `docs/SENTINEL-TCP-STATES.md`) |
++| Spécification A1 consolidée | `SPEC-A1-consolidee.md` | Spécification pour ticket futur, aucune implémentation |
++| Formalisation A1 (rapport de proposition) | `PROPOSITION-A1-formalisation-TCP.md` | Proposition, distinction approuvé / ouvert |
++| Master Reference proposé | `docs-proposees/MASTER-REFERENCE.md` | Proposition ; `docs/MASTER-REFERENCE.md` non modifié |
++| Implementation Tracking proposé | `docs-proposees/IMPLEMENTATION-TRACKING.md` | Proposition ; `docs/IMPLEMENTATION-TRACKING.md` non modifié |
++| Section d'audit du suivi | `docs-proposees/IMPLEMENTATION-TRACKING-section-audit.md` | Proposition |
++| Skill Cursor (casse seule) | `skills-proposees/sentinelX.mdc` | Proposition ; `.cursor/rules/sentinelX.mdc` non modifié |
++| Skill Kiro d'implémentation | **Retiré du paquet actif (V2.2)** ; fichier conservé dans le dossier d'audit, non inclus | Skill canonique non modifié ; aucune proposition de Skill Kiro dans le paquet |
++| Diff global documentaire | `diffs/GLOBAL-documentaire.diff` | Généré |
++| Diffs individuels | `diffs/*.diff` (voir `MANIFEST-propositions-globales.txt`) | Générés |
++| Manifeste et sommes | `MANIFEST-propositions-globales.txt`, `SHA256SUMS-propositions-globales.txt` | Générés ; à vérifier par `sha256sum -c` |
++| Versions antérieures | `docs-proposees/archive-v1/`, `diffs/archive-v1/` | Historique, non intégré au paquet |
++
++**Commit et état Git** : `git -C /tmp/audit-global-ref rev-parse HEAD` → `9034f01` ; `git status --short` → vide ; `git ls-remote origin a4-arena` → `9034f0131ebeaf63dc51bf217cea3ec3f6ab068e`. Ce clone est un clone de lecture, à recréer s'il a disparu (le répertoire `/tmp` n'est pas conservé).
++
++## 3. Corrections intégrées (revue Kiro)
++
++| Point | Correction |
++|---|---|
++| CRED-02 | Reclassé **conforme à T22**, sans ticket, sans ajout de candidat SSH |
++| SMB-01 / SMB-02 | `enum4linux-ng` 1.3.10 ; `--json` absent ; export `-oJ OUT_JSON_FILE` (rapporté par le propriétaire, vérifié sur son poste, non reproduit ici). SMB-01 : commande compatible, lecture du JSON, code retour, stdout/stderr séparés, repli texte. Code non nul jamais « aucun résultat ». SMB-02 : vérification de compatibilité. |
++| NET-01 | Non reproduite ; `--target` obligatoire ; P1 provisoire et DEC-10 retirés ; aucun ticket de code |
++| A1 | Ticket parent unique « Fiabilisation des états TCP de Sentinel Monitor » ; TCP-01/02/03 sous-tâches ; TCP-04 non-régression ; inclut hôte absent, hôte entièrement filtré, fermetures individuelles, `closed → filtered`, attributions ambiguës |
++| D5 / D1 / D6 | D5-B : conception approuvée, implémentation non autorisée, après A1 ; D1 : distinction approuvée, libellé ouvert, après D5 ; D6 : ticket indépendant hors A1 |
++| ARENA §9.6 / DEC-13 | Supersédée par la politique A1 approuvée ; `docs/MASTER-REFERENCE.md` est le document maître officiel ; rôle de `ARENA.md` à vérifier |
++| DEC-15 | Retirée comme arbitrage ; risque des redémarrages répétés documenté comme conséquence de R7 |
++| DEC-01 | Proposition d'emplacement `docs/SENTINEL-TCP-STATES.md`, justifiée par la convention de nommage de `docs/` |
++| DOC-02 | Casse reproduite dans `.cursor/rules/sentinelX.mdc` l.9 ; Skill Kiro retiré du constat ; chemins absolus `docs/MASTER-REFERENCE.md` l.26, l.310-311 conservés |
++| Chemins | Vérifiés dans `9034f01` ; `docs-processes/` et `(1)`/`(2)` introuvables, non intégrés |
++| Dates | Rédaction et référence : 2026-11-12 ; 2026-09-24 retiré de toutes les propositions |
++| Ordre | SMB-01 ; A1 ; CRED-01 ; D5 après A1 ; D1 après D5 ; autres selon dépendances ; D6 indépendant |
++| Spec A1 | `ScanFailedError` l.629-636 (et non l.626-636) ; fixture `filtered` « annotée », non prouvée (V6) |
++
++## 3bis. Corrections V2.2 (seconde revue Kiro : recevable après corrections)
++
++| Correction | Application |
++|---|---|
++| Étape 0 préalable | DOC-01 (Master, Tracking, spec A1 canonique, réconciliation des commits et références) sort de la séquence technique. Patch appliqué par le propriétaire, dépôt vérifié, décisions présentes dans les fichiers canoniques. **SMB-01 ne commence qu'après.** (`PLAN` §5.0) |
++| Skill Kiro retiré du paquet actif | La proposition de Skill Kiro (fichier et diff) n'est plus incluse. Fichiers conservés dans le dossier d'audit. Retirée du manifeste, du README, de la transmission et du diff global. Skill canonique non modifié. Diff Cursor (casse seule) conservé. |
++| CA-16 séparé de A1 | CA-16 est rattaché à D1 (`SENTINEL-TCP-STATES.md` §9.2). D5 produit la preuve dans `events.details` ; D1 distingue événements nouveaux et historiques. A1 n'exige ni `proof` ni changement de libellé. Chaîne : A1 → D5 → D1. |
++
++## 4. Points de contrôle demandés à Kiro (seconde vérification)
++
++1. **Dossier examiné** : identifier le dossier réellement examiné par Kiro. `docs-processes/` et les doublons `(1)`/`(2)` n'existent pas dans l'environnement d'audit.
++2. **A1** : vérifier que le ticket parent unique couvre tous les points approuvés (§2 du plan) et qu'aucun autre ticket A1 autonome ne subsiste.
++3. **Chemins** : `ls` sur chaque chemin cité dans les propositions, dans le clone `9034f01`.
++4. **Références de lignes** : `detect/smb_enum.py` l.133, l.150, l.157, l.169, l.183, l.509 ; `tests/test_smb_enum.py` l.122 ; `sentinel/monitor.py` l.264, l.276-282 ; `detect/tcp_scan.py` l.337, l.444, l.558, l.601 ; `sentinel/baseline.py` l.481-483 (appel sans `strict=True`) ; `sentinel/sentinel_manager.py` l.291, l.300-362, l.460-505, l.629-636 (vidage l.632-633) ; `tests/test_tcp_scan.py` l.291-315, l.442-455, l.897-909 ; `.cursor/rules/sentinelX.mdc` l.9.
++5. **Emplacement de la spec** : valider `docs/SENTINEL-TCP-STATES.md` (EMP-01).
++6. **Statut de `ARENA.md`** : confirmer son rôle canonique ou non.
++7. **Statuts** : aucune proposition présentée comme décision approuvée ; aucun ticket présenté comme validé.
++8. **SMB-02** : la version 1.3.10 et `-oJ` sont rapportés, non reproduits dans l'environnement d'audit. À confirmer par Kiro si possible, par lecture de `--help`.
++9. **L1 et L2** : valider leur rattachement à **D6** (ticket indépendant hors A1), et non à A1.
++10. **CRED-01** : valider que le périmètre se limite aux chemins dont la divergence sous sudo est démontrée (§4.3 du plan), et que le constat NFC/NFD reste un constat distinct, sans ticket.
++11. **Étape 0** : vérifier que DOC-01 est sorti de la séquence technique (`PLAN` §5.0) et que SMB-01 ne commence qu'après l'Étape 0.
++12. **CA-16 et numérotation** : vérifier que CA-16 est rattaché à D1 et que les critères A1 (CA-1 à CA-15, CA-17, CA-18) n'exigent ni `proof` ni changement de libellé. Les identifiants CA-n sont propres à chaque document : `SPEC-A1-consolidee.md` (CA-11 = libellé) ne correspond pas à `SENTINEL-TCP-STATES.md` (CA-11 = anciens événements). Référence canonique : `SENTINEL-TCP-STATES.md`.
++
++## 5. Décisions ouvertes au propriétaire
++
++DEC-02 (validation du plan ; condition de l'Étape 0) ; DEC-03 (libellé D1) ; DEC-04 (D6 C2/C3, au ticket D6) ; DEC-05 (procédure de migration, seulement si CRED-01 change un chemin) ; DEC-07 (SCO-02) ; DEC-08 (SCO-03) ; DEC-09 (SCO-01) ; DEC-11 (A2-01) ; DEC-12 (OS-01) ; DEC-14 (chemins absolus, défauts et messages de code) ; DEC-16 (REP-01) ; DEC-17 (normalisation NFC/NFD de la phrase du coffre, constat distinct).
++
++## 6. Réserves
++
++- Aucune exécution d'`enum4linux-ng` réel ; aucun scan réel ; harnais A1 avec sondes remplacées.
++- Paquet de revue : `paquet-Kiro-propositions-globales-v2.2.zip` (SHA-256 dans `SHA256-paquet-zip.txt`, hors du zip). Le paquet v2.1 (`paquet-Kiro-propositions-globales-v2.zip`) est remplacé ; il contient encore le Skill Kiro retiré en V2.2 et ne doit pas être transmis. **Non transmis** à Nova ni à Kiro : aucun canal disponible ; le paquet est déposé.
++- `~/.netlab` non lu, non modifié (4744 entrées mesurées antérieurement). Aucun secret demandé.
++- Dates des rapports antérieurs non réconciliées (leur date de rédaction d'origine n'est pas tracée).
++- Structure réelle des `<extrareasons>` Nmap et sémantique de `extraports state=open` : non vérifiées hors fixtures.
++- Les clones locaux non alignés (`/home/user/sentinelX`, `sentinelX-impl`, `sentinelX-reference`) n'ont pas été touchés.
+ 
+-## 2. Points A1 restants pour Nova (à soumettre au propriétaire)
++## 7. Sommes antérieures (historique, non recalculées)
+ 
+-Nova ne soumet que les points **non approuvés**. Les points approuvés ne doivent pas être rouverts.
++Les fichiers suivants ont été corrigés volontairement dans ce cycle. Leurs sommes antérieures ne correspondent donc plus. **Ces écarts sont attendus.** Les sommes antérieures sont conservées, non réécrites. La somme de référence pour la version 2 est `SHA256SUMS-propositions-globales.txt`.
+ 
+-| Réf. | Point | Question |
++| Fichier de sommes | Écarts constatés | Motif |
+ |---|---|---|
+-| DEC-03 | Libellé D1 | Quel libellé pour les événements avec preuve, et lequel pour l'historique sans preuve ? Proposition dans `PLAN-tickets-global.md` §5. |
+-| DEC-04 | Politique D6 (ports `filtered` à l'apprentissage) | C2 (exclusion d'hôte), C3 (drapeau), ou statu quo D6-A (= C1) ? Hors A1. |
+-| DEC-13 | ARENA §9.6 | Le texte « règle définitive » contredit les décisions approuvées (`[]` incrémente). Accepter la révision proposée (`PLAN-tickets-global.md` §6) ? |
+-| DEC-01 | Emplacement canonique de la spec A1 | `docs/SENTINEL-TCP-STATES.md` ? |
+-| DEC-15 | Réserve S3 (redémarrages répétés) | Accepter explicitement qu'un redémarrage avant chaque cycle empêche toute fermeture confirmée ? |
+-
+-Décisions **déjà approuvées** (ne pas soumettre de nouveau) : V4 (remise à zéro) ; G-a (fermetures individuelles après deux `closed` explicites) ; G-b écartée ; G-c reportée ; aucune fermeture sur `closed` → `filtered` ; validation XML commune ; D5-B ; D6 hors A1 ; compteurs non restaurés.
+-
+----
+-
+-## 3. Réserves à transmettre avec le dossier
+-
+-- **K-1 / R-1 — Horloge.** Date du jour fournie : 2026-09-24. Horloge de la sandbox : 2026-11-12. Dates de commit : 2026-11-10 et 2026-11-11. À vérifier avant toute conclusion chronologique.
+-- **K-2 — Lecture seule.** Aucun scan réel, aucune lecture de `~/.netlab`, aucun secret demandé, aucune migration de coffre. Les tests ont utilisé HOME et bases temporaires, fixtures XML et sondes remplacées.
+-- **K-3 — Diff manquant.** `SPEC-A1-consolidee.md` a été réconcilié en place : aucune copie antérieure n'existe pour un diff. Ce qui est consigné : le contenu final, et la liste des remplacements effectués (35 remplacements de statuts et de références, comptage contrôlé).
+-- **K-4 — Corrections d'audit.** Trois constats sont revus (B5-1 partiel, B2-2 décision produit, B3-2 hypothèse). Voir `PLAN-tickets-global.md` §7.
+-- **K-5 — Harnais.** Le champ `verdict` de la section `parse` mesure la conformité au comportement de production, pas à la spécification. Le critère de conformité à la spec est `spec_expected`.
+-- **K-6 — Versions.** `ARENA.md` rév. 13 utilisée ; la rév. 12 n'a pas été comparée.
+-- **K-7 — Clones non touchés.** `/home/user/sentinelX` (`2eb1b20`, 27 modifications), `sentinelX-impl` (`13e7849`, 12), `sentinelX-reference` (`2283166`, 6) : non modifiés, non alignés sur `9034f01`.
+-- **K-8 — Skills canoniques.** Non modifiées. Les propositions de Skills de l'audit précédent (`skills-proposees/`) restent non appliquées.
+-
+-## 4. Fichiers du dossier (point d'entrée)
+-
+-- Plan : `docs-proposees/PLAN-tickets-global.md`
+-- Spécification A1 : `docs-proposees/SENTINEL-TCP-STATES.md` (et `SPEC-A1-consolidee.md` réconciliée)
+-- Proposition A1 : `PROPOSITION-A1-formalisation-TCP.md` (réconciliée)
+-- Documents maîtres proposés : `docs-proposees/MASTER-REFERENCE.md`, `docs-proposees/IMPLEMENTATION-TRACKING.md`
+-- Diffs : `diffs/master-reference.diff`, `diffs/impl-tracking-v2.diff`, `diffs/PROPOSITION-A1-reconciliation.diff`
+-- Preuves : `preuves/a1/a1_chain_verify-run5.json` et `.log`, `preuves/a1/a1_chain_verify.json` et `.log` (run 4), `RAPPORT-verification-A1-chaine-production.md` §12
+-- Empreintes : `SHA256SUMS-propositions-globales.txt`
++| `SHA256SUMS-A1-formalisation.txt` | `PROPOSITION-A1-formalisation-TCP.md` | Date et `ScanFailedError` corrigés (l.3, l.248) |
++| `SHA256SUMS-A1-verification.txt` | `SPEC-A1-consolidee.md`, `PROPOSITION-A1-formalisation-TCP.md` | Corrections l.3, l.49, l.195, l.264 (spec) et date (proposition) ; corrections de cohérence de la v2.1 (§12 du plan). Somme de remplacement : `SHA256SUMS-A1-verification-v2.txt` |
++| `SHA256SUMS.txt` | proposition de Skill Kiro (retirée en V2.2), `skills-proposees/sentinelX.mdc`, `docs-proposees/IMPLEMENTATION-TRACKING-section-audit.md`, `diffs/impl-tracking.diff`, `diffs/sentinelX.mdc.diff` | Propositions remplacées (version 2) ; anciens diffs déplacés dans `diffs/archive-v1/` |
++
++Les autres fichiers de sommes (`SHA256SUMS-A1.txt`, `SHA256SUMS-B2.txt`) sont **OK**.

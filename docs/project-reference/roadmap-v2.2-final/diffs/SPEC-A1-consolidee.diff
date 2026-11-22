@@ -1,0 +1,58 @@
+--- a/SPEC-A1-consolidee.md
++++ b/SPEC-A1-consolidee.md
+@@ -1,6 +1,9 @@
+ # SPEC-A1 consolidée — politique TCP approuvée (formalisation)
+ 
+-**Statut** : spécification pour ticket futur. **Aucune implémentation.** **Réconciliée le 2026-09-24** avec les décisions du propriétaire (statuts ci-dessous) ; reste une proposition tant que son emplacement canonique (DEC-01) n'est pas tranché. Version de référence proposée : `docs-proposees/SENTINEL-TCP-STATES.md`. Lecture seule ; aucun code, test, Skill, document maître, base ni `~/.netlab` modifié ; aucun scan réseau réel.
++> **DOCUMENT HISTORIQUE — NON NORMATIF.**
++> La référence normative des critères d'acceptation A1 est `SENTINEL-TCP-STATES.md`, notamment son §9. Les anciennes numérotations de critères de ce document ne doivent plus être utilisées pour planifier ou valider une implémentation.
++
++**Statut** : spécification pour ticket futur. **Aucune implémentation.** **Réconciliée le 2026-11-12** avec les décisions du propriétaire (statuts ci-dessous) ; reste une proposition tant que son emplacement canonique (DEC-01) n'est pas tranché. Version de référence proposée : `docs-proposees/SENTINEL-TCP-STATES.md`. Lecture seule ; aucun code, test, Skill, document maître, base ni `~/.netlab` modifié ; aucun scan réseau réel.
+ **Référence de code** : `origin/a4-arena` = `9034f01` (clone de lecture `/tmp/audit-global-ref`, HEAD `9034f01`, statut vide ; `/tmp/audit-spec-ref` absent).
+ **Documents liés** : `PROPOSITION-A1-formalisation-TCP.md` (détail des tables, corrigé) ; `RAPPORT-verification-A1-chaine-production.md` (preuves et verdicts V1-V21) ; `RAPPORT-complement-A1-transitions-ports.md` (constats A1-1 à A1-8).
+ **Preuves** : `preuves/a1/a1_chain_verify.py` (harnais production), `.log`, `.json`, `a1_chain_details_sample.txt` ; `preuves/a1/a1_model_spec.py` (modèle de spécification, pas une preuve de conformité).
+@@ -46,7 +49,7 @@
+ ### 2.3 Transitions — `sentinel/sentinel_manager.py`
+ 
+ - `_compute_port_transitions` (l.460-505) : remplacer « absent de `known_open` ⇒ +1 » par la table §3.
+-- Remise à zéro sur `ScanFailedError` : bloc `except` l.626-636, vidage `host_absent_count` et `port_absent_count` l.633 (conserver).
++- Remise à zéro sur `ScanFailedError` : bloc `except ScanFailedError` l.629-636, vidage `host_absent_count` l.632 et `port_absent_count` l.633 (conserver).
+ - `ScanDegradedError` partiel : les hôtes à `ports=None` sont traités comme INCOMPLETE (§3, ligne « scan incomplet ») ; les hôtes complets continuent normalement (mesuré : S4).
+ - `NetworkState.port_absent_count` (l.291) : à renommer en `closed_streak` **ou** à conserver avec sémantique documentée. Recommandation : conserver le nom pour limiter le diff.
+ - `_rebuild_transition_state` (l.300-362) : `port_absent_count` n'est pas restauré (R7, déjà le cas). Ne pas le restaurer.
+@@ -160,7 +163,7 @@
+ 2. **Effet de A1** : un `filtered` ou `open|filtered` ne produit plus d'événement → plus de libellé « Port N closed » pour un état incertain. Le défaut A1-1 disparaît **par construction** après correction.
+ 3. **Limite** : le libellé persisté (`port N not open`, `events.details.detail`) et le rapport HTML (`reports/sentinel_report.py` l.27-35, `detail` brut) restent inchangés. Le libellé « Port N closed » reste imposé à tout `port_not_open`, y compris un ancien événement issu d'un `filtered` (indiscernable, voir §10).
+ 4. **D1 : distinction approuvée ; libellé [OUVERT]** : changer le libellé exige de modifier `tests/test_sentinel_event_display.py` l.76-82 (impose « Port 80 closed » pour tout `port_not_open`) et `_PORT_NOT_OPEN_DETAIL` (`monitor_view.py` l.49). Tant que D1 n'est pas tranché : **aucun changement de libellé**.
+-5. **Aucune présentation « filtered »** tant que D5 n'est pas tranché (pas de support persisté pour l'afficher).
++5. **Aucune présentation « filtered »** : D5-B ne persiste que la preuve de fermeture ; rien ne soutient un affichage « filtered » (pas de support persisté).
+ 
+ ---
+ 
+@@ -168,6 +171,8 @@
+ 
+ ### 7.1 Critères (implémentation future)
+ 
++> **DOCUMENT HISTORIQUE — NON NORMATIF.** Les numéros CA ci-dessous sont anciens : utiliser `SENTINEL-TCP-STATES.md` §9.
++
+ - **CA-1** : `filtered` ×2 sur un port `open` → aucun événement ; `closed_streak` ne progresse pas.
+ - **CA-2** : `closed`, `filtered`, `closed` → aucun événement au 3e cycle ; un 4e `closed` → `port_not_open`.
+ - **CA-3** : `open|filtered`, `unfiltered`, absent, invalide, `bogus` → aucun événement de fermeture (×2 et plus).
+@@ -190,7 +195,7 @@
+ |---|---|---|---|
+ | Parsing : `filtered`, `open\|filtered`, `unfiltered`, sans état, `bogus` | `tests/test_tcp_scan.py` (ajout) | R3-R5, CA-3, CA-8 | ajout |
+ | Attribution `<extraports>` (`ports=` présent / absent / contradictoire / multi-groupes) | `tests/test_tcp_scan.py` (ajout) | §4.1, CA-12 | ajout |
+-| Fixture `filtered` unique (sortie réelle nmap 7.95) | `tests/test_tcp_scan.py` l.291-315 | non-régression | inchangé |
++| Fixture `filtered` unique (annotée « sortie réelle nmap 7.95 » : non prouvée, V6) | `tests/test_tcp_scan.py` l.291-315 | non-régression | inchangé |
+ | `filtered` → `[]` (retour de `_parse`) | `tests/test_tcp_scan.py` l.442-455 | CA-9 | inchangé |
+ | Sortie annotée « Real nmap 7.95 » (V6 : non prouvée comme sortie réelle) | `tests/test_tcp_scan.py` l.897-909 (`test_real_nmap_*`) | CA-10 | inchangé |
+ | Séquences §3 (table complète) | `tests/test_sentinel_manager.py` (ajout) | CA-1 à CA-7 | ajout |
+@@ -261,7 +266,7 @@
+ 2. **Sémantique de `port_absent_count`** : les tests `test_sentinel_manager.py` l.427-440 et l.593-597 supposent « absent ⇒ +1 ». À réviser, non affaiblir.
+ 3. **Parsing `<extraports>`** : la règle d'attribution par `ports=` repose sur une hypothèse non vérifiée sur sortie réelle. Si nmap omet `ports=`, le cas tombe en `UNCERTAIN` (conservateur) : moins d'alertes, pas de fausse alerte.
+ 4. **Groupe `extraports state="open"`** : non vérifié sur sortie réelle. Traité en `UNCERTAIN`.
+-5. **Redémarrages répétés** : si l'intervalle entre redémarrages est inférieur à deux cycles, une fermeture n'est jamais confirmée (S3). Conséquence directe de R7 : à signaler au propriétaire.
++5. **Redémarrages répétés** : si l'intervalle entre redémarrages est inférieur à deux cycles, une fermeture n'est jamais confirmée (S3). Conséquence directe de R7, documentée (non soumise à arbitrage).
+ 6. **Quota** : une fermeture masquée n'est jamais réaffichée (`notifications.py` l.128-131). Un `new_port` réel sur le même hôte peut être masqué (S9 : B5 masqué).
+ 7. **Baseline (D6)** : tant que D6 n'est pas tranché, l'apprentissage continue d'accepter les ports `filtered` absents de la baseline (L1 : `new_port` plus tard).
+ 

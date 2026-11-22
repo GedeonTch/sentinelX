@@ -1,5 +1,7 @@
 # SentinelX — Kiro Steering Document v1.1
 
+> **Point d'entrée documentaire** : lire d'abord `docs/project-reference/README.md`, puis `docs/MASTER-REFERENCE.md` et `docs/IMPLEMENTATION-TRACKING.md`.
+
 > **Rule #0 for Kiro and Cursor**: Do not try to impress the project owner.
 > Build exactly what is specified, in a testable, understandable and verifiable way.
 > If an implementation requires changing the architecture, data model, pipeline,
